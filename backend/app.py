@@ -18,5 +18,8 @@ app.register_blueprint(images_bp, url_prefix='/api')
 app.register_blueprint(export_bp, url_prefix='/api')
 app.register_blueprint(pending_bp, url_prefix='/api')
 
+from routes.export import cleanup_old_exports
+cleanup_old_exports()
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

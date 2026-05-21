@@ -55,6 +55,13 @@ def compute_md5(filepath):
             h.update(chunk)
     return h.hexdigest()
 
+def _walk_nonrecursive(path):
+    """Yield (dirpath, [], filenames) for a single directory, with error handling."""
+    try:
+        yield path, [], os.listdir(path)
+    except OSError:
+        return
+
 def scan_root(root_id, allow_fuzzy=False):
     """Scan a single scan root: walk files, parse names, index new ones.
     Returns dict with counts: {added, skipped, broken_cleaned}."""
@@ -81,7 +88,7 @@ def scan_root(root_id, allow_fuzzy=False):
         ).all()
     }
 
-    walk = os.walk if root.recursive else lambda p: [(p, [], os.listdir(p))]
+    walk = os.walk if root.recursive else _walk_nonrecursive
 
     for dirpath, _, filenames in walk(root.path):
         folder_mtime = get_folder_mtime(dirpath)

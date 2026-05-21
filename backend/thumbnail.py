@@ -13,11 +13,13 @@ def generate_thumbnail(image_id, source_path):
     thumb_path = get_thumbnail_path(image_id)
     os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
 
-    img = PILImage.open(source_path)
-    img = img.convert('RGBA')
-    # Scale to fit within THUMBNAIL_SIZE keeping aspect ratio
+    try:
+        img = PILImage.open(source_path)
+        img = img.convert('RGBA')
+    except (OSError, IOError):
+        raise ValueError(f'Cannot open or process image: {source_path}')
+
     img.thumbnail(THUMBNAIL_SIZE, PILImage.LANCZOS)
-    # Paste onto white background
     bg = PILImage.new('RGBA', THUMBNAIL_SIZE, (255, 255, 255, 255))
     offset = (
         (THUMBNAIL_SIZE[0] - img.width) // 2,

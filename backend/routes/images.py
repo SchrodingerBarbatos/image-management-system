@@ -1,9 +1,14 @@
-import os
+import os, zipfile
 from flask import Blueprint, request, jsonify, send_file
-from models import session, Image, ImageVersion
+from models import session, Image, ImageVersion, ExportTask
+from config import UPLOAD_DIR
 from thumbnail import thumbnail_exists, generate_thumbnail, get_thumbnail_path
+from datetime import datetime
 
 images_bp = Blueprint('images', __name__)
+
+_SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
+                   'file_size', 'folder_path', 'folder_mtime', 'created_at', 'updated_at'}
 
 @images_bp.route('/images', methods=['GET'])
 def list_images():
@@ -21,7 +26,9 @@ def list_images():
     if confirmed is not None:
         q = q.filter(Image.confirmed == (confirmed == 'true'))
     sort = request.args.get('sort', 'created_at')
-    col = getattr(Image, sort, Image.created_at)
+    if sort not in _SORT_WHITELIST:
+        sort = 'created_at'
+    col = getattr(Image, sort)
     order = col.desc() if request.args.get('order') == 'desc' else col.asc()
     q = q.order_by(order)
     page = int(request.args.get('page', 1))
@@ -60,6 +67,7 @@ def update_image(img_id):
         img.image_type = data['image_type']
     if 'confirmed' in data:
         img.confirmed = data['confirmed']
+    img.updated_at = datetime.now().isoformat()
     session.commit()
     return jsonify(_image_to_dict(img))
 
@@ -108,10 +116,6 @@ def batch_delete():
 
 @images_bp.route('/images/batch-export', methods=['POST'])
 def batch_export():
-    """Export selected images as ZIP. Returns export_task id."""
-    from models import ExportTask
-    from config import UPLOAD_DIR
-    import zipfile, datetime
     data = request.json
     ids = data.get('ids', [])
     image_type = data.get('image_type', '')

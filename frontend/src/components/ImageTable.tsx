@@ -13,6 +13,7 @@ interface Props {
   onSelectionChange: (keys: React.Key[], rows: ImageRec[]) => void;
   onRowClick: (barcode: string) => void;
   onPageChange: (page: number, pageSize: number) => void;
+  onSortChange: (field: string, order: 'asc' | 'desc') => void;
 }
 
 const columns: ColumnsType<ImageRec> = [
@@ -29,7 +30,7 @@ const columns: ColumnsType<ImageRec> = [
 
 const ImageTable: React.FC<Props> = ({
   images, loading, total, page, pageSize,
-  selectedRowKeys, onSelectionChange, onRowClick, onPageChange,
+  selectedRowKeys, onSelectionChange, onRowClick, onPageChange, onSortChange,
 }) => {
   return (
     <Table<ImageRec>
@@ -49,6 +50,13 @@ const ImageTable: React.FC<Props> = ({
       pagination={{
         current: page, pageSize, total, showSizeChanger: true,
         onChange: onPageChange, showTotal: (t) => `共 ${t} 条`,
+      }}
+      onChange={(_pagination, _filters, sorter) => {
+        if (!Array.isArray(sorter) && sorter.column) {
+          const field = sorter.field as string;
+          const order = sorter.order === 'ascend' ? 'asc' : 'desc';
+          onSortChange(field, order);
+        }
       }}
       scroll={{ y: 'calc(100vh - 280px)' }}
     />

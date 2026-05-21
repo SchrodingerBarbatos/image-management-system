@@ -1,10 +1,18 @@
-import os, uuid
+import os, uuid, zipfile, datetime
 from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook
 from models import session, Image, ExportTask
-from config import UPLOAD_DIR
+from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS
 
 export_bp = Blueprint('export', __name__)
+
+def _col_letter(idx):
+    """Convert 0-based column index to Excel column letter(s). 0->A, 25->Z, 26->AA."""
+    result = ''
+    while idx >= 0:
+        result = chr(65 + (idx % 26)) + result
+        idx = idx // 26 - 1
+    return result
 
 @export_bp.route('/export/excel', methods=['POST'])
 def upload_excel():
@@ -18,17 +26,19 @@ def upload_excel():
     ws = wb.active
     headers = [str(cell.value) for cell in next(ws.iter_rows(min_row=1, max_row=1))]
     wb.close()
-    column_names = [f'{chr(65+i)}-{h}' for i, h in enumerate(headers)]
+    column_names = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
     return jsonify({'columns': column_names, 'upload_id': upload_id})
 
 @export_bp.route('/export/zip', methods=['POST'])
 def generate_zip():
-    import zipfile
     data = request.json
     barcode_col = data.get('barcode_column', '')
     image_type = data.get('image_type', '')
     upload_id = data.get('upload_id', '')
     selected = data.get('selected_barcodes')
+
+    if not upload_id:
+        return jsonify({'error': 'upload_id is required'}), 400
 
     # Parse barcode column letter
     col_letter = barcode_col.split('-')[0] if '-' in barcode_col else 'A'
@@ -76,3 +86,15 @@ def download_zip(task_id):
     if not task or task.status != 'done':
         return jsonify({'error': 'not ready'}), 404
     return send_file(task.zip_path, as_attachment=True, download_name=f'export_{task_id}.zip')
+
+def cleanup_old_exports():
+    """Remove export tasks and their files older than ZIP_CLEANUP_HOURS."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
+    old_tasks = session.query(ExportTask).filter(
+        ExportTask.created_at < cutoff.isoformat()
+    ).all()
+    for task in old_tasks:
+        if task.zip_path and os.path.exists(task.zip_path):
+            os.remove(task.zip_path)
+        session.delete(task)
+    session.commit()

@@ -28,7 +28,6 @@ const Home: React.FC = () => {
 
   // Selection state — union of table + card selections
   const [tableSelectedKeys, setTableSelectedKeys] = useState<React.Key[]>([]);
-  const [tableSelectedRows, setTableSelectedRows] = useState<ImageRec[]>([]);
   const [selectedBarcode, setSelectedBarcode] = useState<string | null>(null);
   const [selectedMainIds, setSelectedMainIds] = useState<Set<number>>(new Set());
   const [selectedDetailIds, setSelectedDetailIds] = useState<Set<number>>(new Set());
@@ -62,7 +61,7 @@ const Home: React.FC = () => {
     if (allSelectedIds.size === 0) return;
     await imageApi.batchDelete(Array.from(allSelectedIds));
     message.success(`已删除 ${allSelectedIds.size} 张图片`);
-    setTableSelectedKeys([]); setTableSelectedRows([]);
+    setTableSelectedKeys([]);
     setSelectedMainIds(new Set()); setSelectedDetailIds(new Set());
     fetchImages();
   };
@@ -107,9 +106,10 @@ const Home: React.FC = () => {
               images={images} loading={loading} total={total}
               page={page} pageSize={pageSize}
               selectedRowKeys={tableSelectedKeys}
-              onSelectionChange={(keys, rows) => { setTableSelectedKeys(keys); setTableSelectedRows(rows); }}
+              onSelectionChange={(keys) => { setTableSelectedKeys(keys); }}
               onRowClick={setSelectedBarcode}
               onPageChange={(p, ps) => { setPage(p); setPageSize(ps); }}
+              onSortChange={(field, order) => { setSortField(field); setSortOrder(order); }}
             />
           </div>
           <div style={{ flex: '0 0 40%', minWidth: 300 }}>
