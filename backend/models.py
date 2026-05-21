@@ -61,3 +61,12 @@ class ExportTask(Base):
     status = Column(Text, default='pending')
     zip_path = Column(Text, default='')
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
+
+class ScanLog(Base):
+    __tablename__ = 'scan_log'
+    id = Column(Integer, primary_key=True)
+    action = Column(Text, default='scan')
+    status = Column(Text, default='info')
+    message = Column(Text, default='')
+    details = Column(Text, default='')
+    created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())

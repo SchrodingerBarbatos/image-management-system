@@ -6,6 +6,11 @@ export interface ScanRoot {
   id: number; path: string; recursive: boolean; enabled: boolean;
 }
 
+export interface ScanLog {
+  id: number; action: string; status: string;
+  message: string; details: string; created_at: string;
+}
+
 export interface ImageRec {
   id: number; barcode: string; image_type: string; sequence: number;
   filename: string; ext: string; file_path: string; file_size: number;
@@ -33,12 +38,18 @@ export const scanRootApi = {
   list: () => api.get<ScanRoot[]>('/scan-roots').then(r => r.data),
   create: (data: { path: string; recursive?: boolean }) =>
     api.post<ScanRoot>('/scan-roots', data).then(r => r.data),
+  update: (id: number, data: { recursive?: boolean; enabled?: boolean }) =>
+    api.put<ScanRoot>(`/scan-roots/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/scan-roots/${id}`).then(r => r.data),
 };
 
 export const scanApi = {
   trigger: (data?: { root_id?: number; allow_fuzzy?: boolean }) =>
     api.post('/scan', data || {}).then(r => r.data),
+};
+
+export const scanLogApi = {
+  list: () => api.get<ScanLog[]>('/scan-logs').then(r => r.data),
 };
 
 export const imageApi = {
