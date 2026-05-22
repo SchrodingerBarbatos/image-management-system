@@ -4,6 +4,7 @@ const api = axios.create({ baseURL: '/api' });
 
 export interface ScanRoot {
   id: number; path: string; recursive: boolean; enabled: boolean;
+  allow_fuzzy: boolean; fuzzy_image_type: string;
 }
 
 export interface ScanLog {
@@ -25,6 +26,13 @@ export interface ImageVersion {
   created_at: string;
 }
 
+export interface BarcodeRec {
+  barcode: string;
+  main_count: number;
+  detail_count: number;
+  version_count: number;
+}
+
 export interface Paginated<T> {
   items: T[]; total: number; page: number; page_size: number;
 }
@@ -34,18 +42,25 @@ export interface ImageListParams {
   page?: number; page_size?: number; sort?: string; order?: string;
 }
 
+export interface BarcodeListParams {
+  barcode?: string;
+  page?: number; page_size?: number; sort?: string; order?: string;
+}
+
 export const scanRootApi = {
   list: () => api.get<ScanRoot[]>('/scan-roots').then(r => r.data),
-  create: (data: { path: string; recursive?: boolean }) =>
+  create: (data: { path: string; recursive?: boolean; allow_fuzzy?: boolean; fuzzy_image_type?: string }) =>
     api.post<ScanRoot>('/scan-roots', data).then(r => r.data),
-  update: (id: number, data: { recursive?: boolean; enabled?: boolean }) =>
+  update: (id: number, data: { recursive?: boolean; enabled?: boolean; allow_fuzzy?: boolean; fuzzy_image_type?: string }) =>
     api.put<ScanRoot>(`/scan-roots/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/scan-roots/${id}`).then(r => r.data),
 };
 
 export const scanApi = {
-  trigger: (data?: { root_id?: number; allow_fuzzy?: boolean }) =>
+  trigger: (data?: { root_ids?: number[]; scan_mode?: 'full' | 'incremental'; allow_fuzzy?: boolean }) =>
     api.post('/scan', data || {}).then(r => r.data),
+  checkNew: (root_ids: number[]) =>
+    api.post<{ new_root_ids: number[] }>('/scan-roots/check-new', { root_ids }).then(r => r.data),
 };
 
 export const scanLogApi = {
@@ -59,13 +74,19 @@ export const imageApi = {
     api.get<{ image: ImageRec; versions: ImageVersion[] }>(`/images/${id}`).then(r => r.data),
   update: (id: number, data: Partial<ImageRec>) =>
     api.put<ImageRec>(`/images/${id}`, data).then(r => r.data),
-  delete: (id: number) => api.delete(`/images/${id}`),
+  delete: (id: number, deleteFile = false) =>
+    api.delete(`/images/${id}`, { params: { delete_file: deleteFile } }).then(r => r.data),
   thumbnailUrl: (id: number) => `/api/thumbnails/${id}`,
   fileUrl: (id: number) => `/api/images/${id}/file`,
-  batchDelete: (ids: number[]) =>
-    api.post('/images/batch-delete', { ids }).then(r => r.data),
+  batchDelete: (ids: number[], deleteFile = false) =>
+    api.post('/images/batch-delete', { ids, delete_file: deleteFile }).then(r => r.data),
   batchExport: (ids: number[], image_type?: string) =>
     api.post<{ task_id: number }>('/images/batch-export', { ids, image_type }).then(r => r.data),
+};
+
+export const barcodeApi = {
+  list: (params: BarcodeListParams) =>
+    api.get<Paginated<BarcodeRec>>('/barcodes', { params }).then(r => r.data),
 };
 
 export const pendingApi = {
@@ -84,4 +105,22 @@ export const exportApi = {
   generateZip: (data: { barcode_column: string; image_type: string; upload_id: string; selected_barcodes?: string[] }) =>
     api.post<{ task_id: number }>('/export/zip', data).then(r => r.data),
   downloadUrl: (taskId: number) => `/api/export/download/${taskId}`,
+};
+
+export const versionApi = {
+  delete: (id: number, deleteFile = false) =>
+    api.delete(`/versions/${id}`, { params: { delete_file: deleteFile } }).then(r => r.data),
+};
+
+export interface BarcodeSetting {
+  barcode: string;
+  default_main_mtime: string;
+  default_detail_mtime: string;
+}
+
+export const barcodeSettingApi = {
+  get: (barcode: string) =>
+    api.get<BarcodeSetting>(`/barcode-settings/${barcode}`).then(r => r.data),
+  update: (barcode: string, data: { default_main_mtime?: string; default_detail_mtime?: string }) =>
+    api.put<BarcodeSetting>(`/barcode-settings/${barcode}`, data).then(r => r.data),
 };

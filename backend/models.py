@@ -15,6 +15,8 @@ class ScanRoot(Base):
     path = Column(Text, nullable=False)
     recursive = Column(Boolean, default=True)
     enabled = Column(Boolean, default=True)
+    allow_fuzzy = Column(Boolean, default=False)
+    fuzzy_image_type = Column(Text, default='main')
 
 class Image(Base):
     __tablename__ = 'image'
@@ -61,6 +63,13 @@ class ExportTask(Base):
     status = Column(Text, default='pending')
     zip_path = Column(Text, default='')
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
+
+class BarcodeSetting(Base):
+    __tablename__ = 'barcode_setting'
+    id = Column(Integer, primary_key=True)
+    barcode = Column(Text, unique=True, nullable=False, index=True)
+    default_main_mtime = Column(Text, default='')
+    default_detail_mtime = Column(Text, default='')
 
 class ScanLog(Base):
     __tablename__ = 'scan_log'

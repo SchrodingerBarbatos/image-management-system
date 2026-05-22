@@ -1,19 +1,21 @@
 import re, os, hashlib, datetime
 from models import session, Image, ScanRoot
 
-STRICT_RE = re.compile(
+# NAMED_RE: barcode_主图/详情图_sequence.ext — type from filename
+NAMED_RE = re.compile(
     r'^(\d+)_(主图|详情图)_(\d+)\.(jpg|jpeg|png|gif|webp)$', re.IGNORECASE
 )
-FUZZY_RE = re.compile(
+# PLAIN_RE: barcode_sequence.ext — type from root setting
+PLAIN_RE = re.compile(
     r'^(\d+)_(\d+)\.(jpg|jpeg|png|gif|webp)$', re.IGNORECASE
 )
 
 TYPE_MAP = {'主图': 'main', '详情图': 'detail'}
 
-def parse_filename(filename, allow_fuzzy=False):
-    """Parse a filename. Returns dict with barcode, image_type, sequence, ext, match_type
-    or None if no match."""
-    m = STRICT_RE.match(filename)
+def parse_filename(filename, fuzzy_image_type='main'):
+    """Parse a filename. NAMED format (with 主图/详情图) gets type from
+    filename; PLAIN format gets type from the root's fuzzy_image_type."""
+    m = NAMED_RE.match(filename)
     if m:
         return {
             'barcode': m.group(1),
@@ -23,17 +25,16 @@ def parse_filename(filename, allow_fuzzy=False):
             'match_type': 'strict',
             'confirmed': True,
         }
-    if allow_fuzzy:
-        m = FUZZY_RE.match(filename)
-        if m:
-            return {
-                'barcode': m.group(1),
-                'image_type': '',
-                'sequence': int(m.group(2)),
-                'ext': m.group(3).lower(),
-                'match_type': 'fuzzy',
-                'confirmed': False,
-            }
+    m = PLAIN_RE.match(filename)
+    if m:
+        return {
+            'barcode': m.group(1),
+            'image_type': fuzzy_image_type,
+            'sequence': int(m.group(2)),
+            'ext': m.group(3).lower(),
+            'match_type': 'strict',
+            'confirmed': True,
+        }
     return None
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
@@ -62,28 +63,42 @@ def _walk_nonrecursive(path):
     except OSError:
         return
 
-def scan_root(root_id, allow_fuzzy=False):
-    """Scan a single scan root: walk files, parse names, index new ones.
-    Returns dict with counts: {added, skipped, broken_cleaned}."""
+def scan_root(root_id, allow_fuzzy=False, full_scan=False):
+    """Scan a single scan root. When both the global parameter and the root's
+    allow_fuzzy toggle are on, image_type is taken from the root's
+    fuzzy_image_type setting; otherwise defaults to 'main'.
+
+    If full_scan is True, all existing images for this root are deleted first."""
     root = session.get(ScanRoot, root_id)
     if not root:
         return {'error': 'Scan root not found'}
+
+    use_custom_type = allow_fuzzy and root.allow_fuzzy
+    fuzzy_type = root.fuzzy_image_type if use_custom_type else 'main'
 
     added = 0
     skipped = 0
     broken_cleaned = 0
 
-    # Clean up broken records for this root
-    broken = session.query(Image).filter(
-        Image.scan_root_id == root_id, Image.status == 'broken'
-    ).all()
-    for img in broken:
-        session.delete(img)
-    broken_cleaned = len(broken)
-    session.commit()
+    # Full scan: delete all existing images for this root
+    if full_scan:
+        deleted = session.query(Image).filter(
+            Image.scan_root_id == root_id
+        ).delete()
+        session.commit()
+        broken_cleaned = deleted
+    else:
+        # Clean up broken records for this root
+        broken = session.query(Image).filter(
+            Image.scan_root_id == root_id, Image.status == 'broken'
+        ).all()
+        for img in broken:
+            session.delete(img)
+        broken_cleaned = len(broken)
+        session.commit()
 
-    indexed_paths = {
-        img.file_path for img in session.query(Image.file_path).filter(
+    indexed_map = {
+        img.file_path: img for img in session.query(Image).filter(
             Image.scan_root_id == root_id
         ).all()
     }
@@ -97,10 +112,34 @@ def scan_root(root_id, allow_fuzzy=False):
             if ext not in IMAGE_EXTS:
                 continue
             full_path = os.path.normpath(os.path.join(dirpath, fname))
-            if full_path in indexed_paths:
-                skipped += 1
+
+            existing = indexed_map.pop(full_path, None)
+            if existing is not None:
+                try:
+                    new_md5 = compute_md5(full_path)
+                    new_size = os.path.getsize(full_path)
+                except OSError:
+                    continue
+                if new_md5 == existing.md5_hash:
+                    # 文件内容未变，保留旧的 folder_mtime，不更新
+                    skipped += 1
+                    continue
+                # 文件内容已变，重新解析文件名并更新所有字段
+                reparsed = parse_filename(fname, fuzzy_type)
+                if reparsed:
+                    existing.barcode = reparsed['barcode']
+                    existing.image_type = reparsed['image_type']
+                    existing.sequence = reparsed['sequence']
+                    existing.ext = reparsed['ext']
+                    existing.confirmed = reparsed['confirmed']
+                existing.md5_hash = new_md5
+                existing.file_size = new_size
+                existing.folder_mtime = folder_mtime
+                existing.status = 'active'
+                added += 1
                 continue
-            parsed = parse_filename(fname, allow_fuzzy)
+
+            parsed = parse_filename(fname, fuzzy_type)
             if not parsed:
                 continue
             try:
@@ -125,5 +164,9 @@ def scan_root(root_id, allow_fuzzy=False):
             session.add(img)
             added += 1
 
+    # 磁盘上已不存在的文件标记为 broken
+    for img in indexed_map.values():
+        img.status = 'broken'
+
     session.commit()
-    return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned}
+    return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': len(indexed_map)}

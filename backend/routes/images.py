@@ -1,14 +1,69 @@
 import os, zipfile
 from flask import Blueprint, request, jsonify, send_file
-from models import session, Image, ImageVersion, ExportTask
+from models import session, Image, ImageVersion, ExportTask, BarcodeSetting
 from config import UPLOAD_DIR
 from thumbnail import thumbnail_exists, generate_thumbnail, get_thumbnail_path
+from versioning import update_versions_for_barcode
 from datetime import datetime
 
 images_bp = Blueprint('images', __name__)
 
 _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
                    'file_size', 'folder_path', 'folder_mtime', 'created_at', 'updated_at'}
+
+_BARCODE_SORT_WHITELIST = {'barcode', 'main_count', 'detail_count', 'version_count'}
+
+@images_bp.route('/barcodes', methods=['GET'])
+def list_barcodes():
+    """Aggregate images by barcode. Returns one row per barcode with counts."""
+    from sqlalchemy import func, case, desc, asc
+
+    barcode_filter = request.args.get('barcode')
+    filters = [Image.status == 'active']
+    if barcode_filter:
+        filters.append(Image.barcode.like(f'%{barcode_filter}%'))
+
+    # Subquery for version counts per barcode
+    vc_sub = session.query(
+        ImageVersion.barcode,
+        func.count(ImageVersion.id).label('vc')
+    ).group_by(ImageVersion.barcode).subquery()
+
+    # Main aggregation query
+    q = session.query(
+        Image.barcode,
+        func.sum(case((Image.image_type == 'main', 1), else_=0)).label('main_count'),
+        func.sum(case((Image.image_type == 'detail', 1), else_=0)).label('detail_count'),
+        func.coalesce(vc_sub.c.vc, 0).label('version_count'),
+    ).filter(*filters).outerjoin(
+        vc_sub, Image.barcode == vc_sub.c.barcode
+    ).group_by(Image.barcode)
+
+    # Count distinct barcodes for total
+    total = session.query(func.count(func.distinct(Image.barcode))).filter(*filters).scalar()
+
+    # Sort
+    sort = request.args.get('sort', 'barcode')
+    if sort not in _BARCODE_SORT_WHITELIST:
+        sort = 'barcode'
+    reverse = request.args.get('order') == 'desc'
+    sort_col = Image.barcode if sort == 'barcode' else sort
+    q = q.order_by(desc(sort_col) if reverse else asc(sort_col))
+
+    # Paginate
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('page_size', 50))
+    rows = q.offset((page - 1) * page_size).limit(page_size).all()
+
+    return jsonify({
+        'items': [{
+            'barcode': r.barcode,
+            'main_count': r.main_count,
+            'detail_count': r.detail_count,
+            'version_count': r.version_count,
+        } for r in rows],
+        'total': total, 'page': page, 'page_size': page_size,
+    })
 
 @images_bp.route('/images', methods=['GET'])
 def list_images():
@@ -76,9 +131,17 @@ def delete_image(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
+    delete_file = request.args.get('delete_file', 'false').lower() == 'true'
+    barcode = img.barcode
+    if delete_file:
+        try:
+            os.remove(img.file_path)
+        except OSError:
+            pass
     session.delete(img)
     session.commit()
-    return jsonify({'message': 'deleted'})
+    update_versions_for_barcode(barcode)
+    return jsonify({'message': 'deleted', 'file_deleted': delete_file})
 
 @images_bp.route('/images/<int:img_id>/file')
 def serve_file(img_id):
@@ -110,8 +173,21 @@ def batch_delete():
     ids = data.get('ids', [])
     if not ids:
         return jsonify({'error': 'ids required'}), 400
+    delete_file = data.get('delete_file', False)
+    # Collect barcodes before deletion
+    barcodes = {r[0] for r in session.query(Image.barcode).filter(
+        Image.id.in_(ids)).distinct().all()}
+    if delete_file:
+        imgs = session.query(Image).filter(Image.id.in_(ids)).all()
+        for img in imgs:
+            try:
+                os.remove(img.file_path)
+            except OSError:
+                pass
     session.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
     session.commit()
+    for bc in barcodes:
+        update_versions_for_barcode(bc)
     return jsonify({'message': f'deleted {len(ids)} images'})
 
 @images_bp.route('/images/batch-export', methods=['POST'])
@@ -150,3 +226,63 @@ def _image_to_dict(img):
         'confirmed': img.confirmed, 'status': img.status,
         'created_at': img.created_at, 'updated_at': img.updated_at,
     }
+
+@images_bp.route('/versions/<int:version_id>', methods=['DELETE'])
+def delete_version(version_id):
+    v = session.get(ImageVersion, version_id)
+    if not v:
+        return jsonify({'error': 'not found'}), 404
+    delete_file = request.args.get('delete_file', 'false').lower() == 'true'
+    barcode = v.barcode
+    folder_mtime = v.folder_mtime
+
+    # Delete all images belonging to this version
+    imgs = session.query(Image).filter(
+        Image.barcode == barcode,
+        Image.folder_mtime == folder_mtime,
+    ).all()
+    for img in imgs:
+        if delete_file:
+            try:
+                os.remove(img.file_path)
+            except OSError:
+                pass
+        session.delete(img)
+
+    # Delete the version record itself
+    session.delete(v)
+    session.commit()
+
+    # Re-sequence remaining versions for this barcode
+    update_versions_for_barcode(barcode)
+
+    return jsonify({'message': f'deleted version and {len(imgs)} images'})
+
+@images_bp.route('/barcode-settings/<barcode>', methods=['GET'])
+def get_barcode_setting(barcode):
+    s = session.query(BarcodeSetting).filter(BarcodeSetting.barcode == barcode).first()
+    if not s:
+        return jsonify({'barcode': barcode, 'default_main_mtime': '', 'default_detail_mtime': ''})
+    return jsonify({
+        'barcode': s.barcode,
+        'default_main_mtime': s.default_main_mtime,
+        'default_detail_mtime': s.default_detail_mtime,
+    })
+
+@images_bp.route('/barcode-settings/<barcode>', methods=['PUT'])
+def update_barcode_setting(barcode):
+    data = request.json
+    s = session.query(BarcodeSetting).filter(BarcodeSetting.barcode == barcode).first()
+    if not s:
+        s = BarcodeSetting(barcode=barcode)
+        session.add(s)
+    if 'default_main_mtime' in data:
+        s.default_main_mtime = data['default_main_mtime']
+    if 'default_detail_mtime' in data:
+        s.default_detail_mtime = data['default_detail_mtime']
+    session.commit()
+    return jsonify({
+        'barcode': s.barcode,
+        'default_main_mtime': s.default_main_mtime,
+        'default_detail_mtime': s.default_detail_mtime,
+    })

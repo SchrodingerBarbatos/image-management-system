@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Checkbox, Collapse, Tag, Image, Spin, Empty, Typography, Space, Button } from 'antd';
-import { ImageRec, ImageVersion, imageApi } from '../services/api';
+import { Card, Checkbox, Collapse, Tag, Image, Spin, Empty, Typography, Space, Button, Modal, Select, message } from 'antd';
+import { DeleteOutlined, EyeOutlined } from '@ant-design/icons';
+import { ImageRec, ImageVersion, imageApi, versionApi, barcodeSettingApi } from '../services/api';
 
 const { Text } = Typography;
 
@@ -10,37 +11,70 @@ interface Props {
   selectedDetailIds: Set<number>;
   onMainSelectionChange: (ids: Set<number>) => void;
   onDetailSelectionChange: (ids: Set<number>) => void;
+  onDeleted: () => void;
 }
 
 const ImageCardDetail: React.FC<Props> = ({
   barcode, selectedMainIds, selectedDetailIds,
-  onMainSelectionChange, onDetailSelectionChange,
+  onMainSelectionChange, onDetailSelectionChange, onDeleted,
 }) => {
   const [loading, setLoading] = useState(false);
   const [images, setImages] = useState<ImageRec[]>([]);
   const [versions, setVersions] = useState<ImageVersion[]>([]);
-  const [activeVersion, setActiveVersion] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ImageRec | null>(null);
+  const [versionDeleteTarget, setVersionDeleteTarget] = useState<ImageVersion | null>(null);
+
+  // Per-type version selection (stored as folder_mtime)
+  const [mainVersion, setMainVersion] = useState<string>('');
+  const [detailVersion, setDetailVersion] = useState<string>('');
 
   useEffect(() => {
     if (!barcode) return;
+    let cancelled = false;
     setLoading(true);
-    imageApi.list({ barcode, page_size: 500 }).then(res => {
-      setImages(res.items);
-      if (res.items.length > 0) {
-        imageApi.get(res.items[0].id).then(detail => {
+    Promise.all([
+      imageApi.list({ barcode, page_size: 500 }),
+      barcodeSettingApi.get(barcode),
+    ]).then(([imgRes, settings]) => {
+      if (cancelled) return;
+      setImages(imgRes.items);
+      if (imgRes.items.length > 0) {
+        imageApi.get(imgRes.items[0].id).then(detail => {
+          if (cancelled) return;
           setVersions(detail.versions);
-          setActiveVersion(detail.versions.find(v => v.is_latest)?.version_label || null);
+          const latest = detail.versions.find(v => v.is_latest);
+          const latestMtime = latest?.folder_mtime || '';
+          // Use saved setting or fallback to latest
+          setMainVersion(settings.default_main_mtime || latestMtime);
+          setDetailVersion(settings.default_detail_mtime || latestMtime);
         });
+      } else {
+        setVersions([]);
+        setMainVersion('');
+        setDetailVersion('');
       }
-    }).finally(() => setLoading(false));
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [barcode]);
 
-  const filteredImages = activeVersion
-    ? images.filter(img => img.folder_mtime === versions.find(v => v.version_label === activeVersion)?.folder_mtime)
-    : images;
+  const mainImages = images.filter(i => i.image_type === 'main' && (!mainVersion || i.folder_mtime === mainVersion));
+  const detailImages = images.filter(i => i.image_type === 'detail' && (!detailVersion || i.folder_mtime === detailVersion));
 
-  const mainImages = filteredImages.filter(i => i.image_type === 'main');
-  const detailImages = filteredImages.filter(i => i.image_type === 'detail');
+  // Build version options for dropdowns
+  const versionOptions = versions.map(v => ({
+    value: v.folder_mtime,
+    label: `${v.version_label}${v.is_latest ? ' (最新)' : ''}`,
+  }));
+
+  const handleVersionChange = (type: 'main' | 'detail', mtime: string) => {
+    if (type === 'main') {
+      setMainVersion(mtime);
+      barcodeSettingApi.update(barcode!, { default_main_mtime: mtime });
+    } else {
+      setDetailVersion(mtime);
+      barcodeSettingApi.update(barcode!, { default_detail_mtime: mtime });
+    }
+  };
 
   const toggleCheck = (id: number, type: 'main' | 'detail') => {
     const selected = type === 'main' ? new Set(selectedMainIds) : new Set(selectedDetailIds);
@@ -55,6 +89,68 @@ const ImageCardDetail: React.FC<Props> = ({
     type === 'main' ? onMainSelectionChange(allSelected ? new Set() : allIds) : onDetailSelectionChange(allSelected ? new Set() : allIds);
   };
 
+  const handleDelete = async (deleteFile: boolean) => {
+    if (!deleteTarget) return;
+    await imageApi.delete(deleteTarget.id, deleteFile);
+    message.success(deleteFile ? '已删除索引和文件' : '已删除索引');
+    setDeleteTarget(null);
+    setImages(prev => prev.filter(i => i.id !== deleteTarget.id));
+    const newMain = new Set(selectedMainIds); newMain.delete(deleteTarget.id);
+    const newDetail = new Set(selectedDetailIds); newDetail.delete(deleteTarget.id);
+    onMainSelectionChange(newMain);
+    onDetailSelectionChange(newDetail);
+    onDeleted();
+  };
+
+  const handleVersionDelete = async (deleteFile: boolean) => {
+    if (!versionDeleteTarget) return;
+    const deletedMtime = versionDeleteTarget.folder_mtime;
+    await versionApi.delete(versionDeleteTarget.id, deleteFile);
+    message.success(deleteFile ? '已删除版本索引和文件' : '已删除版本索引');
+    setVersionDeleteTarget(null);
+    if (barcode) {
+      setLoading(true);
+      const [imgRes, settings] = await Promise.all([
+        imageApi.list({ barcode, page_size: 500 }),
+        barcodeSettingApi.get(barcode),
+      ]);
+      setImages(imgRes.items);
+      if (imgRes.items.length > 0) {
+        const detail = await imageApi.get(imgRes.items[0].id);
+        setVersions(detail.versions);
+        const latest = detail.versions.find(v => v.is_latest);
+        const latestMtime = latest?.folder_mtime || '';
+        // Reset to latest if deleted version was the selected one
+        setMainVersion(prev => prev === deletedMtime ? (settings.default_main_mtime || latestMtime) : prev);
+        setDetailVersion(prev => prev === deletedMtime ? (settings.default_detail_mtime || latestMtime) : prev);
+      } else {
+        setVersions([]);
+        setMainVersion('');
+        setDetailVersion('');
+      }
+    }
+    onDeleted();
+  };
+
+  const renderImage = (img: ImageRec) => (
+    <div key={img.id} style={{ position: 'relative', display: 'inline-block' }}>
+      <Image src={imageApi.thumbnailUrl(img.id)} width={100} height={100}
+        style={{ objectFit: 'cover', borderRadius: 4 }}
+        preview={{ src: imageApi.fileUrl(img.id), mask: (
+          <Space>
+            <EyeOutlined />
+            <Text style={{ color: '#fff' }}>预览</Text>
+          </Space>
+        )}} />
+      <Checkbox checked={selectedMainIds.has(img.id) || selectedDetailIds.has(img.id)}
+        onChange={() => toggleCheck(img.id, img.image_type as 'main' | 'detail')}
+        style={{ position: 'absolute', top: 2, left: 2 }} />
+      <Button size="small" danger icon={<DeleteOutlined />}
+        style={{ position: 'absolute', top: 2, right: 2, opacity: 0.85 }}
+        onClick={(e) => { e.stopPropagation(); setDeleteTarget(img); }} />
+    </div>
+  );
+
   if (!barcode) return <Empty description="点击表格行查看图片详情" />;
 
   return (
@@ -67,7 +163,13 @@ const ImageCardDetail: React.FC<Props> = ({
               children: versions.map(v => (
                 <Tag key={v.id} color={v.is_latest ? 'blue' : 'default'}
                   style={{ cursor: 'pointer', marginBottom: 4 }}
-                  onClick={() => setActiveVersion(v.version_label)}>
+                  onClick={() => {
+                    setMainVersion(v.folder_mtime);
+                    setDetailVersion(v.folder_mtime);
+                    barcodeSettingApi.update(barcode!, { default_main_mtime: v.folder_mtime, default_detail_mtime: v.folder_mtime });
+                  }}
+                  closable
+                  onClose={(e) => { e.preventDefault(); setVersionDeleteTarget(v); }}>
                   {v.version_label} {v.is_latest ? '(最新)' : ''}
                 </Tag>
               )),
@@ -78,39 +180,50 @@ const ImageCardDetail: React.FC<Props> = ({
         <div style={{ marginBottom: 12 }}>
           <Space style={{ marginBottom: 8 }}>
             <Text strong>主图 ({mainImages.length})</Text>
+            <Select size="small" value={mainVersion || undefined} onChange={(v) => handleVersionChange('main', v)}
+              options={versionOptions} placeholder="版本" style={{ width: 140 }}
+              allowClear onClear={() => handleVersionChange('main', '')} />
             <Button size="small" onClick={() => toggleAll(mainImages, 'main')}>全选主图</Button>
           </Space>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {mainImages.map(img => (
-              <div key={img.id} style={{ position: 'relative' }}>
-                <Image src={imageApi.thumbnailUrl(img.id)} width={100} height={100}
-                  style={{ objectFit: 'cover', borderRadius: 4 }} preview={{ src: imageApi.fileUrl(img.id) }} />
-                <Checkbox checked={selectedMainIds.has(img.id)}
-                  onChange={() => toggleCheck(img.id, 'main')}
-                  style={{ position: 'absolute', top: 2, left: 2 }} />
-              </div>
-            ))}
+            {mainImages.map(renderImage)}
           </div>
         </div>
 
         <div>
           <Space style={{ marginBottom: 8 }}>
             <Text strong>详情图 ({detailImages.length})</Text>
+            <Select size="small" value={detailVersion || undefined} onChange={(v) => handleVersionChange('detail', v)}
+              options={versionOptions} placeholder="版本" style={{ width: 140 }}
+              allowClear onClear={() => handleVersionChange('detail', '')} />
             <Button size="small" onClick={() => toggleAll(detailImages, 'detail')}>全选详情图</Button>
           </Space>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {detailImages.map(img => (
-              <div key={img.id} style={{ position: 'relative' }}>
-                <Image src={imageApi.thumbnailUrl(img.id)} width={100} height={100}
-                  style={{ objectFit: 'cover', borderRadius: 4 }} preview={{ src: imageApi.fileUrl(img.id) }} />
-                <Checkbox checked={selectedDetailIds.has(img.id)}
-                  onChange={() => toggleCheck(img.id, 'detail')}
-                  style={{ position: 'absolute', top: 2, left: 2 }} />
-              </div>
-            ))}
+            {detailImages.map(renderImage)}
           </div>
         </div>
       </Card>
+
+      <Modal title="删除图片" open={!!deleteTarget} onCancel={() => setDeleteTarget(null)}
+        footer={null} width={360}>
+        <p>请选择删除方式：</p>
+        <Space style={{ marginTop: 12 }}>
+          <Button onClick={() => handleDelete(false)}>删除索引</Button>
+          <Button danger onClick={() => handleDelete(true)}>删除索引和文件</Button>
+        </Space>
+        <div style={{ marginTop: 12, color: '#999', fontSize: 12 }}>
+          {deleteTarget && <Text type="secondary">文件: {deleteTarget.filename}</Text>}
+        </div>
+      </Modal>
+
+      <Modal title="删除版本" open={!!versionDeleteTarget} onCancel={() => setVersionDeleteTarget(null)}
+        footer={null} width={360}>
+        <p>将删除版本 <Text strong>{versionDeleteTarget?.version_label}</Text> 下的所有图片：</p>
+        <Space style={{ marginTop: 12 }}>
+          <Button onClick={() => handleVersionDelete(false)}>删除索引</Button>
+          <Button danger onClick={() => handleVersionDelete(true)}>删除索引和文件</Button>
+        </Space>
+      </Modal>
     </Spin>
   );
 };

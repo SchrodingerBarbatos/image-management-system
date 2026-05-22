@@ -8,6 +8,26 @@ CORS(app)
 
 Base.metadata.create_all(bind=engine)
 
+# Migration: add columns that may not exist in existing databases
+from sqlalchemy import text
+with engine.connect() as conn:
+    existing = {row[1] for row in conn.execute(text("PRAGMA table_info('scan_root')"))}
+    if 'allow_fuzzy' not in existing:
+        conn.execute(text('ALTER TABLE scan_root ADD COLUMN allow_fuzzy INTEGER DEFAULT 0'))
+    if 'fuzzy_image_type' not in existing:
+        conn.execute(text("ALTER TABLE scan_root ADD COLUMN fuzzy_image_type TEXT DEFAULT 'main'"))
+    conn.commit()
+    # Create barcode_setting table if not exists
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS barcode_setting (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            barcode TEXT UNIQUE NOT NULL,
+            default_main_mtime TEXT DEFAULT '',
+            default_detail_mtime TEXT DEFAULT ''
+        )
+    '''))
+    conn.commit()
+
 from routes.scan import scan_bp
 from routes.images import images_bp
 from routes.export import export_bp
