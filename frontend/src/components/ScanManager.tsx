@@ -19,7 +19,8 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [path, setPath] = useState('');
   const [recursive, setRecursive] = useState(true);
-  const [allowFuzzyGlobal, setAllowFuzzyGlobal] = useState(false);
+  const [addAllowFuzzy, setAddAllowFuzzy] = useState(false);
+  const [addFuzzyType, setAddFuzzyType] = useState('main');
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [scanMode, setScanMode] = useState<'full' | 'incremental'>('full');
 
@@ -37,8 +38,9 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
 
   const handleAdd = async () => {
     if (!path.trim()) return;
-    await scanRootApi.create({ path: path.trim(), recursive });
+    await scanRootApi.create({ path: path.trim(), recursive, allow_fuzzy: addAllowFuzzy, fuzzy_image_type: addFuzzyType });
     setPath(''); setShowAdd(false);
+    setAddAllowFuzzy(false); setAddFuzzyType('main');
     fetchRoots();
     message.success('扫描目录已添加');
   };
@@ -89,7 +91,6 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
       await scanApi.trigger({
         root_ids: rootIds,
         scan_mode: effectiveMode,
-        allow_fuzzy: allowFuzzyGlobal,
       });
       message.success('扫描完成');
       onScanComplete();
@@ -103,14 +104,6 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     setLogsLoading(true);
     scanLogApi.list().then(setLogs).finally(() => setLogsLoading(false));
     setLogVisible(true);
-  };
-
-  const handleSelectAll = () => {
-    if (selectedRowKeys.length === roots.length) {
-      setSelectedRowKeys([]);
-    } else {
-      setSelectedRowKeys(roots.map(r => r.id));
-    }
   };
 
   const columns = [
@@ -176,22 +169,27 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     <>
       <Modal title="扫描目录管理" open={visible} onCancel={onClose} width={900} footer={null}>
         <Space style={{ marginBottom: 12 }}>
-          <Button icon={<PlusOutlined />} onClick={() => setShowAdd(!showAdd)}>添加</Button>
-          <Button size="small" onClick={handleSelectAll}>
-            {selectedRowKeys.length === roots.length ? '取消全选' : '全选'}
-          </Button>
+          <Button icon={<PlusOutlined />} onClick={() => { setShowAdd(!showAdd); if (!showAdd) { setPath(''); setRecursive(true); setAddAllowFuzzy(false); setAddFuzzyType('main'); } }}>添加</Button>
           <Radio.Group value={scanMode} onChange={e => setScanMode(e.target.value)}>
             <Radio.Button value="full">全量</Radio.Button>
             <Radio.Button value="incremental">增量</Radio.Button>
           </Radio.Group>
           <Button icon={<ScanOutlined />} loading={scanning} onClick={handleScan}>执行扫描</Button>
-          <span>指定类型: <Switch checked={allowFuzzyGlobal} onChange={setAllowFuzzyGlobal} /></span>
           <Button icon={<FileTextOutlined />} onClick={fetchLogs}>日志</Button>
         </Space>
         {showAdd && (
           <Space style={{ marginBottom: 12 }}>
             <Input placeholder="文件夹绝对路径" value={path} onChange={e => setPath(e.target.value)} style={{ width: 320 }} />
             <span>递归: <Switch checked={recursive} onChange={setRecursive} /></span>
+            <span>指定类型: <Switch checked={addAllowFuzzy} onChange={setAddAllowFuzzy} /></span>
+            <Select size="small" value={addFuzzyType} style={{ width: 90 }}
+              disabled={!addAllowFuzzy}
+              onChange={setAddFuzzyType}
+              options={[
+                { value: 'main', label: '主图' },
+                { value: 'detail', label: '详情图' },
+              ]}
+            />
             <Button type="primary" onClick={handleAdd}>确认</Button>
           </Space>
         )}

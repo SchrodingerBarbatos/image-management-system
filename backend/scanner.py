@@ -64,17 +64,17 @@ def _walk_nonrecursive(path):
     except OSError:
         return
 
-def scan_root(root_id, allow_fuzzy=False, full_scan=False):
-    """Scan a single scan root. When both the global parameter and the root's
-    allow_fuzzy toggle are on, image_type is taken from the root's
-    fuzzy_image_type setting; otherwise defaults to 'main'.
+def scan_root(root_id, full_scan=False):
+    """Scan a single scan root. If the root's allow_fuzzy toggle is on,
+    image_type is taken from the root's fuzzy_image_type setting;
+    otherwise defaults to 'main'.
 
     If full_scan is True, all existing images for this root are deleted first."""
     root = session.get(ScanRoot, root_id)
     if not root:
         return {'error': 'Scan root not found'}
 
-    use_custom_type = allow_fuzzy and root.allow_fuzzy
+    use_custom_type = root.allow_fuzzy
     fuzzy_type = root.fuzzy_image_type if use_custom_type else 'main'
 
     added = 0

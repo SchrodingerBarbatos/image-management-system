@@ -60,12 +60,14 @@ jobs:
           pyinstaller --onefile `
             --name "image-manager" `
             --add-data "frontend/dist;frontend" `
+            --add-data "image_manager_flat_multires.ico;." `
             --hidden-import flask `
             --hidden-import flask_cors `
             --hidden-import sqlalchemy `
             --hidden-import PIL `
             --hidden-import openpyxl `
-            --console `
+            --hidden-import pystray `
+            --windowed `
             backend/app.py
 
       - name: Upload artifact

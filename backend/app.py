@@ -1,4 +1,7 @@
 import os, sys
+import threading
+import socket
+import logging
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 from config import DB_PATH
@@ -97,16 +100,116 @@ app.register_blueprint(pending_bp, url_prefix='/api')
 from routes.export import cleanup_old_exports
 cleanup_old_exports()
 
+def _get_icon_path():
+    if IS_PACKAGED:
+        return os.path.join(sys._MEIPASS, 'image_manager_flat_multires.ico')
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'image_manager_flat_multires.ico')
+
+
+def _check_port(host, port):
+    """Return True if port is available."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def start_tray(port, open_browser_on_start=True):
+    import pystray
+    from PIL import Image as PILImage
+    import webbrowser
+
+    # Set up file logging since --windowed suppresses console output
+    log_dir = os.path.dirname(DB_PATH)
+    log_file = os.path.join(log_dir, 'image-manager.log')
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    )
+    logger = logging.getLogger(__name__)
+
+    # Check port availability with fallback
+    if not _check_port('127.0.0.1', port):
+        logger.warning("Port %s is in use, trying fallback ports", port)
+        fallback = None
+        for p in range(port + 1, port + 10):
+            if _check_port('127.0.0.1', p):
+                fallback = p
+                break
+        if fallback is None:
+            logger.critical("No available port in range %s-%s", port, port + 9)
+            try:
+                import tkinter.messagebox
+                tkinter.messagebox.showerror("启动失败", f"端口 {port}-{port+9} 均被占用，无法启动服务")
+            except Exception:
+                pass
+            return
+        logger.info("Using fallback port %s", fallback)
+        port = fallback
+
+    stop_event = threading.Event()
+
+    flask_thread = threading.Thread(
+        target=lambda: app.run(debug=False, port=port, use_reloader=False),
+        daemon=True,
+    )
+    flask_thread.start()
+
+    # Load tray icon with fallback
+    try:
+        icon_image = PILImage.open(_get_icon_path())
+    except Exception as e:
+        logger.warning("Failed to load tray icon: %s, using default", e)
+        icon_image = None
+
+    def _open_web(icon, item):
+        webbrowser.open(f'http://localhost:{port}')
+
+    def _quit(icon, item):
+        logger.info("Tray quit requested, shutting down")
+        stop_event.set()
+        session.remove()
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+        icon.stop()
+
+    menu = pystray.Menu(
+        pystray.MenuItem('打开网页', _open_web, default=True),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('退出', _quit),
+    )
+
+    tray_icon = pystray.Icon('image-manager', icon_image, '图片管理系统', menu)
+
+    logger.info("Tray started on port %s", port)
+
+    if open_browser_on_start:
+        threading.Timer(0.8, lambda: webbrowser.open(f'http://localhost:{port}')).start()
+
+    tray_icon.run()
+
+
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, default=5000)
-    parser.add_argument('--debug', action='store_true', default=False)
-    parser.add_argument('--open-browser', action='store_true', default=False)
-    args = parser.parse_args()
+    if IS_PACKAGED:
+        start_tray(port=5000, open_browser_on_start=True)
+    else:
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--port', type=int, default=5000)
+        parser.add_argument('--debug', action='store_true', default=False)
+        parser.add_argument('--open-browser', action='store_true', default=False)
+        parser.add_argument('--tray', action='store_true', default=False)
+        args = parser.parse_args()
 
-    if args.open_browser:
-        import webbrowser, threading
-        threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
-
-    app.run(debug=args.debug, port=args.port)
+        if args.tray:
+            start_tray(port=args.port, open_browser_on_start=args.open_browser)
+        else:
+            if args.open_browser:
+                import webbrowser
+                threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
+            app.run(debug=args.debug, port=args.port)

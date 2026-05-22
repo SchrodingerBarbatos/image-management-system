@@ -115,12 +115,10 @@ const Home: React.FC = () => {
       <Content style={{ padding: 16 }}>
         <SearchBar
           onSearch={setBarcode}
-          onAddScanRoot={() => setScanVisible(true)}
+          onOpenScanManager={() => setScanVisible(true)}
           onExportExcel={() => setExportVisible(true)}
-          onTriggerScan={() => { setScanVisible(true); }}
           onOpenPending={() => setPendingVisible(true)}
           pendingCount={pendingCount}
-          loading={loading}
         />
 
         {(allSelectedIds.size > 0 || selectedBarcodes.size > 0) && (

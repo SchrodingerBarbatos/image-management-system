@@ -58,7 +58,7 @@ export const scanRootApi = {
 };
 
 export const scanApi = {
-  trigger: (data?: { root_ids?: number[]; scan_mode?: 'full' | 'incremental'; allow_fuzzy?: boolean }) =>
+  trigger: (data?: { root_ids?: number[]; scan_mode?: 'full' | 'incremental' }) =>
     api.post('/scan', data || {}).then(r => r.data),
   checkNew: (root_ids: number[]) =>
     api.post<{ new_root_ids: number[] }>('/scan-roots/check-new', { root_ids }).then(r => r.data),

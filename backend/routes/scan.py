@@ -96,12 +96,11 @@ def check_new_roots():
 @scan_bp.route('/scan', methods=['POST'])
 def trigger_scan():
     data = request.get_json(silent=True) or {}
-    allow_fuzzy = data.get('allow_fuzzy', False)
     root_ids = data.get('root_ids')
     scan_mode = data.get('scan_mode', 'full')
     full_scan = scan_mode == 'full'
 
-    _add_log('scan', 'info', f"扫描开始 - {'全量' if full_scan else '增量'}模式", json.dumps({'allow_fuzzy': allow_fuzzy, 'root_ids': root_ids}))
+    _add_log('scan', 'info', f"扫描开始 - {'全量' if full_scan else '增量'}模式", json.dumps({'root_ids': root_ids}))
 
     try:
         if not root_ids:
@@ -113,7 +112,7 @@ def trigger_scan():
 
         total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0}
         for r in roots:
-            res = scan_root(r.id, allow_fuzzy=allow_fuzzy, full_scan=full_scan)
+            res = scan_root(r.id, full_scan=full_scan)
             for k in total:
                 total[k] += res.get(k, 0)
         update_all_versions()
