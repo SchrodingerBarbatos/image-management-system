@@ -8,9 +8,9 @@ def compute_content_hash(images):
     return hashlib.md5(payload.encode()).hexdigest()
 
 def update_versions_for_barcode(barcode):
-    """Rebuild version records for a single barcode.
-    Groups images by unique folder_mtime values, sorts descending by mtime,
-    assigns v1 (oldest) through vN (newest), merges duplicate content_hashes."""
+    """Rebuild version records for a single barcode, per image_type.
+    Groups images by (folder_mtime, image_type), sorts descending by mtime,
+    assigns v1 (oldest) through vN (newest) per type, merges duplicate content_hashes."""
     images = session.query(Image).filter(
         Image.barcode == barcode, Image.confirmed == True, Image.status == 'active'
     ).all()
@@ -18,40 +18,48 @@ def update_versions_for_barcode(barcode):
     if not images:
         return
 
-    # Group by folder_mtime
-    by_mtime = {}
+    # Group by (folder_mtime, image_type)
+    by_key = {}
     for img in images:
-        by_mtime.setdefault(img.folder_mtime, []).append(img)
+        key = (img.folder_mtime, img.image_type)
+        by_key.setdefault(key, []).append(img)
 
-    sorted_mtimes = sorted(by_mtime.keys(), reverse=True)
+    sorted_keys = sorted(by_key.keys(), key=lambda k: k[0], reverse=True)
 
-    # Build version list: (mtime, content_hash, images)
-    versions = []
-    seen_hashes = set()
-    for mtime in sorted_mtimes:
-        imgs = by_mtime[mtime]
+    # Build version list per image_type
+    versions_by_type = {}
+    seen_hashes = {}
+
+    for key in sorted_keys:
+        mtime, img_type = key
+        imgs = by_key[key]
         ch = compute_content_hash(imgs)
-        if ch in seen_hashes:
+
+        seen_hashes.setdefault(img_type, set())
+        if ch in seen_hashes[img_type]:
             continue
-        seen_hashes.add(ch)
-        versions.append((mtime, ch, imgs))
+        seen_hashes[img_type].add(ch)
+
+        versions_by_type.setdefault(img_type, []).append((mtime, ch, imgs))
 
     # Delete old versions for this barcode
     session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
 
-    # Create new versions: v1=oldest (last in list), vN=newest (first in list)
-    total = len(versions)
-    for i, (mtime, ch, imgs) in enumerate(versions):
-        version_num = total - i
-        is_latest = (i == 0)
-        v = ImageVersion(
-            barcode=barcode,
-            version_label=f'v{version_num}',
-            folder_mtime=mtime,
-            content_hash=ch,
-            is_latest=is_latest,
-        )
-        session.add(v)
+    # Create new versions per image_type
+    for img_type, vers in versions_by_type.items():
+        total = len(vers)
+        for i, (mtime, ch, imgs) in enumerate(vers):
+            version_num = total - i
+            is_latest = (i == 0)
+            v = ImageVersion(
+                barcode=barcode,
+                image_type=img_type,
+                version_label=f'v{version_num}',
+                folder_mtime=mtime,
+                content_hash=ch,
+                is_latest=is_latest,
+            )
+            session.add(v)
     session.commit()
 
 def update_all_versions():

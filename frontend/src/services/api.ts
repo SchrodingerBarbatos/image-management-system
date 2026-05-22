@@ -21,7 +21,7 @@ export interface ImageRec {
 }
 
 export interface ImageVersion {
-  id: number; barcode: string; version_label: string;
+  id: number; barcode: string; image_type: string; version_label: string;
   folder_mtime: string; content_hash: string; is_latest: boolean;
   created_at: string;
 }
@@ -30,7 +30,8 @@ export interface BarcodeRec {
   barcode: string;
   main_count: number;
   detail_count: number;
-  version_count: number;
+  main_versions: number;
+  detail_versions: number;
 }
 
 export interface Paginated<T> {

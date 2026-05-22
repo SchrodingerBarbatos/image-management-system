@@ -58,6 +58,31 @@ with engine.connect() as conn:
     # Create performance indexes if not exist
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_status_barcode_type ON image (status, barcode, image_type)'))
     conn.commit()
+    # Migration: add image_type to image_version and update unique constraint
+    ver_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('image_version')"))}
+    need_rebuild = False
+    if 'image_type' not in ver_cols:
+        conn.execute(text("ALTER TABLE image_version ADD COLUMN image_type TEXT DEFAULT 'main'"))
+        conn.commit()
+        need_rebuild = True
+    # Drop old unique constraint (on barcode+content_hash only)
+    try:
+        conn.execute(text('DROP INDEX IF EXISTS uq_barcode_content'))
+        conn.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to drop old index uq_barcode_content: %s", e)
+    # Create new unique constraint on barcode+image_type+content_hash
+    conn.execute(text('''
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_barcode_type_content
+        ON image_version (barcode, image_type, content_hash)
+    '''))
+    conn.commit()
+
+# Rebuild versions if we just added the image_type column
+if need_rebuild:
+    from versioning import update_all_versions
+    update_all_versions()
 
 from routes.scan import scan_bp
 from routes.images import images_bp

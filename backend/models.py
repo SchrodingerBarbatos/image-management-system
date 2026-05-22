@@ -49,6 +49,7 @@ class ImageVersion(Base):
     __tablename__ = 'image_version'
     id = Column(Integer, primary_key=True)
     barcode = Column(Text, nullable=False, index=True)
+    image_type = Column(Text, nullable=False, default='main')
     version_label = Column(Text, nullable=False)
     folder_mtime = Column(Text, default='')
     content_hash = Column(Text, nullable=False)
@@ -56,7 +57,7 @@ class ImageVersion(Base):
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
 
     __table_args__ = (
-        UniqueConstraint('barcode', 'content_hash', name='uq_barcode_content'),
+        UniqueConstraint('barcode', 'image_type', 'content_hash', name='uq_barcode_type_content'),
     )
 
 class ExportTask(Base):

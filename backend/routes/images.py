@@ -11,7 +11,7 @@ images_bp = Blueprint('images', __name__)
 _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
                    'file_size', 'folder_path', 'folder_mtime', 'created_at', 'updated_at'}
 
-_BARCODE_SORT_WHITELIST = {'barcode', 'main_count', 'detail_count', 'version_count'}
+_BARCODE_SORT_WHITELIST = {'barcode', 'main_count', 'detail_count', 'main_versions', 'detail_versions'}
 
 @images_bp.route('/barcodes', methods=['GET'])
 def list_barcodes():
@@ -23,20 +23,29 @@ def list_barcodes():
     if barcode_filter:
         filters.append(Image.barcode.like(f'%{barcode_filter}%'))
 
-    # Subquery for version counts per barcode
-    vc_sub = session.query(
+    # Subquery for main version counts per barcode
+    main_vc_sub = session.query(
         ImageVersion.barcode,
         func.count(ImageVersion.id).label('vc')
-    ).group_by(ImageVersion.barcode).subquery()
+    ).filter(ImageVersion.image_type == 'main').group_by(ImageVersion.barcode).subquery()
+
+    # Subquery for detail version counts per barcode
+    detail_vc_sub = session.query(
+        ImageVersion.barcode,
+        func.count(ImageVersion.id).label('vc')
+    ).filter(ImageVersion.image_type == 'detail').group_by(ImageVersion.barcode).subquery()
 
     # Main aggregation query
     q = session.query(
         Image.barcode,
         func.sum(case((Image.image_type == 'main', 1), else_=0)).label('main_count'),
         func.sum(case((Image.image_type == 'detail', 1), else_=0)).label('detail_count'),
-        func.coalesce(vc_sub.c.vc, 0).label('version_count'),
+        func.coalesce(main_vc_sub.c.vc, 0).label('main_versions'),
+        func.coalesce(detail_vc_sub.c.vc, 0).label('detail_versions'),
     ).filter(*filters).outerjoin(
-        vc_sub, Image.barcode == vc_sub.c.barcode
+        main_vc_sub, Image.barcode == main_vc_sub.c.barcode
+    ).outerjoin(
+        detail_vc_sub, Image.barcode == detail_vc_sub.c.barcode
     ).group_by(Image.barcode)
 
     # Count distinct barcodes for total
@@ -60,7 +69,8 @@ def list_barcodes():
             'barcode': r.barcode,
             'main_count': r.main_count,
             'detail_count': r.detail_count,
-            'version_count': r.version_count,
+            'main_versions': r.main_versions,
+            'detail_versions': r.detail_versions,
         } for r in rows],
         'total': total, 'page': page, 'page_size': page_size,
     })
@@ -106,7 +116,7 @@ def get_image(img_id):
     return jsonify({
         'image': _image_to_dict(img),
         'versions': [{
-            'id': v.id, 'barcode': v.barcode, 'version_label': v.version_label,
+            'id': v.id, 'barcode': v.barcode, 'image_type': v.image_type, 'version_label': v.version_label,
             'folder_mtime': v.folder_mtime, 'content_hash': v.content_hash,
             'is_latest': v.is_latest, 'created_at': v.created_at,
         } for v in versions],
@@ -238,7 +248,8 @@ def batch_export():
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for img in imgs:
             if os.path.exists(img.file_path):
-                arcname = f"{img.barcode}/{img.filename}"
+                type_folder = '主图' if img.image_type == 'main' else '详情图'
+                arcname = f"{type_folder}/{img.barcode}_{img.filename}"
                 zf.write(img.file_path, arcname)
     task.status = 'done'
     task.zip_path = zip_path
@@ -269,6 +280,7 @@ def delete_version(version_id):
     imgs = session.query(Image).filter(
         Image.barcode == barcode,
         Image.folder_mtime == folder_mtime,
+        Image.image_type == v.image_type,
     ).all()
     for img in imgs:
         if delete_file:
