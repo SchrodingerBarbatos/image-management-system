@@ -1,7 +1,7 @@
 import os, uuid, zipfile, datetime
 from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook
-from models import session, Image, ExportTask
+from models import session, Image, ExportTask, ScanRoot
 from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS
 
 export_bp = Blueprint('export', __name__)
@@ -59,10 +59,14 @@ def generate_zip():
         barcodes = [b for b in barcodes if b in selected]
 
     # Find matching images
-    q = session.query(Image).filter(Image.barcode.in_(barcodes), Image.confirmed == True)
+    q = session.query(Image).filter(Image.barcode.in_(barcodes), Image.confirmed == True).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(ScanRoot.enabled == True)
     if image_type and image_type != 'all':
         q = q.filter(Image.image_type == image_type)
     imgs = q.all()
+    matched_barcodes = set(img.barcode for img in imgs)
+    excluded_barcodes = len(barcodes) - len(matched_barcodes)
 
     task = ExportTask(status='processing')
     session.add(task)
@@ -79,7 +83,7 @@ def generate_zip():
     task.status = 'done'
     task.zip_path = zip_path
     session.commit()
-    return jsonify({'task_id': task.id})
+    return jsonify({'task_id': task.id, 'total_images': len(imgs), 'total_barcodes': len(matched_barcodes), 'excluded_barcodes': excluded_barcodes})
 
 @export_bp.route('/export/download/<int:task_id>')
 def download_zip(task_id):

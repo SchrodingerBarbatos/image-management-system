@@ -38,6 +38,9 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
       const res = await exportApi.generateZip({ barcode_column: barcodeColumn, image_type: imageType, upload_id: uploadId });
       setTaskId(res.task_id);
       setStep(2);
+      if (res.excluded_barcodes > 0) {
+        message.warning(`已匹配 ${res.total_barcodes} 个条码，${res.excluded_barcodes} 个条码因目录已禁用被跳过`);
+      }
     } catch {
       message.error('生成失败');
     }

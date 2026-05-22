@@ -1,6 +1,6 @@
 import os, zipfile, time
 from flask import Blueprint, request, jsonify, send_file
-from models import session, Image, ImageVersion, ExportTask, BarcodeSetting
+from models import session, Image, ImageVersion, ExportTask, BarcodeSetting, ScanRoot
 from config import UPLOAD_DIR
 from thumbnail import thumbnail_exists, generate_thumbnail, get_thumbnail_path
 from versioning import update_versions_for_barcode
@@ -19,7 +19,7 @@ def list_barcodes():
     from sqlalchemy import func, case, desc, asc
 
     barcode_filter = request.args.get('barcode')
-    filters = [Image.status == 'active']
+    filters = [Image.status == 'active', ScanRoot.enabled == True]
     if barcode_filter:
         filters.append(Image.barcode.like(f'%{barcode_filter}%'))
 
@@ -42,14 +42,18 @@ def list_barcodes():
         func.sum(case((Image.image_type == 'detail', 1), else_=0)).label('detail_count'),
         func.coalesce(main_vc_sub.c.vc, 0).label('main_versions'),
         func.coalesce(detail_vc_sub.c.vc, 0).label('detail_versions'),
-    ).filter(*filters).outerjoin(
+    ).filter(*filters).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).outerjoin(
         main_vc_sub, Image.barcode == main_vc_sub.c.barcode
     ).outerjoin(
         detail_vc_sub, Image.barcode == detail_vc_sub.c.barcode
     ).group_by(Image.barcode)
 
     # Count distinct barcodes for total
-    total = session.query(func.count(func.distinct(Image.barcode))).filter(*filters).scalar()
+    total = session.query(func.count(func.distinct(Image.barcode))).filter(*filters).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).scalar()
 
     # Sort
     sort = request.args.get('sort', 'barcode')
@@ -77,7 +81,9 @@ def list_barcodes():
 
 @images_bp.route('/images', methods=['GET'])
 def list_images():
-    q = session.query(Image)
+    q = session.query(Image).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(ScanRoot.enabled == True)
     barcode = request.args.get('barcode')
     if barcode:
         q = q.filter(Image.barcode.like(f'%{barcode}%'))
@@ -110,6 +116,9 @@ def get_image(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
+    root = session.get(ScanRoot, img.scan_root_id)
+    if not root or not root.enabled:
+        return jsonify({'error': 'not found'}), 404
     versions = session.query(ImageVersion).filter(
         ImageVersion.barcode == img.barcode
     ).order_by(ImageVersion.version_label.desc()).all()
@@ -127,6 +136,9 @@ def update_image(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
+    root = session.get(ScanRoot, img.scan_root_id)
+    if not root or not root.enabled:
+        return jsonify({'error': 'not found'}), 404
     data = request.json
     if 'image_type' in data:
         img.image_type = data['image_type']
@@ -140,6 +152,9 @@ def update_image(img_id):
 def delete_image(img_id):
     img = session.get(Image, img_id)
     if not img:
+        return jsonify({'error': 'not found'}), 404
+    root = session.get(ScanRoot, img.scan_root_id)
+    if not root or not root.enabled:
         return jsonify({'error': 'not found'}), 404
     delete_file = request.args.get('delete_file', 'false').lower() == 'true'
     barcode = img.barcode
@@ -158,6 +173,9 @@ def serve_file(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
+    root = session.get(ScanRoot, img.scan_root_id)
+    if not root or not root.enabled:
+        return jsonify({'error': 'not found'}), 404
     if not os.path.exists(img.file_path):
         img.status = 'broken'
         session.commit()
@@ -168,6 +186,9 @@ def serve_file(img_id):
 def serve_thumbnail(img_id):
     img = session.get(Image, img_id)
     if not img:
+        return jsonify({'error': 'not found'}), 404
+    root = session.get(ScanRoot, img.scan_root_id)
+    if not root or not root.enabled:
         return jsonify({'error': 'not found'}), 404
     if not os.path.exists(img.file_path):
         img.status = 'broken'
@@ -236,10 +257,13 @@ def batch_export():
     image_type = data.get('image_type', '')
     if not ids:
         return jsonify({'error': 'ids required'}), 400
-    q = session.query(Image).filter(Image.id.in_(ids))
+    q = session.query(Image).filter(Image.id.in_(ids)).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(ScanRoot.enabled == True)
     if image_type:
         q = q.filter(Image.image_type == image_type)
     imgs = q.all()
+    excluded = len(ids) - len(imgs)
     task = ExportTask(status='processing')
     session.add(task)
     session.commit()
@@ -254,7 +278,7 @@ def batch_export():
     task.status = 'done'
     task.zip_path = zip_path
     session.commit()
-    return jsonify({'task_id': task.id})
+    return jsonify({'task_id': task.id, 'total': len(imgs), 'excluded': excluded})
 
 def _image_to_dict(img):
     return {
@@ -281,6 +305,8 @@ def delete_version(version_id):
         Image.barcode == barcode,
         Image.folder_mtime == folder_mtime,
         Image.image_type == v.image_type,
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True
     ).all()
     for img in imgs:
         if delete_file:

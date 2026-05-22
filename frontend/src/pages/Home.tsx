@@ -89,6 +89,9 @@ const Home: React.FC = () => {
     setBatchLoading(true);
     try {
       const res = await imageApi.batchExport(allIds);
+      if (res.excluded > 0) {
+        message.warning(`已导出 ${res.total} 张图片，${res.excluded} 张因目录已禁用被跳过`);
+      }
       window.open(exportApi.downloadUrl(res.task_id), '_blank');
     } finally { setBatchLoading(false); }
   };
@@ -96,6 +99,12 @@ const Home: React.FC = () => {
   const handleCardDeleted = useCallback(() => {
     fetchBarcodes();
     fetchPendingCount();
+  }, [fetchBarcodes, fetchPendingCount]);
+
+  const handleScanComplete = useCallback(() => {
+    fetchBarcodes();
+    fetchPendingCount();
+    setSelectedBarcode(null);
   }, [fetchBarcodes, fetchPendingCount]);
 
   return (
@@ -158,7 +167,7 @@ const Home: React.FC = () => {
         <Text type="secondary">图片库系统 v1.0</Text>
       </Footer>
 
-      <ScanManager visible={scanVisible} onClose={() => setScanVisible(false)} onScanComplete={fetchBarcodes} />
+      <ScanManager visible={scanVisible} onClose={() => setScanVisible(false)} onScanComplete={handleScanComplete} />
       <PendingList visible={pendingVisible} onClose={() => setPendingVisible(false)} onConfirmed={() => { fetchBarcodes(); fetchPendingCount(); }} />
       <ExportDialog visible={exportVisible} onClose={() => setExportVisible(false)} />
 

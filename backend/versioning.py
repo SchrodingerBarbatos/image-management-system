@@ -1,5 +1,5 @@
 import hashlib, json
-from models import session, Image, ImageVersion
+from models import session, Image, ImageVersion, ScanRoot
 
 def compute_content_hash(images):
     """Compute a deterministic hash from a set of (filename, md5_hash) pairs."""
@@ -13,6 +13,8 @@ def update_versions_for_barcode(barcode):
     assigns v1 (oldest) through vN (newest) per type, merges duplicate content_hashes."""
     images = session.query(Image).filter(
         Image.barcode == barcode, Image.confirmed == True, Image.status == 'active'
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True
     ).all()
 
     if not images:
@@ -66,6 +68,8 @@ def update_all_versions():
     """Run version update for all barcodes in the database."""
     barcodes = session.query(Image.barcode).filter(
         Image.confirmed == True, Image.status == 'active'
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True
     ).distinct().all()
     for (bc,) in barcodes:
         update_versions_for_barcode(bc)

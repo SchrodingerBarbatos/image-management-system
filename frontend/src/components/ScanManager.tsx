@@ -53,14 +53,19 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
   const handleToggle = async (id: number, field: 'recursive' | 'enabled' | 'allow_fuzzy' | 'fuzzy_image_type', value: boolean | string) => {
     await scanRootApi.update(id, { [field]: value });
     fetchRoots();
+    if (field === 'enabled') onScanComplete();
   };
 
   const handleScan = async () => {
-    const rootIds = selectedRowKeys.length > 0 ? (selectedRowKeys as number[]) : undefined;
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先勾选要扫描的目录');
+      return;
+    }
+    const rootIds = selectedRowKeys as number[];
     let effectiveMode = scanMode;
 
     // 增量模式下检查是否有新目录
-    if (scanMode === 'incremental' && rootIds) {
+    if (scanMode === 'incremental') {
       try {
         const { new_root_ids } = await scanApi.checkNew(rootIds);
         if (new_root_ids.length > 0) {

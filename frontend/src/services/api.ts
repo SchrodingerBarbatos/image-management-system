@@ -82,7 +82,7 @@ export const imageApi = {
   batchDelete: (ids: number[], deleteFile = false) =>
     api.post('/images/batch-delete', { ids, delete_file: deleteFile }).then(r => r.data),
   batchExport: (ids: number[], image_type?: string) =>
-    api.post<{ task_id: number }>('/images/batch-export', { ids, image_type }).then(r => r.data),
+    api.post<{ task_id: number; total: number; excluded: number }>('/images/batch-export', { ids, image_type }).then(r => r.data),
 };
 
 export const barcodeApi = {
@@ -104,7 +104,7 @@ export const exportApi = {
     return api.post<{ columns: string[]; upload_id: string }>('/export/excel', fd).then(r => r.data);
   },
   generateZip: (data: { barcode_column: string; image_type: string; upload_id: string; selected_barcodes?: string[] }) =>
-    api.post<{ task_id: number }>('/export/zip', data).then(r => r.data),
+    api.post<{ task_id: number; total_images: number; total_barcodes: number; excluded_barcodes: number }>('/export/zip', data).then(r => r.data),
   downloadUrl: (taskId: number) => `/api/export/download/${taskId}`,
 };
 

@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from models import session, Image
+from models import session, Image, ScanRoot
 from versioning import update_all_versions
 
 pending_bp = Blueprint('pending', __name__)
@@ -8,6 +8,8 @@ pending_bp = Blueprint('pending', __name__)
 def list_pending():
     imgs = session.query(Image).filter(
         Image.confirmed == False, Image.status == 'active'
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True
     ).order_by(Image.barcode, Image.sequence).all()
     return jsonify([_pending_to_dict(img) for img in imgs])
 

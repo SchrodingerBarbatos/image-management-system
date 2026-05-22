@@ -52,11 +52,16 @@ def update_scan_root(root_id):
         root.recursive = data['recursive']
     if 'enabled' in data:
         root.enabled = data['enabled']
+        enabled_changed = True
+    else:
+        enabled_changed = False
     if 'allow_fuzzy' in data:
         root.allow_fuzzy = data['allow_fuzzy']
     if 'fuzzy_image_type' in data:
         root.fuzzy_image_type = data['fuzzy_image_type']
     session.commit()
+    if enabled_changed:
+        update_all_versions()
     return jsonify({
         'id': root.id, 'path': root.path,
         'recursive': root.recursive, 'enabled': root.enabled,
@@ -99,10 +104,9 @@ def trigger_scan():
     _add_log('scan', 'info', f"扫描开始 - {'全量' if full_scan else '增量'}模式", json.dumps({'allow_fuzzy': allow_fuzzy, 'root_ids': root_ids}))
 
     try:
-        if root_ids:
-            roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
-        else:
-            roots = session.query(ScanRoot).filter(ScanRoot.enabled == True).all()
+        if not root_ids:
+            return jsonify({'error': '请指定要扫描的目录'}), 400
+        roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
 
         if not roots:
             return jsonify({'error': '没有可扫描的目录'}), 400
