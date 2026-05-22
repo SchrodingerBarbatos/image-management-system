@@ -1,12 +1,16 @@
 from flask import Flask
 from flask_cors import CORS
 from config import DB_PATH
-from models import Base, engine
+from models import Base, engine, session
 
 app = Flask(__name__)
 CORS(app)
 
 Base.metadata.create_all(bind=engine)
+
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+    session.remove()
 
 # Migration: add columns that may not exist in existing databases
 from sqlalchemy import text
@@ -26,6 +30,9 @@ with engine.connect() as conn:
             default_detail_mtime TEXT DEFAULT ''
         )
     '''))
+    conn.commit()
+    # Create performance indexes if not exist
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_status_barcode_type ON image (status, barcode, image_type)'))
     conn.commit()
 
 from routes.scan import scan_bp

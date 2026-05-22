@@ -1,9 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Card, Checkbox, Collapse, Tag, Image, Spin, Empty, Typography, Space, Button, Modal, Select, message } from 'antd';
 import { DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import { ImageRec, ImageVersion, imageApi, versionApi, barcodeSettingApi } from '../services/api';
 
 const { Text } = Typography;
+
+const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">' +
+  '<rect fill="#f5f5f5" width="100" height="100" rx="4"/>' +
+  '<text x="50" y="55" text-anchor="middle" fill="#bfbfbf" font-size="36" font-family="sans-serif">?</text>' +
+  '</svg>'
+);
 
 interface Props {
   barcode: string | null;
@@ -57,16 +64,22 @@ const ImageCardDetail: React.FC<Props> = ({
     return () => { cancelled = true; };
   }, [barcode]);
 
-  const mainImages = images.filter(i => i.image_type === 'main' && (!mainVersion || i.folder_mtime === mainVersion));
-  const detailImages = images.filter(i => i.image_type === 'detail' && (!detailVersion || i.folder_mtime === detailVersion));
+  const mainImages = useMemo(
+    () => images.filter(i => i.image_type === 'main' && (!mainVersion || i.folder_mtime === mainVersion)),
+    [images, mainVersion]
+  );
+  const detailImages = useMemo(
+    () => images.filter(i => i.image_type === 'detail' && (!detailVersion || i.folder_mtime === detailVersion)),
+    [images, detailVersion]
+  );
 
   // Build version options for dropdowns
-  const versionOptions = versions.map(v => ({
+  const versionOptions = useMemo(() => versions.map(v => ({
     value: v.folder_mtime,
     label: `${v.version_label}${v.is_latest ? ' (最新)' : ''}`,
-  }));
+  })), [versions]);
 
-  const handleVersionChange = (type: 'main' | 'detail', mtime: string) => {
+  const handleVersionChange = useCallback((type: 'main' | 'detail', mtime: string) => {
     if (type === 'main') {
       setMainVersion(mtime);
       barcodeSettingApi.update(barcode!, { default_main_mtime: mtime });
@@ -74,20 +87,20 @@ const ImageCardDetail: React.FC<Props> = ({
       setDetailVersion(mtime);
       barcodeSettingApi.update(barcode!, { default_detail_mtime: mtime });
     }
-  };
+  }, [barcode]);
 
-  const toggleCheck = (id: number, type: 'main' | 'detail') => {
+  const toggleCheck = useCallback((id: number, type: 'main' | 'detail') => {
     const selected = type === 'main' ? new Set(selectedMainIds) : new Set(selectedDetailIds);
     if (selected.has(id)) selected.delete(id); else selected.add(id);
     type === 'main' ? onMainSelectionChange(selected) : onDetailSelectionChange(selected);
-  };
+  }, [selectedMainIds, selectedDetailIds, onMainSelectionChange, onDetailSelectionChange]);
 
-  const toggleAll = (imgs: ImageRec[], type: 'main' | 'detail') => {
+  const toggleAll = useCallback((imgs: ImageRec[], type: 'main' | 'detail') => {
     const currentSet = type === 'main' ? selectedMainIds : selectedDetailIds;
     const allIds = new Set(imgs.map(i => i.id));
     const allSelected = imgs.every(i => currentSet.has(i.id));
     type === 'main' ? onMainSelectionChange(allSelected ? new Set() : allIds) : onDetailSelectionChange(allSelected ? new Set() : allIds);
-  };
+  }, [selectedMainIds, selectedDetailIds, onMainSelectionChange, onDetailSelectionChange]);
 
   const handleDelete = async (deleteFile: boolean) => {
     if (!deleteTarget) return;
@@ -136,6 +149,7 @@ const ImageCardDetail: React.FC<Props> = ({
     <div key={img.id} style={{ position: 'relative', display: 'inline-block' }}>
       <Image src={imageApi.thumbnailUrl(img.id)} width={100} height={100}
         style={{ objectFit: 'cover', borderRadius: 4 }}
+        fallback={PLACEHOLDER_SVG}
         preview={{ src: imageApi.fileUrl(img.id), mask: (
           <Space>
             <EyeOutlined />
@@ -228,4 +242,4 @@ const ImageCardDetail: React.FC<Props> = ({
   );
 };
 
-export default ImageCardDetail;
+export default React.memo(ImageCardDetail);

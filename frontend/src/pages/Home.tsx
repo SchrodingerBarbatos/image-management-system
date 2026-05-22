@@ -93,10 +93,10 @@ const Home: React.FC = () => {
     } finally { setBatchLoading(false); }
   };
 
-  const handleCardDeleted = () => {
+  const handleCardDeleted = useCallback(() => {
     fetchBarcodes();
     fetchPendingCount();
-  };
+  }, [fetchBarcodes, fetchPendingCount]);
 
   return (
     <Layout style={{ minHeight: '100vh' }}>

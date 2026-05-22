@@ -1,5 +1,6 @@
 import re, os, hashlib, datetime
 from models import session, Image, ScanRoot
+from thumbnail import generate_thumbnail
 
 # NAMED_RE: barcode_主图/详情图_sequence.ext — type from filename
 NAMED_RE = re.compile(
@@ -79,6 +80,7 @@ def scan_root(root_id, allow_fuzzy=False, full_scan=False):
     added = 0
     skipped = 0
     broken_cleaned = 0
+    thumb_jobs = []
 
     # Full scan: delete all existing images for this root
     if full_scan:
@@ -137,6 +139,7 @@ def scan_root(root_id, allow_fuzzy=False, full_scan=False):
                 existing.folder_mtime = folder_mtime
                 existing.status = 'active'
                 added += 1
+                thumb_jobs.append((existing.id, full_path))
                 continue
 
             parsed = parse_filename(fname, fuzzy_type)
@@ -162,6 +165,8 @@ def scan_root(root_id, allow_fuzzy=False, full_scan=False):
                 confirmed=parsed['confirmed'],
             )
             session.add(img)
+            session.flush()  # 获取 img.id
+            thumb_jobs.append((img.id, full_path))
             added += 1
 
     # 磁盘上已不存在的文件标记为 broken
@@ -169,4 +174,9 @@ def scan_root(root_id, allow_fuzzy=False, full_scan=False):
         img.status = 'broken'
 
     session.commit()
+
+    # 预生成缩略图（新图片和内容变更的图片）
+    for img_id, full_path in thumb_jobs:
+        generate_thumbnail(img_id, full_path)
+
     return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': len(indexed_map)}

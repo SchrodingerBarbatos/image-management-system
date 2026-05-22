@@ -1,4 +1,4 @@
-import os, zipfile
+import os, zipfile, time
 from flask import Blueprint, request, jsonify, send_file
 from models import session, Image, ImageVersion, ExportTask, BarcodeSetting
 from config import UPLOAD_DIR
@@ -163,9 +163,38 @@ def serve_thumbnail(img_id):
         img.status = 'broken'
         session.commit()
         return jsonify({'error': 'source file not found'}), 404
+
+    thumb_path = get_thumbnail_path(img_id)
     if not thumbnail_exists(img_id):
-        generate_thumbnail(img_id, img.file_path)
-    return send_file(get_thumbnail_path(img_id), mimetype='image/jpeg')
+        ok = generate_thumbnail(img_id, img.file_path)
+        if not ok:
+            return jsonify({'error': 'thumbnail generation failed'}), 500
+
+    # HTTP caching: use thumbnail file's mtime as ETag / Last-Modified
+    try:
+        stat = os.stat(thumb_path)
+        etag = f'"{img_id}-{int(stat.st_mtime)}"'
+        last_modified = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(stat.st_mtime))
+    except OSError:
+        etag = f'"{img_id}"'
+        last_modified = None
+
+    # Check If-None-Match / If-Modified-Since for 304
+    if_none_match = request.headers.get('If-None-Match', '')
+    if etag == if_none_match:
+        return '', 304
+
+    if last_modified:
+        if_modified_since = request.headers.get('If-Modified-Since', '')
+        if if_modified_since and if_modified_since == last_modified:
+            return '', 304
+
+    response = send_file(thumb_path, mimetype='image/jpeg')
+    response.headers['ETag'] = etag
+    response.headers['Cache-Control'] = 'public, max-age=86400'
+    if last_modified:
+        response.headers['Last-Modified'] = last_modified
+    return response
 
 @images_bp.route('/images/batch-delete', methods=['POST'])
 def batch_delete():

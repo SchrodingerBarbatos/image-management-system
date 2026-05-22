@@ -1,10 +1,11 @@
 import hashlib, os, datetime
 from sqlalchemy import create_engine, Column, Integer, Text, Boolean, UniqueConstraint, Index, ForeignKey
-from sqlalchemy.orm import DeclarativeBase, Session, relationship
+from sqlalchemy.orm import DeclarativeBase, Session, scoped_session, sessionmaker, relationship
 from config import DB_PATH
 
 engine = create_engine(f'sqlite:///{DB_PATH}', connect_args={'check_same_thread': False})
-session = Session(engine)
+session_factory = sessionmaker(bind=engine)
+session = scoped_session(session_factory)
 
 class Base(DeclarativeBase):
     pass
@@ -41,6 +42,7 @@ class Image(Base):
         Index('idx_barcode_type', 'barcode', 'image_type'),
         Index('idx_md5', 'md5_hash'),
         Index('idx_folder_mtime', 'folder_mtime'),
+        Index('idx_status_barcode_type', 'status', 'barcode', 'image_type'),
     )
 
 class ImageVersion(Base):
