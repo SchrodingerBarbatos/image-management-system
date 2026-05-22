@@ -1,9 +1,12 @@
-from flask import Flask
+import os, sys
+from flask import Flask, send_from_directory
 from flask_cors import CORS
 from config import DB_PATH
 from models import Base, engine, session
 
-app = Flask(__name__)
+IS_PACKAGED = getattr(sys, 'frozen', False)
+
+app = Flask(__name__, static_folder=None)
 CORS(app)
 
 Base.metadata.create_all(bind=engine)
@@ -11,6 +14,27 @@ Base.metadata.create_all(bind=engine)
 @app.teardown_appcontext
 def shutdown_session(exception=None):
     session.remove()
+
+# Determine frontend dist path
+if IS_PACKAGED:
+    FRONTEND_DIR = os.path.join(sys._MEIPASS, 'frontend')
+else:
+    FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend', 'dist')
+
+@app.route('/')
+def serve_index():
+    return send_from_directory(FRONTEND_DIR, 'index.html')
+
+@app.route('/assets/<path:filename>')
+def serve_assets(filename):
+    return send_from_directory(os.path.join(FRONTEND_DIR, 'assets'), filename)
+
+@app.route('/<path:filename>')
+def serve_frontend(filename):
+    file_path = os.path.join(FRONTEND_DIR, filename)
+    if os.path.isfile(file_path):
+        return send_from_directory(FRONTEND_DIR, filename)
+    return send_from_directory(FRONTEND_DIR, 'index.html')
 
 # Migration: add columns that may not exist in existing databases
 from sqlalchemy import text
@@ -49,4 +73,15 @@ from routes.export import cleanup_old_exports
 cleanup_old_exports()
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=5000)
+    parser.add_argument('--debug', action='store_true', default=False)
+    parser.add_argument('--open-browser', action='store_true', default=False)
+    args = parser.parse_args()
+
+    if args.open_browser:
+        import webbrowser, threading
+        threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
+
+    app.run(debug=args.debug, port=args.port)

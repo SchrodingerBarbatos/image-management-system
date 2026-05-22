@@ -1,0 +1,88 @@
+name: Build Windows x64 Release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'backend/**'
+      - 'frontend/src/**'
+      - 'frontend/package.json'
+      - 'frontend/index.html'
+      - 'frontend/vite.config.ts'
+      - 'frontend/tsconfig.json'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: '创建 GitHub Release'
+        type: boolean
+        default: true
+      version:
+        description: '发布版本号 (如 v1.0.0)'
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Build Windows exe with PyInstaller
+        run: |
+          pyinstaller --onefile `
+            --name "image-manager" `
+            --add-data "frontend/dist;frontend" `
+            --hidden-import flask `
+            --hidden-import flask_cors `
+            --hidden-import sqlalchemy `
+            --hidden-import PIL `
+            --hidden-import openpyxl `
+            --console `
+            backend/app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-manager-win64
+          path: dist/image-manager.exe
+          retention-days: 30
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.sha }}
+          name: ${{ inputs.version || 'Snapshot' }}
+          files: dist/image-manager.exe
+          draft: false
+          prerelease: ${{ inputs.version == '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
