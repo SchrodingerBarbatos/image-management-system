@@ -13,8 +13,9 @@ import {
   Modal,
   Select,
   message,
+  Popover,
 } from "antd";
-import { DeleteOutlined, EyeOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EyeOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import {
   ImageRec,
   ImageVersion,
@@ -275,6 +276,38 @@ const ImageCardDetail: React.FC<Props> = ({
           setDeleteTarget(img);
         }}
       />
+      <Popover
+        title={
+          <Text ellipsis style={{ maxWidth: 260 }}>
+            {img.filename}
+          </Text>
+        }
+        content={
+          <div style={{ maxWidth: 320, fontSize: 12 }}>
+            <div style={{ marginBottom: 4 }}>
+              <Text type="secondary">路径：</Text>
+              <Text copyable style={{ wordBreak: "break-all" }}>{img.file_path}</Text>
+            </div>
+            <div style={{ marginBottom: 4 }}>
+              <Text type="secondary">文件夹：</Text>
+              <Text style={{ wordBreak: "break-all" }}>{img.folder_path}</Text>
+            </div>
+            <div>
+              <Text type="secondary">版本时间：</Text>
+              <Text>{img.folder_mtime?.replace("T", " ").slice(0, 19)}</Text>
+            </div>
+          </div>
+        }
+        trigger="click"
+        placement="left"
+      >
+        <Button
+          size="small"
+          icon={<InfoCircleOutlined />}
+          style={{ position: "absolute", bottom: 2, right: 2, opacity: 0.85 }}
+          onClick={(e) => e.stopPropagation()}
+        />
+      </Popover>
     </div>
   );
 
