@@ -73,7 +73,8 @@ def generate_zip():
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for img in imgs:
             if os.path.exists(img.file_path):
-                zf.write(img.file_path, f"{img.barcode}/{img.filename}")
+                type_folder = '主图' if img.image_type == 'main' else '详情图'
+                zf.write(img.file_path, f"{type_folder}/{img.filename}")
 
     task.status = 'done'
     task.zip_path = zip_path
