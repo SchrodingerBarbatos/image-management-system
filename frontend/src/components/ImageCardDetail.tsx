@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Card,
   Checkbox,
@@ -66,6 +66,9 @@ const ImageCardDetail: React.FC<Props> = ({
   // Per-type version selection (stored as folder_mtime)
   const [mainVersion, setMainVersion] = useState<string>("");
   const [detailVersion, setDetailVersion] = useState<string>("");
+  const barcodeRef = useRef(barcode);
+  barcodeRef.current = barcode;
+  const deletingRef = useRef(false);
 
   useEffect(() => {
     if (!barcode) return;
@@ -79,14 +82,15 @@ const ImageCardDetail: React.FC<Props> = ({
         if (cancelled) return;
         setImages(imgRes.items);
         if (imgRes.items.length > 0) {
-          imageApi.get(imgRes.items[0].id).then((detail) => {
+          return imageApi.get(imgRes.items[0].id).then((detail) => {
             if (cancelled) return;
             setVersions(detail.versions);
-            const latest = detail.versions.find((v) => v.is_latest);
-            const latestMtime = latest?.folder_mtime || "";
-            // Use saved setting or fallback to latest
-            setMainVersion(settings.default_main_mtime || latestMtime);
-            setDetailVersion(settings.default_detail_mtime || latestMtime);
+            const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
+            const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
+            const newMainVersion = settings.default_main_mtime || latestMain?.folder_mtime || "";
+            const newDetailVersion = settings.default_detail_mtime || latestDetail?.folder_mtime || "";
+            setMainVersion(newMainVersion);
+            setDetailVersion(newDetailVersion);
           });
         } else {
           setVersions([]);
@@ -192,95 +196,123 @@ const ImageCardDetail: React.FC<Props> = ({
   );
 
   const handleDelete = async (deleteFile: boolean) => {
-    if (!deleteTarget) return;
-    await imageApi.delete(deleteTarget.id, deleteFile);
-    message.success(deleteFile ? "已删除索引和文件" : "已删除索引");
-    setDeleteTarget(null);
-    setImages((prev) => prev.filter((i) => i.id !== deleteTarget.id));
-    const newMain = new Set(selectedMainIds);
-    newMain.delete(deleteTarget.id);
-    const newDetail = new Set(selectedDetailIds);
-    newDetail.delete(deleteTarget.id);
-    onMainSelectionChange(newMain);
-    onDetailSelectionChange(newDetail);
-    onDeleted();
+    if (!deleteTarget || deletingRef.current) return;
+    deletingRef.current = true;
+    try {
+      await imageApi.delete(deleteTarget.id, deleteFile);
+      message.success(deleteFile ? "已删除索引和文件" : "已删除索引");
+      setDeleteTarget(null);
+      setImages((prev) => prev.filter((i) => i.id !== deleteTarget.id));
+      const newMain = new Set(selectedMainIds);
+      newMain.delete(deleteTarget.id);
+      const newDetail = new Set(selectedDetailIds);
+      newDetail.delete(deleteTarget.id);
+      onMainSelectionChange(newMain);
+      onDetailSelectionChange(newDetail);
+      onDeleted();
+    } catch {
+      message.error("删除失败，请重试");
+    } finally {
+      deletingRef.current = false;
+    }
   };
 
   const handleVersionDelete = async (deleteFile: boolean) => {
     if (!versionDeleteTarget) return;
     const deletedMtime = versionDeleteTarget.folder_mtime;
-    await versionApi.delete(versionDeleteTarget.id, deleteFile);
-    message.success(deleteFile ? "已删除版本索引和文件" : "已删除版本索引");
-    setVersionDeleteTarget(null);
-    if (barcode) {
-      setLoading(true);
-      const [imgRes, settings] = await Promise.all([
-        imageApi.list({ barcode, page_size: 500 }),
-        barcodeSettingApi.get(barcode),
-      ]);
-      setImages(imgRes.items);
-      if (imgRes.items.length > 0) {
-        const detail = await imageApi.get(imgRes.items[0].id);
-        setVersions(detail.versions);
-        const latest = detail.versions.find((v) => v.is_latest);
-        const latestMtime = latest?.folder_mtime || "";
-        // Reset to latest if deleted version was the selected one
-        setMainVersion((prev) =>
-          prev === deletedMtime
-            ? settings.default_main_mtime || latestMtime
-            : prev,
-        );
-        setDetailVersion((prev) =>
-          prev === deletedMtime
-            ? settings.default_detail_mtime || latestMtime
-            : prev,
-        );
-      } else {
-        setVersions([]);
-        setMainVersion("");
-        setDetailVersion("");
+    const deletedImageType = versionDeleteTarget.image_type;
+    try {
+      await versionApi.delete(versionDeleteTarget.id, deleteFile);
+      message.success(deleteFile ? "已删除版本索引和文件" : "已删除版本索引");
+      setVersionDeleteTarget(null);
+      if (barcode) {
+        setLoading(true);
+        const [imgRes, settings] = await Promise.all([
+          imageApi.list({ barcode, page_size: 500 }),
+          barcodeSettingApi.get(barcode),
+        ]);
+        if (barcodeRef.current !== barcode) return;
+        setImages(imgRes.items);
+        if (imgRes.items.length > 0) {
+          const detail = await imageApi.get(imgRes.items[0].id);
+          if (barcodeRef.current !== barcode) return;
+          setVersions(detail.versions);
+          const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
+          const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
+          // Reset to latest if deleted version was the selected one
+          setMainVersion((prev) =>
+            prev === deletedMtime && deletedImageType === "main"
+              ? settings.default_main_mtime || latestMain?.folder_mtime || ""
+              : prev,
+          );
+          setDetailVersion((prev) =>
+            prev === deletedMtime && deletedImageType === "detail"
+              ? settings.default_detail_mtime || latestDetail?.folder_mtime || ""
+              : prev,
+          );
+        } else {
+          setVersions([]);
+          setMainVersion("");
+          setDetailVersion("");
+        }
       }
+      onDeleted();
+    } catch {
+      message.error("删除版本失败，请重试");
+    } finally {
       setLoading(false);
     }
-    onDeleted();
   };
 
   const handleDuplicateDelete = async (deleteFile: boolean) => {
     if (!dupDeleteTarget) return;
-    await barcodeApi.deleteDuplicateImages(
-      dupDeleteTarget.barcode,
-      dupDeleteTarget.folderMtime,
-      dupDeleteTarget.imageType,
-      deleteFile,
-    );
-    message.success(deleteFile ? "已删除重复图片和文件" : "已删除重复图片索引");
-    setDupDeleteTarget(null);
-    if (barcode) {
-      setLoading(true);
-      const [imgRes, settings] = await Promise.all([
-        imageApi.list({ barcode, page_size: 500 }),
-        barcodeSettingApi.get(barcode),
-      ]);
-      setImages(imgRes.items);
-      if (imgRes.items.length > 0) {
-        const detail = await imageApi.get(imgRes.items[0].id);
-        setVersions(detail.versions);
-        const latest = detail.versions.find((v) => v.is_latest);
-        const latestMtime = latest?.folder_mtime || "";
-        setMainVersion((prev) =>
-          settings.default_main_mtime || (prev === dupDeleteTarget.folderMtime ? latestMtime : prev),
-        );
-        setDetailVersion((prev) =>
-          settings.default_detail_mtime || (prev === dupDeleteTarget.folderMtime ? latestMtime : prev),
-        );
-      } else {
-        setVersions([]);
-        setMainVersion("");
-        setDetailVersion("");
+    const targetFolderMtime = dupDeleteTarget.folderMtime;
+    const targetImageType = dupDeleteTarget.imageType;
+    try {
+      await barcodeApi.deleteDuplicateImages(
+        dupDeleteTarget.barcode,
+        targetFolderMtime,
+        targetImageType,
+        deleteFile,
+      );
+      message.success(deleteFile ? "已删除重复图片和文件" : "已删除重复图片索引");
+      setDupDeleteTarget(null);
+      if (barcode) {
+        setLoading(true);
+        const [imgRes, settings] = await Promise.all([
+          imageApi.list({ barcode, page_size: 500 }),
+          barcodeSettingApi.get(barcode),
+        ]);
+        if (barcodeRef.current !== barcode) return;
+        setImages(imgRes.items);
+        if (imgRes.items.length > 0) {
+          const detail = await imageApi.get(imgRes.items[0].id);
+          if (barcodeRef.current !== barcode) return;
+          setVersions(detail.versions);
+          const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
+          const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
+          setMainVersion((prev) =>
+            prev === targetFolderMtime && targetImageType === "main"
+              ? settings.default_main_mtime || latestMain?.folder_mtime || ""
+              : prev,
+          );
+          setDetailVersion((prev) =>
+            prev === targetFolderMtime && targetImageType === "detail"
+              ? settings.default_detail_mtime || latestDetail?.folder_mtime || ""
+              : prev,
+          );
+        } else {
+          setVersions([]);
+          setMainVersion("");
+          setDetailVersion("");
+        }
       }
+      onDeleted();
+    } catch {
+      message.error("删除重复图片失败，请重试");
+    } finally {
       setLoading(false);
     }
-    onDeleted();
   };
 
   const renderImage = (img: ImageRec) => (
