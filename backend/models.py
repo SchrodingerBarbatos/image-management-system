@@ -35,6 +35,7 @@ class Image(Base):
     file_path = Column(Text, unique=True, nullable=False)
     file_size = Column(Integer, default=0)
     md5_hash = Column(Text, default='')  # stores size_mtime fingerprint for fast change detection
+    content_md5 = Column(Text, default='')  # real MD5 of file content, computed at scan time; survives DB portability
     folder_path = Column(Text, default='')
     folder_mtime = Column(Text, default='')
     scan_root_id = Column(Integer, ForeignKey('scan_root.id'), nullable=False)

@@ -85,6 +85,11 @@ with engine.connect() as conn:
     if 'duplicate_mtimes' not in ver_cols:
         conn.execute(text("ALTER TABLE image_version ADD COLUMN duplicate_mtimes TEXT DEFAULT ''"))
         conn.commit()
+    # Migration: add content_md5 to image (real MD5 for DB portability)
+    img_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('image')"))}
+    if 'content_md5' not in img_cols:
+        conn.execute(text("ALTER TABLE image ADD COLUMN content_md5 TEXT DEFAULT ''"))
+        conn.commit()
 
 # Rebuild versions if we just added the image_type column
 if need_rebuild:

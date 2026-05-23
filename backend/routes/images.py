@@ -123,7 +123,7 @@ def get_image(img_id):
         return jsonify({'error': 'not found'}), 404
     versions = session.query(ImageVersion).filter(
         ImageVersion.barcode == img.barcode
-    ).order_by(ImageVersion.version_label.desc()).all()
+    ).order_by(ImageVersion.image_type.desc(), ImageVersion.folder_mtime.desc()).all()
     return jsonify({
         'image': _image_to_dict(img),
         'versions': [{
@@ -200,9 +200,12 @@ def serve_thumbnail(img_id):
 
     thumb_path = get_thumbnail_path(img_id)
     if not thumbnail_exists(img_id):
-        ok = generate_thumbnail(img_id, img.file_path)
+        ok, md5 = generate_thumbnail(img_id, img.file_path)
         if not ok:
             return jsonify({'error': 'thumbnail generation failed'}), 500
+        if md5 and not img.content_md5:
+            img.content_md5 = md5
+            session.commit()
 
     # HTTP caching: use thumbnail file's mtime as ETag / Last-Modified
     try:
@@ -328,7 +331,8 @@ def _image_to_dict(img):
         'id': img.id, 'barcode': img.barcode, 'image_type': img.image_type,
         'sequence': img.sequence, 'filename': img.filename, 'ext': img.ext,
         'file_path': img.file_path, 'file_size': img.file_size,
-        'md5_hash': img.md5_hash, 'folder_path': img.folder_path,
+        'md5_hash': img.md5_hash, 'content_md5': img.content_md5,
+        'folder_path': img.folder_path,
         'folder_mtime': img.folder_mtime, 'scan_root_id': img.scan_root_id,
         'confirmed': img.confirmed, 'status': img.status,
         'created_at': img.created_at, 'updated_at': img.updated_at,

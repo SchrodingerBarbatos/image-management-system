@@ -60,12 +60,16 @@ def file_fingerprint(filepath):
 
 def compute_md5(filepath):
     """Compute MD5 hash of a file (reads content). Only called for
-    new files or files whose fingerprint has changed."""
-    h = hashlib.md5()
-    with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(8192), b''):
-            h.update(chunk)
-    return h.hexdigest()
+    new files or files whose fingerprint has changed.
+    Returns '' if the file cannot be read (missing, permission, etc.)."""
+    try:
+        h = hashlib.md5()
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ''
 
 def _walk_nonrecursive(path):
     """Yield (dirpath, [], filenames) for a single directory, with error handling."""
@@ -199,14 +203,25 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
 
     session.commit()
 
-    # 预生成缩略图（新图片和内容变更的图片）
+    # 预生成缩略图（新图片和内容变更的图片），同时回写 content_md5
     _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0,
             added=added, skipped=skipped)
+    md5_updates = {}
     for i, (img_id, full_path) in enumerate(thumb_jobs):
-        generate_thumbnail(img_id, full_path)
+        _, md5 = generate_thumbnail(img_id, full_path)
+        if md5:
+            md5_updates[img_id] = md5
         if (i + 1) % 10 == 0:
             _report('thumbnails', thumbnail_current=i + 1,
                     thumbnail_total=len(thumb_jobs))
+    if md5_updates:
+        ids = list(md5_updates.keys())
+        for chunk_start in range(0, len(ids), 500):
+            chunk = ids[chunk_start:chunk_start + 500]
+            imgs = session.query(Image).filter(Image.id.in_(chunk)).all()
+            for img in imgs:
+                img.content_md5 = md5_updates[img.id]
+        session.commit()
 
     _report('root_done', added=added, skipped=skipped,
             broken_cleaned=broken_cleaned, broken_new=len(indexed_map))

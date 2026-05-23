@@ -4,11 +4,14 @@ from scanner import compute_md5
 
 
 def compute_content_hash(images):
-    """Deterministic hash from sorted (filename, file_size, md5_hash) triples.
+    """Deterministic hash from sorted (filename, file_size, content_md5) triples.
     Same content → same hash, regardless of file paths or mtimes.
-    Includes md5_hash (fingerprint) to avoid collisions when different files
-    share the same name and size."""
-    pairs = sorted((img.filename, img.file_size, img.md5_hash) for img in images)
+    Uses content_md5 (real MD5) when available; falls back to md5_hash (fingerprint)
+    for legacy data that predates content_md5."""
+    pairs = sorted(
+        (img.filename, img.file_size, img.content_md5 or img.md5_hash)
+        for img in images
+    )
     payload = json.dumps(pairs, sort_keys=True)
     return hashlib.md5(payload.encode()).hexdigest()
 
@@ -26,13 +29,15 @@ def groups_are_identical(imgs1, imgs2):
     key2 = sorted((img.filename, img.file_size) for img in imgs2)
     if key1 != key2:
         return False
-    # Layer 3: MD5 confirmation — read actual file content
+    # Layer 3: content hash confirmation.
+    # Prefer content_md5 (real MD5 computed at scan time, survives DB portability),
+    # fall back to reading file, then to fingerprint (size_mtime) if file unavailable.
     s1 = sorted(imgs1, key=lambda x: x.filename)
     s2 = sorted(imgs2, key=lambda x: x.filename)
     for a, b in zip(s1, s2):
-        md5_a = compute_md5(a.file_path)
-        md5_b = compute_md5(b.file_path)
-        if not md5_a or not md5_b or md5_a != md5_b:
+        md5_a = a.content_md5 or compute_md5(a.file_path) or a.md5_hash
+        md5_b = b.content_md5 or compute_md5(b.file_path) or b.md5_hash
+        if md5_a != md5_b:
             return False
     return True
 

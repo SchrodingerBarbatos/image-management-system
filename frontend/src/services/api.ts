@@ -16,6 +16,7 @@ export interface ImageRec {
   id: number; barcode: string; image_type: string; sequence: number;
   filename: string; ext: string; file_path: string; file_size: number;
   md5_hash: string; // stores size_mtime fingerprint, not actual MD5
+  content_md5: string; // real MD5 of file content, computed at scan time
   folder_path: string; folder_mtime: string;
   scan_root_id: number; confirmed: boolean; status: string;
   created_at: string; updated_at: string;
