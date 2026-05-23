@@ -15,7 +15,7 @@ export interface ScanLog {
 export interface ImageRec {
   id: number; barcode: string; image_type: string; sequence: number;
   filename: string; ext: string; file_path: string; file_size: number;
-  md5_hash: string; folder_path: string; folder_mtime: string;
+  md5_hash: string; // stores size_mtime fingerprint, not actual MD5 folder_path: string; folder_mtime: string;
   scan_root_id: number; confirmed: boolean; status: string;
   created_at: string; updated_at: string;
 }
@@ -24,6 +24,7 @@ export interface ImageVersion {
   id: number; barcode: string; image_type: string; version_label: string;
   folder_mtime: string; content_hash: string; is_latest: boolean;
   created_at: string;
+  duplicate_mtimes: string[];
 }
 
 export interface BarcodeRec {
@@ -62,7 +63,25 @@ export const scanApi = {
     api.post('/scan', data || {}).then(r => r.data),
   checkNew: (root_ids: number[]) =>
     api.post<{ new_root_ids: number[] }>('/scan-roots/check-new', { root_ids }).then(r => r.data),
+  getStatus: (jobId: string) =>
+    api.get<ScanJobStatus>(`/scan/status/${jobId}`).then(r => r.data),
 };
+
+export interface ScanJobStatus {
+  status: 'running' | 'done' | 'error';
+  phase: 'starting' | 'scan_start' | 'scanning' | 'thumbnails' | 'versioning' | 'root_done' | 'done' | 'error';
+  current_root_path?: string;
+  current_root_index?: number;
+  total_roots?: number;
+  current_file?: string;
+  added: number;
+  skipped: number;
+  broken_cleaned: number;
+  broken_new: number;
+  thumbnail_total: number;
+  thumbnail_current: number;
+  error?: string;
+}
 
 export const scanLogApi = {
   list: () => api.get<ScanLog[]>('/scan-logs').then(r => r.data),
@@ -88,6 +107,8 @@ export const imageApi = {
 export const barcodeApi = {
   list: (params: BarcodeListParams) =>
     api.get<Paginated<BarcodeRec>>('/barcodes', { params }).then(r => r.data),
+  deleteDuplicateImages: (barcode: string, folderMtime: string, imageType: string, deleteFile = false) =>
+    api.delete(`/barcodes/${barcode}/duplicate-images`, { params: { folder_mtime: folderMtime, image_type: imageType, delete_file: deleteFile } }).then(r => r.data),
 };
 
 export const pendingApi = {

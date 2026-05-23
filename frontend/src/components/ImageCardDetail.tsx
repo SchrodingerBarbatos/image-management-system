@@ -21,6 +21,7 @@ import {
   ImageVersion,
   imageApi,
   versionApi,
+  barcodeApi,
   barcodeSettingApi,
 } from "../services/api";
 
@@ -58,6 +59,9 @@ const ImageCardDetail: React.FC<Props> = ({
   const [deleteTarget, setDeleteTarget] = useState<ImageRec | null>(null);
   const [versionDeleteTarget, setVersionDeleteTarget] =
     useState<ImageVersion | null>(null);
+  const [dupDeleteTarget, setDupDeleteTarget] = useState<{
+    barcode: string; folderMtime: string; imageType: string;
+  } | null>(null);
 
   // Per-type version selection (stored as folder_mtime)
   const [mainVersion, setMainVersion] = useState<string>("");
@@ -241,6 +245,44 @@ const ImageCardDetail: React.FC<Props> = ({
     onDeleted();
   };
 
+  const handleDuplicateDelete = async (deleteFile: boolean) => {
+    if (!dupDeleteTarget) return;
+    await barcodeApi.deleteDuplicateImages(
+      dupDeleteTarget.barcode,
+      dupDeleteTarget.folderMtime,
+      dupDeleteTarget.imageType,
+      deleteFile,
+    );
+    message.success(deleteFile ? "已删除重复图片和文件" : "已删除重复图片索引");
+    setDupDeleteTarget(null);
+    if (barcode) {
+      setLoading(true);
+      const [imgRes, settings] = await Promise.all([
+        imageApi.list({ barcode, page_size: 500 }),
+        barcodeSettingApi.get(barcode),
+      ]);
+      setImages(imgRes.items);
+      if (imgRes.items.length > 0) {
+        const detail = await imageApi.get(imgRes.items[0].id);
+        setVersions(detail.versions);
+        const latest = detail.versions.find((v) => v.is_latest);
+        const latestMtime = latest?.folder_mtime || "";
+        setMainVersion((prev) =>
+          settings.default_main_mtime || (prev === dupDeleteTarget.folderMtime ? latestMtime : prev),
+        );
+        setDetailVersion((prev) =>
+          settings.default_detail_mtime || (prev === dupDeleteTarget.folderMtime ? latestMtime : prev),
+        );
+      } else {
+        setVersions([]);
+        setMainVersion("");
+        setDetailVersion("");
+      }
+      setLoading(false);
+    }
+    onDeleted();
+  };
+
   const renderImage = (img: ImageRec) => (
     <div key={img.id} style={{ position: "relative", display: "inline-block" }}>
       <Image
@@ -325,32 +367,58 @@ const ImageCardDetail: React.FC<Props> = ({
                 key: "versions",
                 label: `版本历史 (${versions.length})`,
                 children: versions.map((v) => (
-                  <Tag
-                    key={v.id}
-                    color={v.is_latest ? "blue" : "default"}
-                    style={{ cursor: "pointer", marginBottom: 4 }}
-                    onClick={() => {
-                      if (v.image_type === "main") {
-                        setMainVersion(v.folder_mtime);
-                        barcodeSettingApi.update(barcode!, {
-                          default_main_mtime: v.folder_mtime,
-                        });
-                      } else {
-                        setDetailVersion(v.folder_mtime);
-                        barcodeSettingApi.update(barcode!, {
-                          default_detail_mtime: v.folder_mtime,
-                        });
-                      }
-                    }}
-                    closable
-                    onClose={(e) => {
-                      e.preventDefault();
-                      setVersionDeleteTarget(v);
-                    }}
-                  >
-                    {v.image_type === "main" ? "主" : "详"} {v.version_label}{" "}
-                    {v.is_latest ? "(最新)" : ""}
-                  </Tag>
+                  <div key={v.id} style={{ marginBottom: 6 }}>
+                    <Tag
+                      color={v.is_latest ? "blue" : "default"}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => {
+                        if (v.image_type === "main") {
+                          setMainVersion(v.folder_mtime);
+                          barcodeSettingApi.update(barcode!, {
+                            default_main_mtime: v.folder_mtime,
+                          });
+                        } else {
+                          setDetailVersion(v.folder_mtime);
+                          barcodeSettingApi.update(barcode!, {
+                            default_detail_mtime: v.folder_mtime,
+                          });
+                        }
+                      }}
+                      closable
+                      onClose={(e) => {
+                        e.preventDefault();
+                        setVersionDeleteTarget(v);
+                      }}
+                    >
+                      {v.image_type === "main" ? "主" : "详"} {v.version_label}{" "}
+                      {v.is_latest ? "(最新)" : ""}
+                    </Tag>
+                    {v.duplicate_mtimes && v.duplicate_mtimes.length > 0 && (
+                      <div style={{ marginLeft: 8, marginTop: 2 }}>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          重复文件夹 ({v.duplicate_mtimes.length}):
+                        </Text>
+                        {v.duplicate_mtimes.map((mtime) => (
+                          <Tag
+                            key={mtime}
+                            color="orange"
+                            style={{ fontSize: 11, marginLeft: 4, cursor: "pointer" }}
+                            closable
+                            onClose={(e) => {
+                              e.preventDefault();
+                              setDupDeleteTarget({
+                                barcode: barcode!,
+                                folderMtime: mtime,
+                                imageType: v.image_type,
+                              });
+                            }}
+                          >
+                            {mtime.replace("T", " ").slice(0, 19)}
+                          </Tag>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )),
               },
             ]}
@@ -440,6 +508,28 @@ const ImageCardDetail: React.FC<Props> = ({
         <Space style={{ marginTop: 12 }}>
           <Button onClick={() => handleVersionDelete(false)}>删除索引</Button>
           <Button danger onClick={() => handleVersionDelete(true)}>
+            删除索引和文件
+          </Button>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="删除重复图片"
+        open={!!dupDeleteTarget}
+        onCancel={() => setDupDeleteTarget(null)}
+        footer={null}
+        width={360}
+      >
+        <p>
+          将删除文件夹{" "}
+          <Text strong>
+            {dupDeleteTarget?.folderMtime?.replace("T", " ").slice(0, 19)}
+          </Text>{" "}
+          下的重复图片（{dupDeleteTarget?.imageType === "main" ? "主图" : "详情图"}）：
+        </p>
+        <Space style={{ marginTop: 12 }}>
+          <Button onClick={() => handleDuplicateDelete(false)}>删除索引</Button>
+          <Button danger onClick={() => handleDuplicateDelete(true)}>
             删除索引和文件
           </Button>
         </Space>

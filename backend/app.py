@@ -81,6 +81,10 @@ with engine.connect() as conn:
         ON image_version (barcode, image_type, content_hash)
     '''))
     conn.commit()
+    # Migration: add duplicate_mtimes to image_version
+    if 'duplicate_mtimes' not in ver_cols:
+        conn.execute(text("ALTER TABLE image_version ADD COLUMN duplicate_mtimes TEXT DEFAULT ''"))
+        conn.commit()
 
 # Rebuild versions if we just added the image_type column
 if need_rebuild:

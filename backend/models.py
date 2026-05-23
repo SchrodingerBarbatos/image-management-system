@@ -1,9 +1,14 @@
 import hashlib, os, datetime
-from sqlalchemy import create_engine, Column, Integer, Text, Boolean, UniqueConstraint, Index, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, Text, Boolean, UniqueConstraint, Index, ForeignKey, event
 from sqlalchemy.orm import DeclarativeBase, Session, scoped_session, sessionmaker, relationship
 from config import DB_PATH
 
 engine = create_engine(f'sqlite:///{DB_PATH}', connect_args={'check_same_thread': False})
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragma(dbapi_conn, _):
+    dbapi_conn.execute("PRAGMA journal_mode=WAL")
+    dbapi_conn.execute("PRAGMA busy_timeout=5000")
 session_factory = sessionmaker(bind=engine)
 session = scoped_session(session_factory)
 
@@ -29,7 +34,7 @@ class Image(Base):
     ext = Column(Text, nullable=False)
     file_path = Column(Text, unique=True, nullable=False)
     file_size = Column(Integer, default=0)
-    md5_hash = Column(Text, default='')
+    md5_hash = Column(Text, default='')  # stores size_mtime fingerprint for fast change detection
     folder_path = Column(Text, default='')
     folder_mtime = Column(Text, default='')
     scan_root_id = Column(Integer, ForeignKey('scan_root.id'), nullable=False)
@@ -54,6 +59,7 @@ class ImageVersion(Base):
     folder_mtime = Column(Text, default='')
     content_hash = Column(Text, nullable=False)
     is_latest = Column(Boolean, default=False)
+    duplicate_mtimes = Column(Text, default='')
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
 
     __table_args__ = (

@@ -49,8 +49,18 @@ def get_folder_mtime(folder_path):
     except OSError:
         return ''
 
+def file_fingerprint(filepath):
+    """Return a fast fingerprint for change detection: size_mtime.
+    Does NOT read file content — only stat()."""
+    try:
+        st = os.stat(filepath)
+        return f"{st.st_size}_{int(st.st_mtime)}"
+    except OSError:
+        return ''
+
 def compute_md5(filepath):
-    """Compute MD5 hash of a file."""
+    """Compute MD5 hash of a file (reads content). Only called for
+    new files or files whose fingerprint has changed."""
     h = hashlib.md5()
     with open(filepath, 'rb') as f:
         for chunk in iter(lambda: f.read(8192), b''):
@@ -64,23 +74,30 @@ def _walk_nonrecursive(path):
     except OSError:
         return
 
-def scan_root(root_id, full_scan=False):
+def scan_root(root_id, full_scan=False, progress_callback=None):
     """Scan a single scan root. If the root's allow_fuzzy toggle is on,
     image_type is taken from the root's fuzzy_image_type setting;
     otherwise defaults to 'main'.
 
-    If full_scan is True, all existing images for this root are deleted first."""
+    If full_scan is True, all existing images for this root are deleted first.
+    progress_callback(phase, **kwargs) is called at key points for async progress reporting."""
     root = session.get(ScanRoot, root_id)
     if not root:
         return {'error': 'Scan root not found'}
+
+    def _report(phase, **kw):
+        if progress_callback:
+            progress_callback(phase, **kw)
 
     use_custom_type = root.allow_fuzzy
     fuzzy_type = root.fuzzy_image_type if use_custom_type else 'main'
 
     added = 0
     skipped = 0
-    broken_cleaned = 0
+    broken_cleaned = 0  # in full_scan mode this counts all deleted records, not just broken
     thumb_jobs = []
+
+    _report('scan_start', current_root_path=root.path)
 
     # Full scan: delete all existing images for this root
     if full_scan:
@@ -115,18 +132,23 @@ def scan_root(root_id, full_scan=False):
                 continue
             full_path = os.path.normpath(os.path.join(dirpath, fname))
 
+            _report('scanning', current_file=fname, added=added, skipped=skipped)
+
             existing = indexed_map.pop(full_path, None)
             if existing is not None:
+                fp = file_fingerprint(full_path)
+                if not fp:
+                    existing.status = 'broken'
+                    continue
+                if fp == existing.md5_hash:
+                    # fingerprint 未变（文件大小 + mtime 均未变），跳过
+                    skipped += 1
+                    continue
+                # fingerprint 已变 → 文件内容已变化，重新解析并更新
                 try:
-                    new_md5 = compute_md5(full_path)
                     new_size = os.path.getsize(full_path)
                 except OSError:
                     continue
-                if new_md5 == existing.md5_hash:
-                    # 文件内容未变，保留旧的 folder_mtime，不更新
-                    skipped += 1
-                    continue
-                # 文件内容已变，重新解析文件名并更新所有字段
                 reparsed = parse_filename(fname, fuzzy_type)
                 if reparsed:
                     existing.barcode = reparsed['barcode']
@@ -134,7 +156,7 @@ def scan_root(root_id, full_scan=False):
                     existing.sequence = reparsed['sequence']
                     existing.ext = reparsed['ext']
                     existing.confirmed = reparsed['confirmed']
-                existing.md5_hash = new_md5
+                existing.md5_hash = fp
                 existing.file_size = new_size
                 existing.folder_mtime = folder_mtime
                 existing.status = 'active'
@@ -147,7 +169,9 @@ def scan_root(root_id, full_scan=False):
                 continue
             try:
                 fsize = os.path.getsize(full_path)
-                md5 = compute_md5(full_path)
+                fp = file_fingerprint(full_path)
+                if not fp:
+                    continue
             except OSError:
                 continue
             img = Image(
@@ -158,7 +182,7 @@ def scan_root(root_id, full_scan=False):
                 ext=parsed['ext'],
                 file_path=full_path,
                 file_size=fsize,
-                md5_hash=md5,
+                md5_hash=fp,
                 folder_path=dirpath,
                 folder_mtime=folder_mtime,
                 scan_root_id=root_id,
@@ -176,7 +200,15 @@ def scan_root(root_id, full_scan=False):
     session.commit()
 
     # 预生成缩略图（新图片和内容变更的图片）
-    for img_id, full_path in thumb_jobs:
+    _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0,
+            added=added, skipped=skipped)
+    for i, (img_id, full_path) in enumerate(thumb_jobs):
         generate_thumbnail(img_id, full_path)
+        if (i + 1) % 10 == 0:
+            _report('thumbnails', thumbnail_current=i + 1,
+                    thumbnail_total=len(thumb_jobs))
+
+    _report('root_done', added=added, skipped=skipped,
+            broken_cleaned=broken_cleaned, broken_new=len(indexed_map))
 
     return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': len(indexed_map)}

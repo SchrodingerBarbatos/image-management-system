@@ -1,4 +1,4 @@
-import os, zipfile, time
+import os, zipfile, time, json, re
 from flask import Blueprint, request, jsonify, send_file
 from models import session, Image, ImageVersion, ExportTask, BarcodeSetting, ScanRoot
 from config import UPLOAD_DIR
@@ -7,6 +7,8 @@ from versioning import update_versions_for_barcode
 from datetime import datetime
 
 images_bp = Blueprint('images', __name__)
+
+_ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 
 _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
                    'file_size', 'folder_path', 'folder_mtime', 'created_at', 'updated_at'}
@@ -128,6 +130,7 @@ def get_image(img_id):
             'id': v.id, 'barcode': v.barcode, 'image_type': v.image_type, 'version_label': v.version_label,
             'folder_mtime': v.folder_mtime, 'content_hash': v.content_hash,
             'is_latest': v.is_latest, 'created_at': v.created_at,
+            'duplicate_mtimes': json.loads(v.duplicate_mtimes) if v.duplicate_mtimes else [],
         } for v in versions],
     })
 
@@ -279,6 +282,46 @@ def batch_export():
     task.zip_path = zip_path
     session.commit()
     return jsonify({'task_id': task.id, 'total': len(imgs), 'excluded': excluded})
+
+@images_bp.route('/barcodes/<barcode>/duplicate-images', methods=['DELETE'])
+def delete_duplicate_images(barcode):
+    """Delete images from a specific duplicate folder_mtime for a barcode."""
+    folder_mtime = request.args.get('folder_mtime', '')
+    image_type = request.args.get('image_type', '')
+    delete_file = request.args.get('delete_file', 'false').lower() == 'true'
+
+    if not folder_mtime or not image_type:
+        return jsonify({'error': 'folder_mtime and image_type are required'}), 400
+
+    if not _ISO_RE.match(folder_mtime):
+        return jsonify({'error': 'folder_mtime must be ISO8601 format'}), 400
+
+    imgs = session.query(Image).filter(
+        Image.barcode == barcode,
+        Image.folder_mtime == folder_mtime,
+        Image.image_type == image_type,
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True
+    ).all()
+
+    if not imgs:
+        return jsonify({'error': 'no duplicate images found'}), 404
+
+    deleted = 0
+    for img in imgs:
+        if delete_file:
+            try:
+                os.remove(img.file_path)
+            except OSError:
+                pass
+        session.delete(img)
+        deleted += 1
+
+    session.commit()
+    update_versions_for_barcode(barcode)
+
+    return jsonify({'message': f'deleted {deleted} duplicate images', 'deleted': deleted})
+
 
 def _image_to_dict(img):
     return {

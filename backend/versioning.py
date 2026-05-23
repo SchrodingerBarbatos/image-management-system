@@ -1,16 +1,46 @@
 import hashlib, json
 from models import session, Image, ImageVersion, ScanRoot
+from scanner import compute_md5
+
 
 def compute_content_hash(images):
-    """Compute a deterministic hash from a set of (filename, md5_hash) pairs."""
-    pairs = sorted((img.filename, img.md5_hash) for img in images)
+    """Deterministic hash from sorted (filename, file_size, md5_hash) triples.
+    Same content → same hash, regardless of file paths or mtimes.
+    Includes md5_hash (fingerprint) to avoid collisions when different files
+    share the same name and size."""
+    pairs = sorted((img.filename, img.file_size, img.md5_hash) for img in images)
     payload = json.dumps(pairs, sort_keys=True)
     return hashlib.md5(payload.encode()).hexdigest()
 
+
+def groups_are_identical(imgs1, imgs2):
+    """Funnel comparison: count → filename+size → MD5.
+    Returns True only when all three layers match."""
+    if not imgs1 or not imgs2:
+        return False
+    # Layer 1: same count
+    if len(imgs1) != len(imgs2):
+        return False
+    # Layer 2: same (filename, file_size) pairs sorted
+    key1 = sorted((img.filename, img.file_size) for img in imgs1)
+    key2 = sorted((img.filename, img.file_size) for img in imgs2)
+    if key1 != key2:
+        return False
+    # Layer 3: MD5 confirmation — read actual file content
+    s1 = sorted(imgs1, key=lambda x: x.filename)
+    s2 = sorted(imgs2, key=lambda x: x.filename)
+    for a, b in zip(s1, s2):
+        md5_a = compute_md5(a.file_path)
+        md5_b = compute_md5(b.file_path)
+        if not md5_a or not md5_b or md5_a != md5_b:
+            return False
+    return True
+
+
 def update_versions_for_barcode(barcode):
     """Rebuild version records for a single barcode, per image_type.
-    Groups images by (folder_mtime, image_type), sorts descending by mtime,
-    assigns v1 (oldest) through vN (newest) per type, merges duplicate content_hashes."""
+    Groups images by (folder_mtime, image_type), then uses funnel
+    comparison to merge identical groups before creating versions."""
     images = session.query(Image).filter(
         Image.barcode == barcode, Image.confirmed == True, Image.status == 'active'
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
@@ -26,23 +56,33 @@ def update_versions_for_barcode(barcode):
         key = (img.folder_mtime, img.image_type)
         by_key.setdefault(key, []).append(img)
 
-    sorted_keys = sorted(by_key.keys(), key=lambda k: k[0], reverse=True)
+    # Per image_type: sort by mtime desc, funnel-merge duplicates
+    versions_by_type = {}  # {img_type: [(mtime, imgs, duplicate_mtimes)]}
 
-    # Build version list per image_type
-    versions_by_type = {}
-    seen_hashes = {}
+    for img_type in ('main', 'detail'):
+        type_keys = sorted(
+            [k for k in by_key if k[1] == img_type],
+            key=lambda k: k[0], reverse=True,
+        )
+        accepted = []  # [(mtime, imgs)]
+        dup_map = {}   # {mtime: [duplicate_mtime, ...]}
 
-    for key in sorted_keys:
-        mtime, img_type = key
-        imgs = by_key[key]
-        ch = compute_content_hash(imgs)
+        for mtime, _ in type_keys:
+            imgs = by_key[(mtime, img_type)]
+            duplicate_of = None
+            for acc_mtime, acc_imgs in accepted:
+                if groups_are_identical(imgs, acc_imgs):
+                    duplicate_of = acc_mtime
+                    break
+            if duplicate_of:
+                dup_map.setdefault(duplicate_of, []).append(mtime)
+            else:
+                accepted.append((mtime, imgs))
 
-        seen_hashes.setdefault(img_type, set())
-        if ch in seen_hashes[img_type]:
-            continue
-        seen_hashes[img_type].add(ch)
-
-        versions_by_type.setdefault(img_type, []).append((mtime, ch, imgs))
+        versions_by_type[img_type] = [
+            (mtime, imgs, json.dumps(dup_map.get(mtime, [])))
+            for mtime, imgs in accepted
+        ]
 
     # Delete old versions for this barcode
     session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
@@ -50,9 +90,10 @@ def update_versions_for_barcode(barcode):
     # Create new versions per image_type
     for img_type, vers in versions_by_type.items():
         total = len(vers)
-        for i, (mtime, ch, imgs) in enumerate(vers):
+        for i, (mtime, imgs, dup_mtimes) in enumerate(vers):
             version_num = total - i
             is_latest = (i == 0)
+            ch = compute_content_hash(imgs)
             v = ImageVersion(
                 barcode=barcode,
                 image_type=img_type,
@@ -60,9 +101,11 @@ def update_versions_for_barcode(barcode):
                 folder_mtime=mtime,
                 content_hash=ch,
                 is_latest=is_latest,
+                duplicate_mtimes=dup_mtimes,
             )
             session.add(v)
     session.commit()
+
 
 def update_all_versions():
     """Run version update for all barcodes in the database."""

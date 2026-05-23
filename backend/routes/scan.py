@@ -1,4 +1,4 @@
-import os, json
+import os, json, uuid, threading, datetime, traceback
 from flask import Blueprint, request, jsonify
 from models import session, ScanRoot, Image, ScanLog
 from scanner import scan_root
@@ -6,10 +6,105 @@ from versioning import update_all_versions
 
 scan_bp = Blueprint('scan', __name__)
 
+_scan_lock = threading.Lock()
+_scan_jobs = {}
+
 def _add_log(action, status, message, details=''):
     log = ScanLog(action=action, status=status, message=message, details=details)
     session.add(log)
     session.commit()
+
+
+def _run_scan(root_ids, scan_mode, job_ready_event=None):
+    """Execute scan in background thread with progress reporting."""
+    job_id = str(uuid.uuid4())
+    full_scan = scan_mode == 'full'
+
+    with _scan_lock:
+        _scan_jobs[job_id] = {
+            'status': 'running',
+            'phase': 'starting',
+            'current_root_path': '',
+            'current_root_index': 0,
+            'total_roots': len(root_ids),
+            'current_file': '',
+            'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'broken_new': 0,
+            'thumbnail_total': 0, 'thumbnail_current': 0,
+            'error': None,
+            'started_at': datetime.datetime.now().isoformat(),
+        }
+
+    if job_ready_event:
+        job_ready_event.set()
+
+    def progress(phase, **kw):
+        with _scan_lock:
+            job = _scan_jobs.get(job_id)
+            if job:
+                job['phase'] = phase
+                job.update(kw)
+
+    _add_log('scan', 'info',
+        f"扫描开始 - {'全量' if full_scan else '增量'}模式",
+        json.dumps({'job_id': job_id, 'root_ids': root_ids}))
+
+    try:
+        total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0}
+        roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
+
+        for i, r in enumerate(roots):
+            with _scan_lock:
+                job = _scan_jobs.get(job_id)
+                if job:
+                    job['current_root_index'] = i + 1
+                    job['current_root_path'] = r.path
+
+            res = scan_root(r.id, full_scan=full_scan, progress_callback=progress)
+            for k in total:
+                total[k] += res.get(k, 0)
+
+        progress('versioning')
+        update_all_versions()
+
+        _add_log('scan', 'success',
+            f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}",
+            json.dumps(total))
+
+        with _scan_lock:
+            job = _scan_jobs.get(job_id)
+            if job:
+                job['status'] = 'done'
+                job['phase'] = 'done'
+                job.update(total)
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        with _scan_lock:
+            job = _scan_jobs.get(job_id)
+            if job:
+                job['status'] = 'error'
+                job['phase'] = 'error'
+                job['error'] = f"{e}\n{tb}"
+        try:
+            _add_log('scan', 'error', f'扫描失败: {str(e)}')
+        except Exception:
+            pass
+    finally:
+        session.remove()
+
+
+def _cleanup_old_jobs():
+    """Remove completed jobs older than 1 hour."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(hours=1)
+    with _scan_lock:
+        stale = [
+            jid for jid, j in _scan_jobs.items()
+            if j['status'] in ('done', 'error')
+            and datetime.datetime.fromisoformat(j['started_at']) < cutoff
+        ]
+        for jid in stale:
+            del _scan_jobs[jid]
+
 
 @scan_bp.route('/scan-roots', methods=['GET'])
 def list_scan_roots():
@@ -18,6 +113,7 @@ def list_scan_roots():
         'id': r.id, 'path': r.path, 'recursive': r.recursive, 'enabled': r.enabled,
         'allow_fuzzy': r.allow_fuzzy, 'fuzzy_image_type': r.fuzzy_image_type,
     } for r in roots])
+
 
 @scan_bp.route('/scan-roots', methods=['POST'])
 def add_scan_root():
@@ -41,6 +137,7 @@ def add_scan_root():
         'recursive': root.recursive, 'enabled': root.enabled,
         'allow_fuzzy': root.allow_fuzzy, 'fuzzy_image_type': root.fuzzy_image_type,
     }), 201
+
 
 @scan_bp.route('/scan-roots/<int:root_id>', methods=['PUT'])
 def update_scan_root(root_id):
@@ -68,6 +165,7 @@ def update_scan_root(root_id):
         'allow_fuzzy': root.allow_fuzzy, 'fuzzy_image_type': root.fuzzy_image_type,
     })
 
+
 @scan_bp.route('/scan-roots/<int:root_id>', methods=['DELETE'])
 def delete_scan_root(root_id):
     root = session.get(ScanRoot, root_id)
@@ -78,6 +176,7 @@ def delete_scan_root(root_id):
     session.commit()
     _add_log('delete_root', 'info', f'已删除扫描目录: {root.path}')
     return jsonify({'message': 'deleted'})
+
 
 @scan_bp.route('/scan-roots/check-new', methods=['POST'])
 def check_new_roots():
@@ -93,36 +192,58 @@ def check_new_roots():
     new_ids = [rid for rid in root_ids if rid not in scanned_ids]
     return jsonify({'new_root_ids': new_ids})
 
+
 @scan_bp.route('/scan', methods=['POST'])
 def trigger_scan():
     data = request.get_json(silent=True) or {}
     root_ids = data.get('root_ids')
     scan_mode = data.get('scan_mode', 'full')
-    full_scan = scan_mode == 'full'
 
-    _add_log('scan', 'info', f"扫描开始 - {'全量' if full_scan else '增量'}模式", json.dumps({'root_ids': root_ids}))
+    if not root_ids:
+        return jsonify({'error': '请指定要扫描的目录'}), 400
 
-    try:
-        if not root_ids:
-            return jsonify({'error': '请指定要扫描的目录'}), 400
-        roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
+    roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
+    if not roots:
+        return jsonify({'error': '没有可扫描的目录'}), 400
 
-        if not roots:
-            return jsonify({'error': '没有可扫描的目录'}), 400
+    # Check for existing running scan
+    _cleanup_old_jobs()
+    with _scan_lock:
+        running = [jid for jid, j in _scan_jobs.items() if j['status'] == 'running']
+    if running:
+        return jsonify({'error': '已有扫描任务正在执行中，请等待完成'}), 409
 
-        total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0}
-        for r in roots:
-            res = scan_root(r.id, full_scan=full_scan)
-            for k in total:
-                total[k] += res.get(k, 0)
-        update_all_versions()
-        _add_log('scan', 'success',
-            f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}",
-            json.dumps(total))
-        return jsonify(total)
-    except Exception as e:
-        _add_log('scan', 'error', f'扫描失败: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+    # Launch background scan
+    job_ready = threading.Event()
+    thread = threading.Thread(
+        target=_run_scan,
+        args=(root_ids, scan_mode, job_ready),
+        daemon=True,
+    )
+    thread.start()
+
+    # Wait for job entry to be created
+    if not job_ready.wait(timeout=5.0):
+        return jsonify({'error': '扫描启动超时'}), 500
+
+    with _scan_lock:
+        active_jobs = [jid for jid, j in _scan_jobs.items() if j['status'] == 'running']
+
+    if active_jobs:
+        job_id = active_jobs[0]
+        return jsonify({'job_id': job_id, 'status': 'started'}), 202
+    return jsonify({'error': '扫描启动失败'}), 500
+
+
+@scan_bp.route('/scan/status/<job_id>', methods=['GET'])
+def get_scan_status(job_id):
+    _cleanup_old_jobs()
+    with _scan_lock:
+        job = _scan_jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'job not found'}), 404
+    return jsonify(job)
+
 
 @scan_bp.route('/scan-logs', methods=['GET'])
 def list_scan_logs():

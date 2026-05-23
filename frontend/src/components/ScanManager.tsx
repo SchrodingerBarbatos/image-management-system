@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { Modal, Table, Button, Input, Switch, Select, Space, Popconfirm, message, Tag, Radio } from 'antd';
-import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined } from '@ant-design/icons';
-import { ScanRoot, ScanLog, scanRootApi, scanApi, scanLogApi } from '../services/api';
+import React, { useState, useEffect, useRef } from 'react';
+import { Modal, Table, Button, Input, Switch, Select, Space, Popconfirm, message, Tag, Radio, Progress } from 'antd';
+import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined, LoadingOutlined } from '@ant-design/icons';
+import { ScanRoot, ScanLog, ScanJobStatus, scanRootApi, scanApi, scanLogApi } from '../services/api';
 
 interface Props {
   visible: boolean;
@@ -16,6 +16,9 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
   const [roots, setRoots] = useState<ScanRoot[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [scanJobId, setScanJobId] = useState<string | null>(null);
+  const [scanProgress, setScanProgress] = useState<ScanJobStatus | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [path, setPath] = useState('');
   const [recursive, setRecursive] = useState(true);
@@ -58,6 +61,57 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     if (field === 'enabled') onScanComplete();
   };
 
+  const clearPolling = () => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  };
+
+  // Start polling for job status
+  const startPolling = (jobId: string) => {
+    clearPolling();
+    pollingRef.current = setInterval(async () => {
+      try {
+        const status = await scanApi.getStatus(jobId);
+        setScanProgress(status);
+        if (status.status === 'done') {
+          clearPolling();
+          setScanning(false);
+          setScanJobId(null);
+          message.success(`扫描完成: 新增 ${status.added}, 跳过 ${status.skipped}`);
+          onScanComplete();
+        } else if (status.status === 'error') {
+          clearPolling();
+          setScanning(false);
+          setScanJobId(null);
+          message.error(`扫描失败: ${status.error || '未知错误'}`);
+        }
+      } catch {
+        // API error, try again next poll
+      }
+    }, 1500);
+  };
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => clearPolling();
+  }, []);
+
+  // Cleanup polling when modal closes
+  useEffect(() => {
+    if (!visible) {
+      clearPolling();
+    }
+  }, [visible]);
+
+  // When modal opens, check for existing running job
+  useEffect(() => {
+    if (visible && scanJobId && !scanProgress) {
+      startPolling(scanJobId);
+    }
+  }, [visible]);
+
   const handleScan = async () => {
     if (selectedRowKeys.length === 0) {
       message.warning('请先勾选要扫描的目录');
@@ -66,7 +120,6 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     const rootIds = selectedRowKeys as number[];
     let effectiveMode = scanMode;
 
-    // 增量模式下检查是否有新目录
     if (scanMode === 'incremental') {
       try {
         const { new_root_ids } = await scanApi.checkNew(rootIds);
@@ -87,17 +140,26 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     }
 
     setScanning(true);
+    setScanProgress(null);
     try {
-      await scanApi.trigger({
+      const result = await scanApi.trigger({
         root_ids: rootIds,
         scan_mode: effectiveMode,
       });
-      message.success('扫描完成');
-      onScanComplete();
-    } catch {
-      message.error('扫描失败，请查看日志');
+      if (result.job_id) {
+        setScanJobId(result.job_id);
+        startPolling(result.job_id);
+      } else {
+        // Legacy: scan completed synchronously (shouldn't happen)
+        message.success('扫描完成');
+        onScanComplete();
+        setScanning(false);
+      }
+    } catch (err: any) {
+      const errMsg = err?.response?.data?.error || err?.message || '扫描失败';
+      message.error(errMsg);
+      setScanning(false);
     }
-    setScanning(false);
   };
 
   const fetchLogs = () => {
@@ -192,6 +254,52 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
             />
             <Button type="primary" onClick={handleAdd}>确认</Button>
           </Space>
+        )}
+
+        {scanProgress && (
+          <div style={{ marginBottom: 12, padding: '12px', background: '#fafafa', borderRadius: 6 }}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Space>
+                <LoadingOutlined spin />
+                <span>
+                  {scanProgress.phase === 'thumbnails'
+                    ? '正在生成缩略图...'
+                    : scanProgress.phase === 'versioning'
+                    ? '正在更新版本信息...'
+                    : scanProgress.status === 'done'
+                    ? '扫描完成'
+                    : scanProgress.status === 'error'
+                    ? '扫描出错'
+                    : `正在扫描 (${scanProgress.current_root_index || 0}/${scanProgress.total_roots || 0})`}
+                </span>
+              </Space>
+              {scanProgress.current_root_path && (
+                <div style={{ fontSize: 12, color: '#888' }}>目录: {scanProgress.current_root_path}</div>
+              )}
+              {scanProgress.phase === 'scanning' && scanProgress.current_file && (
+                <div style={{ fontSize: 12, color: '#888' }}>当前文件: {scanProgress.current_file}</div>
+              )}
+              <div style={{ fontSize: 12 }}>
+                新增 {scanProgress.added} | 跳过 {scanProgress.skipped} | 清理 {scanProgress.broken_cleaned}
+              </div>
+              {scanProgress.phase === 'thumbnails' && scanProgress.thumbnail_total > 0 && (
+                <Progress
+                  percent={Math.round((scanProgress.thumbnail_current / scanProgress.thumbnail_total) * 100)}
+                  size="small"
+                  format={() => `${scanProgress.thumbnail_current}/${scanProgress.thumbnail_total}`}
+                />
+              )}
+              {scanProgress.phase !== 'thumbnails' && scanProgress.status === 'running' && (
+                <Progress percent={99} size="small" status="active" showInfo={false} />
+              )}
+              {scanProgress.status === 'done' && (
+                <Progress percent={100} size="small" status="success" showInfo={false} />
+              )}
+              {scanProgress.status === 'error' && (
+                <div style={{ color: 'red', fontSize: 12 }}>错误: {scanProgress.error}</div>
+              )}
+            </Space>
+          </div>
         )}
         <Table rowKey="id" columns={columns} dataSource={roots} loading={loading} size="small"
           rowSelection={{
