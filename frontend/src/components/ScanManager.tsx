@@ -37,7 +37,27 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     scanRootApi.list().then(setRoots).finally(() => setLoading(false));
   };
 
-  useEffect(() => { if (visible) { fetchRoots(); setSelectedRowKeys([]); setScanMode('full'); } }, [visible]);
+  useEffect(() => {
+    if (visible) {
+      fetchRoots();
+      setSelectedRowKeys([]);
+      setScanMode('full');
+      // 页面刷新后恢复扫描进度
+      setScanning(false);
+      setScanJobId(null);
+      setScanProgress(null);
+      scanApi.getActive().then(job => {
+        if (job && job.status === 'running') {
+          setScanning(true);
+          setScanJobId(job.job_id);
+          setScanProgress(job);
+          startPolling(job.job_id);
+        }
+      }).catch(err => {
+        console.warn('无法恢复扫描进度:', err);
+      });
+    }
+  }, [visible]);
 
   const handleAdd = async () => {
     if (!path.trim()) return;
@@ -102,13 +122,6 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
   useEffect(() => {
     if (!visible) {
       clearPolling();
-    }
-  }, [visible]);
-
-  // When modal opens, check for existing running job
-  useEffect(() => {
-    if (visible && scanJobId && !scanProgress) {
-      startPolling(scanJobId);
     }
   }, [visible]);
 

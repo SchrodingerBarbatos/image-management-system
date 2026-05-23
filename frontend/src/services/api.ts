@@ -64,6 +64,8 @@ export const scanApi = {
     api.post('/scan', data || {}).then(r => r.data),
   checkNew: (root_ids: number[]) =>
     api.post<{ new_root_ids: number[] }>('/scan-roots/check-new', { root_ids }).then(r => r.data),
+  getActive: () =>
+    api.get<ScanJobStatus & { job_id: string } | null>('/scan/status').then(r => r.data),
   getStatus: (jobId: string) =>
     api.get<ScanJobStatus>(`/scan/status/${jobId}`).then(r => r.data),
 };

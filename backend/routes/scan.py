@@ -235,6 +235,21 @@ def trigger_scan():
     return jsonify({'error': '扫描启动失败'}), 500
 
 
+@scan_bp.route('/scan/status', methods=['GET'])
+def get_active_scan():
+    """返回当前正在运行的扫描任务（用于页面刷新后恢复进度）。"""
+    _cleanup_old_jobs()
+    with _scan_lock:
+        running = [
+            {'job_id': jid, **job}
+            for jid, job in _scan_jobs.items()
+            if job['status'] == 'running'
+        ]
+    if running:
+        return jsonify(running[0])
+    return jsonify(None)
+
+
 @scan_bp.route('/scan/status/<job_id>', methods=['GET'])
 def get_scan_status(job_id):
     _cleanup_old_jobs()
