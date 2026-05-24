@@ -1,6 +1,8 @@
-import os, hashlib, io
+import os, hashlib, io, logging
 from PIL import Image as PILImage
 from config import THUMBNAIL_DIR, THUMBNAIL_SIZE, THUMBNAIL_QUALITY
+
+logger = logging.getLogger(__name__)
 
 
 def get_thumbnail_path(image_id):
@@ -27,20 +29,35 @@ def generate_thumbnail(image_id, source_path):
 
     try:
         img = PILImage.open(io.BytesIO(data))
-        img = img.convert('RGBA')
-    except (OSError, IOError):
-        return False, md5_hash
+        orig_mode = img.mode
 
-    try:
+        # thumbnail() before convert() so JPEG draft mode can decode at reduced resolution
         img.thumbnail(THUMBNAIL_SIZE, PILImage.LANCZOS)
-        bg = PILImage.new('RGBA', THUMBNAIL_SIZE, (255, 255, 255, 255))
+
+        del data
+
+        # detect transparency from original mode after thumbnail is already small
+        has_transparency = orig_mode in ('RGBA', 'LA', 'PA') or (
+            orig_mode == 'P' and 'transparency' in img.info
+        )
+
         offset = (
             (THUMBNAIL_SIZE[0] - img.width) // 2,
             (THUMBNAIL_SIZE[1] - img.height) // 2,
         )
-        bg.paste(img, offset, img if img.mode == 'RGBA' else None)
-        bg = bg.convert('RGB')
+
+        if has_transparency:
+            img = img.convert('RGBA')
+            bg = PILImage.new('RGBA', THUMBNAIL_SIZE, (255, 255, 255, 255))
+            bg.paste(img, offset, img)
+            bg = bg.convert('RGB')
+        else:
+            img = img.convert('RGB')
+            bg = PILImage.new('RGB', THUMBNAIL_SIZE, (255, 255, 255))
+            bg.paste(img, offset)
+
         bg.save(thumb_path, 'JPEG', quality=THUMBNAIL_QUALITY)
         return True, md5_hash
-    except (OSError, IOError):
+    except OSError:
+        logger.exception("Failed to generate thumbnail for %s", image_id)
         return False, md5_hash
