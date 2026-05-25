@@ -261,29 +261,24 @@ def batch_export():
     data = request.json
     ids = data.get('ids', [])
     image_type = data.get('image_type', '')
+    flat = data.get('flat', False)
     if not ids:
         return jsonify({'error': 'ids required'}), 400
     q = session.query(Image).filter(Image.id.in_(ids)).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
-    if image_type:
+    if image_type and image_type != 'all':
         q = q.filter(Image.image_type == image_type)
     imgs = q.all()
     excluded = len(ids) - len(imgs)
     task = ExportTask(status='processing')
     session.add(task)
     session.commit()
-    zip_name = f'batch_export_{task.id}.zip'
-    zip_path = os.path.join(UPLOAD_DIR, zip_name)
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for img in imgs:
-            if os.path.exists(img.file_path):
-                type_folder = '主图' if img.image_type == 'main' else '详情图'
-                arcname = f"{type_folder}/{img.barcode}_{img.filename}"
-                zf.write(img.file_path, arcname)
-    task.status = 'done'
-    task.zip_path = zip_path
-    session.commit()
+
+    from routes.export import _build_zip
+    import threading
+    threading.Thread(target=_build_zip, args=(task.id, imgs, flat), daemon=True).start()
+
     return jsonify({'task_id': task.id, 'total': len(imgs), 'excluded': excluded})
 
 @images_bp.route('/barcodes/<barcode>/duplicate-images', methods=['DELETE'])

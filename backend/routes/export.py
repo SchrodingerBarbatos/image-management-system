@@ -1,4 +1,4 @@
-import os, uuid, zipfile, datetime
+﻿import os, uuid, zipfile, datetime, threading
 from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook
 from models import session, Image, ExportTask, ScanRoot
@@ -13,6 +13,66 @@ def _col_letter(idx):
         result = chr(65 + (idx % 26)) + result
         idx = idx // 26 - 1
     return result
+
+def _build_zip(task_id, imgs, flat):
+    """Build ZIP file in a background thread, updating task progress."""
+    from models import session as sess, ExportTask
+    try:
+        task = sess.get(ExportTask, task_id)
+        if not task:
+            return
+        total = len(imgs)
+        if total == 0:
+            task.status = 'done'
+            task.total_images = 0
+            task.progress = 0
+            zip_path = os.path.join(UPLOAD_DIR, f'export_{task_id}.zip')
+            task.zip_path = zip_path
+            # Create empty zip
+            with zipfile.ZipFile(zip_path, 'w'):
+                pass
+            sess.commit()
+            return
+        task.total_images = total
+        task.progress = 0
+        sess.commit()
+
+        zip_name = f'export_{task_id}.zip'
+        zip_path = os.path.join(UPLOAD_DIR, zip_name)
+        task.zip_path = zip_path
+        sess.commit()
+
+        written = 0
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for i, img in enumerate(imgs):
+                if os.path.exists(img.file_path):
+                    if flat:
+                        arcname = f"{img.barcode}_{img.filename}"
+                    else:
+                        type_folder = '主图' if img.image_type == 'main' else '详情图'
+                        arcname = f"{type_folder}/{img.barcode}_{img.filename}"
+                    zf.write(img.file_path, arcname)
+                    written += 1
+                task.progress = i + 1
+                if (i + 1) % 10 == 0:
+                    sess.commit()
+
+        if written == 0:
+            task.status = 'failed'
+        else:
+            task.status = 'done'
+        sess.commit()
+    except Exception:
+        try:
+            task = sess.get(ExportTask, task_id)
+            if task:
+                task.status = 'failed'
+                sess.commit()
+        except Exception:
+            pass
+    finally:
+        sess.remove()
+
 
 @export_bp.route('/export/excel', methods=['POST'])
 def upload_excel():
@@ -29,6 +89,7 @@ def upload_excel():
     column_names = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
     return jsonify({'columns': column_names, 'upload_id': upload_id})
 
+
 @export_bp.route('/export/zip', methods=['POST'])
 def generate_zip():
     data = request.json
@@ -36,6 +97,7 @@ def generate_zip():
     image_type = data.get('image_type', '')
     upload_id = data.get('upload_id', '')
     selected = data.get('selected_barcodes')
+    flat = data.get('flat', False)
 
     if not upload_id:
         return jsonify({'error': 'upload_id is required'}), 400
@@ -72,18 +134,48 @@ def generate_zip():
     session.add(task)
     session.commit()
 
-    zip_name = f'export_{task.id}.zip'
-    zip_path = os.path.join(UPLOAD_DIR, zip_name)
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for img in imgs:
-            if os.path.exists(img.file_path):
-                type_folder = '主图' if img.image_type == 'main' else '详情图'
-                zf.write(img.file_path, f"{type_folder}/{img.barcode}_{img.filename}")
+    threading.Thread(target=_build_zip, args=(task.id, imgs, flat), daemon=True).start()
 
-    task.status = 'done'
-    task.zip_path = zip_path
-    session.commit()
     return jsonify({'task_id': task.id, 'total_images': len(imgs), 'total_barcodes': len(matched_barcodes), 'excluded_barcodes': excluded_barcodes})
+
+
+@export_bp.route('/export/progress/<int:task_id>')
+def export_progress(task_id):
+    task = session.get(ExportTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'status': task.status, 'progress': task.progress, 'total': task.total_images})
+
+
+@export_bp.route('/export/tasks')
+def list_tasks():
+    tasks = session.query(ExportTask).order_by(ExportTask.id.desc()).limit(30).all()
+    result = []
+    for t in tasks:
+        file_available = bool(t.zip_path and os.path.exists(t.zip_path))
+        result.append({
+            'id': t.id, 'status': t.status, 'total_images': t.total_images,
+            'created_at': t.created_at, 'file_available': file_available,
+        })
+    return jsonify(result)
+
+
+@export_bp.route('/export/tasks/<int:task_id>', methods=['DELETE'])
+def delete_task(task_id):
+    task = session.get(ExportTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+    if request.args.get('force') != 'true' and task.status == 'processing':
+        return jsonify({'error': 'cannot delete processing task'}), 409
+    if task.zip_path and os.path.exists(task.zip_path):
+        try:
+            os.remove(task.zip_path)
+        except OSError:
+            pass
+    session.delete(task)
+    session.commit()
+    return jsonify({'ok': True})
+
 
 @export_bp.route('/export/download/<int:task_id>')
 def download_zip(task_id):
@@ -91,6 +183,7 @@ def download_zip(task_id):
     if not task or task.status != 'done':
         return jsonify({'error': 'not ready'}), 404
     return send_file(task.zip_path, as_attachment=True, download_name=f'export_{task_id}.zip')
+
 
 def cleanup_old_exports():
     """Remove export tasks and their files older than ZIP_CLEANUP_HOURS."""
@@ -100,6 +193,9 @@ def cleanup_old_exports():
     ).all()
     for task in old_tasks:
         if task.zip_path and os.path.exists(task.zip_path):
-            os.remove(task.zip_path)
+            try:
+                os.remove(task.zip_path)
+            except OSError:
+                pass
         session.delete(task)
     session.commit()

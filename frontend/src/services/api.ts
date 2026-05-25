@@ -1,4 +1,4 @@
-import axios from 'axios';
+﻿import axios from 'axios';
 
 const api = axios.create({ baseURL: '/api' });
 
@@ -104,8 +104,8 @@ export const imageApi = {
   fileUrl: (id: number) => `/api/images/${id}/file`,
   batchDelete: (ids: number[], deleteFile = false) =>
     api.post('/images/batch-delete', { ids, delete_file: deleteFile }).then(r => r.data),
-  batchExport: (ids: number[], image_type?: string) =>
-    api.post<{ task_id: number; total: number; excluded: number }>('/images/batch-export', { ids, image_type }).then(r => r.data),
+  batchExport: (ids: number[], image_type?: string, flat?: boolean) =>
+    api.post<{ task_id: number; total: number; excluded: number }>('/images/batch-export', { ids, image_type, flat }).then(r => r.data),
 };
 
 export const barcodeApi = {
@@ -128,8 +128,14 @@ export const exportApi = {
     fd.append('file', file);
     return api.post<{ columns: string[]; upload_id: string }>('/export/excel', fd).then(r => r.data);
   },
-  generateZip: (data: { barcode_column: string; image_type: string; upload_id: string; selected_barcodes?: string[] }) =>
+  generateZip: (data: { barcode_column: string; image_type: string; upload_id: string; selected_barcodes?: string[]; flat?: boolean }) =>
     api.post<{ task_id: number; total_images: number; total_barcodes: number; excluded_barcodes: number }>('/export/zip', data).then(r => r.data),
+  getProgress: (taskId: number) =>
+    api.get<{ status: string; progress: number; total: number }>(`/export/progress/${taskId}`).then(r => r.data),
+  deleteTask: (taskId: number) =>
+    api.delete(`/export/tasks/${taskId}`).then(r => r.data),
+  listTasks: () =>
+    api.get<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean }[]>('/export/tasks').then(r => r.data),
   downloadUrl: (taskId: number) => `/api/export/download/${taskId}`,
 };
 
@@ -150,3 +156,4 @@ export const barcodeSettingApi = {
   update: (barcode: string, data: { default_main_mtime?: string; default_detail_mtime?: string }) =>
     api.put<BarcodeSetting>(`/barcode-settings/${barcode}`, data).then(r => r.data),
 };
+

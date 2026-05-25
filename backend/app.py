@@ -125,6 +125,13 @@ with engine.connect() as conn:
     if 'content_md5' not in img_cols:
         conn.execute(text("ALTER TABLE image ADD COLUMN content_md5 TEXT DEFAULT ''"))
         conn.commit()
+    # Migration: add progress and total_images to export_task
+    task_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('export_task')"))}
+    if 'progress' not in task_cols:
+        conn.execute(text("ALTER TABLE export_task ADD COLUMN progress INTEGER DEFAULT 0"))
+    if 'total_images' not in task_cols:
+        conn.execute(text("ALTER TABLE export_task ADD COLUMN total_images INTEGER DEFAULT 0"))
+    conn.commit()
 
 # Rebuild versions if we just added the image_type column
 if need_rebuild:
