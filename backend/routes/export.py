@@ -83,11 +83,12 @@ def upload_excel():
     upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
     file.save(upload_path)
     wb = load_workbook(upload_path, read_only=True)
-    ws = wb.active
+    sheet_names = wb.sheetnames
+    ws = wb[sheet_names[0]] if sheet_names else wb.active
     headers = [str(cell.value) for cell in next(ws.iter_rows(min_row=1, max_row=1))]
     wb.close()
     column_names = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
-    return jsonify({'columns': column_names, 'upload_id': upload_id})
+    return jsonify({'columns': column_names, 'sheets': sheet_names, 'upload_id': upload_id})
 
 
 @export_bp.route('/export/zip', methods=['POST'])
@@ -96,6 +97,7 @@ def generate_zip():
     barcode_col = data.get('barcode_column', '')
     image_type = data.get('image_type', '')
     upload_id = data.get('upload_id', '')
+    sheet_name = data.get('sheet_name', '')
     selected = data.get('selected_barcodes')
     flat = data.get('flat', False)
 
@@ -109,7 +111,7 @@ def generate_zip():
     # Read barcodes from Excel
     upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
     wb = load_workbook(upload_path, read_only=True)
-    ws = wb.active
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
     barcodes = []
     for row in ws.iter_rows(min_row=2):
         val = str(row[col_idx].value).strip() if row[col_idx].value else ''

@@ -11,6 +11,8 @@ interface Props {
 const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
   const [step, setStep] = useState(0);
   const [columns, setColumns] = useState<string[]>([]);
+  const [sheets, setSheets] = useState<string[]>([]);
+  const [selectedSheet, setSelectedSheet] = useState('');
   const [uploadId, setUploadId] = useState('');
   const [barcodeColumn, setBarcodeColumn] = useState('');
   const [imageType, setImageType] = useState('all');
@@ -86,6 +88,8 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
     try {
       const res = await exportApi.uploadExcel(file);
       setColumns(res.columns);
+      setSheets(res.sheets || []);
+      setSelectedSheet(res.sheets?.[0] || '');
       setUploadId(res.upload_id);
       setStep(1);
     } catch {
@@ -103,6 +107,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
         barcode_column: barcodeColumn,
         image_type: imageType,
         upload_id: uploadId,
+        sheet_name: selectedSheet || undefined,
         flat: folderMode === 'flat',
       });
       setTaskId(res.task_id);
@@ -141,7 +146,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
 
   const reset = () => {
     clearTimer();
-    setStep(0); setColumns([]); setUploadId(''); setBarcodeColumn(''); setTaskId(null);
+    setStep(0); setColumns([]); setSheets([]); setSelectedSheet(''); setUploadId(''); setBarcodeColumn(''); setTaskId(null);
     setProgress(0); setProgressTotal(0); setShowHistory(false); setTaskList([]);
     setFolderMode('folder'); setImageType('all');
   };
@@ -170,7 +175,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
       <Steps current={step} size="small" style={{ marginBottom: 24 }}
         items={[
           { title: '上传 Excel' },
-          { title: '选择列' },
+          { title: '选择数据' },
           { title: '生成中' },
           { title: '下载' },
         ]} />
@@ -193,6 +198,13 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
 
       {step === 1 && (
         <Space direction="vertical" style={{ width: '100%' }}>
+          {sheets.length > 1 && (
+            <div>
+              <span>工作表：</span>
+              <Select value={selectedSheet} onChange={setSelectedSheet} style={{ width: '100%' }}
+                options={sheets.map(s => ({ value: s, label: s }))} />
+            </div>
+          )}
           <div>
             <span>条码所在列：</span>
             <Select value={barcodeColumn} onChange={setBarcodeColumn} style={{ width: '100%' }}
