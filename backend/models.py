@@ -74,6 +74,7 @@ class ExportTask(Base):
     zip_path = Column(Text, default='')
     progress = Column(Integer, default=0)
     total_images = Column(Integer, default=0)
+    error_message = Column(Text, default='')
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
 
 class BarcodeSetting(Base):

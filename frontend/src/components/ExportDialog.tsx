@@ -3,6 +3,8 @@ import { Modal, Upload, Button, Select, Radio, Space, message, Steps, Progress, 
 import { UploadOutlined, DownloadOutlined, HistoryOutlined } from '@ant-design/icons';
 import { exportApi } from '../services/api';
 
+const MAX_POLLING_RETRIES = 150; // 150 * 2s = 5min
+
 interface Props {
   visible: boolean;
   onClose: () => void;
@@ -22,11 +24,11 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
   const [progress, setProgress] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
-  const [taskList, setTaskList] = useState<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean }[]>([]);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [taskList, setTaskList] = useState<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean; error_message?: string }[]>([]);
+  const [errorMessage, setErrorMessage] = useState('');
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [pollingCount, setPollingCount] = useState(0);
-  const MAX_POLLING_RETRIES = 150; // 150 * 2s = 5min
 
   const clearTimer = () => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
@@ -51,6 +53,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
         }
         if (p.status === 'failed') {
           clearTimer();
+          setErrorMessage(p.error_message || '未知错误');
           message.error('ZIP 生成失败');
           setStep(0);
           return;
@@ -63,7 +66,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
             setStep(0);
             return 0;
           }
-          timerRef.current = setTimeout(poll, 2000) as unknown as ReturnType<typeof setInterval>;
+          timerRef.current = setTimeout(poll, 2000);
           return next;
         });
       } catch {
@@ -75,12 +78,12 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
             setStep(0);
             return 0;
           }
-          timerRef.current = setTimeout(poll, 2000) as unknown as ReturnType<typeof setInterval>;
+          timerRef.current = setTimeout(poll, 2000);
           return next;
         });
       }
     };
-    timerRef.current = setTimeout(poll, 1000) as unknown as ReturnType<typeof setInterval>;
+    timerRef.current = setTimeout(poll, 1000);
   };
 
   const handleUpload = async (file: File) => {
@@ -147,13 +150,13 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
   const reset = () => {
     clearTimer();
     setStep(0); setColumns([]); setSheets([]); setSelectedSheet(''); setUploadId(''); setBarcodeColumn(''); setTaskId(null);
-    setProgress(0); setProgressTotal(0); setShowHistory(false); setTaskList([]);
+    setProgress(0); setProgressTotal(0); setShowHistory(false); setTaskList([]); setErrorMessage('');
     setFolderMode('folder'); setImageType('all');
   };
 
   const historyColumns = [
     { title: 'ID', dataIndex: 'id', width: 50 },
-    { title: '状态', dataIndex: 'status', width: 70, render: (s: string) => s === 'done' ? '已完成' : s === 'processing' ? '生成中' : s },
+    { title: '状态', dataIndex: 'status', width: 70, render: (s: string, rec: { error_message?: string }) => s === 'done' ? '已完成' : s === 'processing' ? '生成中' : <span title={rec.error_message} style={{ color: '#cf1322', cursor: 'help' }}>失败</span> },
     { title: '文件数', dataIndex: 'total_images', width: 60 },
     { title: '时间', dataIndex: 'created_at', render: (t: string) => t ? new Date(t).toLocaleString() : '' },
     { title: '操作', key: 'action', width: 130,
@@ -181,12 +184,20 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
         ]} />
 
       {step === 0 && !showHistory && (
-        <Space>
-          <Upload accept=".xlsx" maxCount={1} beforeUpload={handleUpload} showUploadList={false}>
-            <Button icon={<UploadOutlined />} loading={loading}>上传 Excel 文件</Button>
-          </Upload>
-          <Button icon={<HistoryOutlined />} onClick={loadHistory}>历史导出</Button>
-        </Space>
+        <>
+          {errorMessage && (
+            <div style={{ marginBottom: 16, padding: '8px 12px', background: '#fff2f0', border: '1px solid #ffccc7', borderRadius: 4, color: '#cf1322', whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', fontSize: 12 }}>
+              <strong>上次失败原因：</strong>
+              <div style={{ marginTop: 4 }}>{errorMessage}</div>
+            </div>
+          )}
+          <Space>
+            <Upload accept=".xlsx" maxCount={1} beforeUpload={handleUpload} showUploadList={false}>
+              <Button icon={<UploadOutlined />} loading={loading}>上传 Excel 文件</Button>
+            </Upload>
+            <Button icon={<HistoryOutlined />} onClick={loadHistory}>历史导出</Button>
+          </Space>
+        </>
       )}
 
       {step === 0 && showHistory && (

@@ -39,11 +39,6 @@ def _request_admin():
         )
 
 
-if not _is_admin():
-    _request_admin()
-    sys.exit(0)
-
-
 app = Flask(__name__, static_folder=None)
 CORS(app)
 
@@ -131,6 +126,8 @@ with engine.connect() as conn:
         conn.execute(text("ALTER TABLE export_task ADD COLUMN progress INTEGER DEFAULT 0"))
     if 'total_images' not in task_cols:
         conn.execute(text("ALTER TABLE export_task ADD COLUMN total_images INTEGER DEFAULT 0"))
+    if 'error_message' not in task_cols:
+        conn.execute(text("ALTER TABLE export_task ADD COLUMN error_message TEXT DEFAULT ''"))
     conn.commit()
 
 # Rebuild versions if we just added the image_type column
@@ -148,8 +145,6 @@ app.register_blueprint(images_bp, url_prefix='/api')
 app.register_blueprint(export_bp, url_prefix='/api')
 app.register_blueprint(pending_bp, url_prefix='/api')
 
-from routes.export import cleanup_old_exports
-cleanup_old_exports()
 
 def _get_icon_path():
     if IS_PACKAGED:
@@ -209,6 +204,10 @@ def start_tray(port, open_browser_on_start=True):
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     )
     logger = logging.getLogger(__name__)
+
+    # Cleanup old export tasks on startup
+    from routes.export import cleanup_old_exports
+    cleanup_old_exports()
 
     # Check port availability with fallback
     if not _check_port('127.0.0.1', port):
@@ -276,6 +275,10 @@ def start_tray(port, open_browser_on_start=True):
 
 
 if __name__ == '__main__':
+    if IS_PACKAGED and not _is_admin():
+        _request_admin()
+        sys.exit(0)
+
     if IS_PACKAGED:
         start_tray(port=5000, open_browser_on_start=True)
     else:
@@ -290,8 +293,23 @@ if __name__ == '__main__':
         if args.tray:
             start_tray(port=args.port, open_browser_on_start=args.open_browser)
         else:
-            _ensure_firewall_rule(args.port)
+            port = args.port
+            if not _check_port('127.0.0.1', port):
+                logging.warning("Port %s is in use, trying fallback ports", port)
+                fallback = None
+                for p in range(port + 1, port + 10):
+                    if _check_port('127.0.0.1', p):
+                        fallback = p
+                        break
+                if fallback is None:
+                    print(f"Error: ports {port}-{port+9} are all in use", file=sys.stderr)
+                    sys.exit(1)
+                print(f"Port {port} in use, using {fallback} instead")
+                port = fallback
+            from routes.export import cleanup_old_exports
+            cleanup_old_exports()
+            _ensure_firewall_rule(port)
             if args.open_browser:
                 import webbrowser
-                threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
-            app.run(host='0.0.0.0', debug=args.debug, port=args.port)
+                threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()
+            app.run(host='0.0.0.0', debug=args.debug, port=port)

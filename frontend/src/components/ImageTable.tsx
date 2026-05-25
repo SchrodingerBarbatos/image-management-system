@@ -17,6 +17,8 @@ interface Props {
   onSortChange: (field: string, order: 'asc' | 'desc') => void;
 }
 
+// NOTE: dataIndex values must stay in sync with backend _BARCODE_SORT_WHITELIST
+// in routes/images.py. Changing a dataIndex will silently break sorting.
 const columns: ColumnsType<BarcodeRec> = [
   { title: '条码', dataIndex: 'barcode', width: 160, sorter: true },
   {

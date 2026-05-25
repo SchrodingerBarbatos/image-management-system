@@ -270,16 +270,25 @@ def batch_export():
     if image_type and image_type != 'all':
         q = q.filter(Image.image_type == image_type)
     imgs = q.all()
+
+    # Filter to single version: user-chosen default, or latest version as fallback
+    barcodes_in = list(set(img.barcode for img in imgs))
+    before_version_filter = len(imgs)
+    if barcodes_in:
+        from routes.export import filter_to_single_version
+        imgs = filter_to_single_version(imgs, barcodes_in, session)
     excluded = len(ids) - len(imgs)
+    version_filtered = before_version_filter - len(imgs)
     task = ExportTask(status='processing')
     session.add(task)
     session.commit()
 
     from routes.export import _build_zip
     import threading
-    threading.Thread(target=_build_zip, args=(task.id, imgs, flat), daemon=True).start()
+    img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
+    threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
 
-    return jsonify({'task_id': task.id, 'total': len(imgs), 'excluded': excluded})
+    return jsonify({'task_id': task.id, 'total': len(imgs), 'excluded': excluded, 'version_filtered': version_filtered})
 
 @images_bp.route('/barcodes/<barcode>/duplicate-images', methods=['DELETE'])
 def delete_duplicate_images(barcode):
