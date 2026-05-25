@@ -85,7 +85,7 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
     image_type is taken from the root's fuzzy_image_type setting;
     otherwise defaults to 'main'.
 
-    If full_scan is True, all existing images for this root are deleted first.
+    If full_scan is True, missing records are deleted only after disk scan succeeds.
     progress_callback(phase, **kwargs) is called at key points for async progress reporting."""
     root = session.get(ScanRoot, root_id)
     if not root:
@@ -114,15 +114,9 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
     _report('scan_start', current_root_path=root.path)
 
-    # Build indexed_map BEFORE any deletion so we can safely recover on failure
-    indexed_map = {
-        img.file_path: img for img in session.query(Image).filter(
-            Image.scan_root_id == root_id
-        ).all()
-    }
-
     if not full_scan:
-        # Incremental: clean up broken records for this root
+        # Incremental: clean up broken records BEFORE building indexed_map
+        # so they don't end up counted as broken_new
         broken = session.query(Image).filter(
             Image.scan_root_id == root_id, Image.status == 'broken'
         ).all()
@@ -130,6 +124,13 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             session.delete(img)
         broken_cleaned = len(broken)
         session.commit()
+
+    # Build indexed_map AFTER broken cleanup so stale broken records aren't included
+    indexed_map = {
+        img.file_path: img for img in session.query(Image).filter(
+            Image.scan_root_id == root_id
+        ).all()
+    }
 
     walk = os.walk if root.recursive else _walk_nonrecursive
 
