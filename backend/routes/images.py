@@ -254,6 +254,20 @@ def batch_delete():
     if not ids:
         return jsonify({'error': 'ids required'}), 400
     delete_file = data.get('delete_file', False)
+
+    # Reject if any IDs belong to disabled scan roots
+    disabled = session.query(Image.id).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(
+        Image.id.in_(ids), ScanRoot.enabled == False
+    ).all()
+    disabled_ids = {r[0] for r in disabled}
+    if disabled_ids:
+        return jsonify({
+            'error': '部分图片属于已禁用的扫描目录',
+            'disabled_ids': list(disabled_ids),
+        }), 403
+
     # Collect barcodes before deletion
     barcodes = {r[0] for r in session.query(Image.barcode).filter(
         Image.id.in_(ids)).distinct().all()}
@@ -264,11 +278,11 @@ def batch_delete():
                 os.remove(img.file_path)
             except OSError:
                 pass
-    session.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
+    deleted = session.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
     session.commit()
     for bc in barcodes:
         update_versions_for_barcode(bc)
-    return jsonify({'message': f'deleted {len(ids)} images'})
+    return jsonify({'message': f'deleted {deleted} images', 'deleted': deleted})
 
 @images_bp.route('/images/batch-export', methods=['POST'])
 def batch_export():

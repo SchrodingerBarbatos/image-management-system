@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Layout, message, Space, Button, Typography, Modal } from 'antd';
 import { DeleteOutlined, ExportOutlined } from '@ant-design/icons';
 import SearchBar from '../components/SearchBar';
@@ -36,6 +36,7 @@ const Home: React.FC = () => {
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchDeleteVisible, setBatchDeleteVisible] = useState(false);
   const [capturedAllIds, setCapturedAllIds] = useState<number[]>([]);
+  const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Modals
   const [scanVisible, setScanVisible] = useState(false);
@@ -113,11 +114,51 @@ const Home: React.FC = () => {
     try {
       const res = await imageApi.batchExport(allIds);
       const skipped = res.scanroot_excluded + (res.version_filtered || 0);
+      if (res.total === 0) {
+        setBatchLoading(false);
+        message.warning('没有匹配到可导出的图片');
+        return;
+      }
       if (skipped > 0) {
         message.warning(`已导出 ${res.total} 张图片，${res.scanroot_excluded} 张因目录已禁用被跳过，${res.version_filtered || 0} 张因版本去重被跳过`);
       }
-      window.open(exportApi.downloadUrl(res.task_id), '_blank');
-    } finally { setBatchLoading(false); }
+      // Poll for completion instead of immediate download
+      let pollCount = 0;
+      const maxPolls = 150; // 5 min
+      const poll = async () => {
+        try {
+          const p = await exportApi.getProgress(res.task_id);
+          if (p.status === 'done') {
+            setBatchLoading(false);
+            window.open(exportApi.downloadUrl(res.task_id), '_blank');
+            return;
+          }
+          if (p.status === 'failed') {
+            setBatchLoading(false);
+            message.error(p.error_message || '导出失败');
+            return;
+          }
+          pollCount++;
+          if (pollCount >= maxPolls) {
+            setBatchLoading(false);
+            message.error('生成超时，请重试');
+            return;
+          }
+          exportTimerRef.current = setTimeout(poll, 2000);
+        } catch {
+          pollCount++;
+          if (pollCount >= maxPolls) {
+            setBatchLoading(false);
+            message.error('生成超时，请重试');
+            return;
+          }
+          exportTimerRef.current = setTimeout(poll, 2000);
+        }
+      };
+      exportTimerRef.current = setTimeout(poll, 1000);
+    } catch {
+      setBatchLoading(false);
+    }
   };
 
   const handleCardDeleted = useCallback(() => {

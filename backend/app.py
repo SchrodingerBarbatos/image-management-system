@@ -44,7 +44,6 @@ def _request_admin():
 
 
 app = Flask(__name__, static_folder=None)
-CORS(app)
 
 Base.metadata.create_all(bind=engine)
 
@@ -204,6 +203,34 @@ def _ensure_firewall_rule(port):
         print(f"[WARNING] 防火墙规则配置失败: {e}", file=_sys.stderr)
 
 
+def _get_lan_ips():
+    """Return LAN IPv4 addresses of this machine."""
+    ips = set()
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip and not ip.startswith('127.'):
+            ips.add(ip)
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            ip = info[4][0]
+            if ip and not ip.startswith('127.') and ':' not in ip:
+                ips.add(ip)
+    except Exception:
+        pass
+    return ips
+
+
+def _configure_cors(app, port):
+    """Restrict CORS to localhost and LAN IPs on the given port."""
+    origins = [f'http://localhost:{port}', f'http://127.0.0.1:{port}']
+    for ip in _get_lan_ips():
+        origins.append(f'http://{ip}:{port}')
+    CORS(app, origins=origins)
+
+
 def start_tray(port, open_browser_on_start=True):
     import pystray
     from PIL import Image as PILImage
@@ -237,6 +264,7 @@ def start_tray(port, open_browser_on_start=True):
     port = resolved
 
     _ensure_firewall_rule(port)
+    _configure_cors(app, port)
 
     stop_event = threading.Event()
 
@@ -312,6 +340,7 @@ if __name__ == '__main__':
             from routes.export import cleanup_old_exports
             cleanup_old_exports()
             _ensure_firewall_rule(port)
+            _configure_cors(app, port)
             if args.open_browser:
                 import webbrowser
                 threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()

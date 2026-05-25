@@ -1,4 +1,4 @@
-﻿import os, sys, uuid, zipfile, datetime, threading, logging, traceback
+﻿import os, sys, uuid, zipfile, datetime, threading, logging, traceback, re
 from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook
 from models import session, Image, ExportTask, ScanRoot, BarcodeSetting, ImageVersion
@@ -55,6 +55,17 @@ def _col_letter(idx):
         result = chr(65 + (idx % 26)) + result
         idx = idx // 26 - 1
     return result
+
+
+def _col_letter_to_idx(s):
+    """Convert Excel column letter(s) to 0-based index. A->0, Z->25, AA->26."""
+    s = s.strip().upper()
+    if not s or not s.isalpha():
+        raise ValueError('invalid column letter')
+    idx = 0
+    for c in s:
+        idx = idx * 26 + (ord(c) - ord('A') + 1)
+    return idx - 1
 
 def _build_zip(task_id, img_data, flat):
     """Build ZIP file in a background thread, updating task progress.
@@ -141,14 +152,39 @@ def upload_excel():
     file = request.files.get('file')
     if not file:
         return jsonify({'error': 'file required'}), 400
+
+    # Validate extension
+    if not file.filename or not file.filename.lower().endswith('.xlsx'):
+        return jsonify({'error': '只允许 .xlsx 文件'}), 400
+
+    # Size limit: 10 MB
+    file.seek(0, 2)
+    size = file.tell()
+    file.seek(0)
+    if size > 10 * 1024 * 1024:
+        return jsonify({'error': '文件大小不能超过 10MB'}), 400
+
     upload_id = uuid.uuid4().hex[:12]
     upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
     file.save(upload_path)
-    wb = load_workbook(upload_path, read_only=True)
+
+    try:
+        wb = load_workbook(upload_path, read_only=True)
+    except Exception:
+        return jsonify({'error': '无法解析 Excel 文件，请确认文件格式正确'}), 400
+
     sheet_names = wb.sheetnames
+    if not sheet_names:
+        wb.close()
+        return jsonify({'error': 'Excel 文件中没有工作表'}), 400
+
     ws = wb[sheet_names[0]] if sheet_names else wb.active
     headers = [str(cell.value) for cell in next(ws.iter_rows(min_row=1, max_row=1))]
     wb.close()
+
+    if not headers or all(h == 'None' for h in headers):
+        return jsonify({'error': '表头为空，请检查 Excel 文件'}), 400
+
     column_names = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
     return jsonify({'columns': column_names, 'sheets': sheet_names, 'upload_id': upload_id})
 
@@ -166,16 +202,47 @@ def generate_zip():
     if not upload_id:
         return jsonify({'error': 'upload_id is required'}), 400
 
+    # Validate upload_id format
+    if not re.match(r'^[0-9a-f]{12}$', upload_id):
+        return jsonify({'error': 'invalid upload_id'}), 400
+
     # Parse barcode column letter
     col_letter = barcode_col.split('-')[0] if '-' in barcode_col else 'A'
-    col_idx = ord(col_letter.upper()) - ord('A')
+    try:
+        col_idx = _col_letter_to_idx(col_letter)
+    except ValueError:
+        return jsonify({'error': f'invalid column letter: {col_letter}'}), 400
 
     # Read barcodes from Excel
     upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
-    wb = load_workbook(upload_path, read_only=True)
+    # Resolve real path and ensure it stays within UPLOAD_DIR
+    real_upload = os.path.realpath(upload_path)
+    real_upload_dir = os.path.realpath(UPLOAD_DIR)
+    if os.path.commonpath([real_upload, real_upload_dir]) != real_upload_dir:
+        return jsonify({'error': 'invalid upload_id'}), 400
+    if not os.path.isfile(real_upload):
+        return jsonify({'error': 'upload file not found'}), 404
+
+    try:
+        wb = load_workbook(real_upload, read_only=True)
+    except Exception:
+        return jsonify({'error': '无法解析 Excel 文件'}), 400
+
+    if sheet_name and sheet_name not in wb.sheetnames:
+        wb.close()
+        return jsonify({'error': f'工作表 "{sheet_name}" 不存在'}), 400
+
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    # Get header row to validate column index
+    header_row = next(ws.iter_rows(min_row=1, max_row=1))
+    if col_idx >= len(header_row):
+        wb.close()
+        return jsonify({'error': f'列索引 {col_letter}({col_idx}) 超出表头范围(共 {len(header_row)} 列)'}), 400
+
     barcodes = []
     for row in ws.iter_rows(min_row=2):
+        if col_idx >= len(row):
+            continue
         val = str(row[col_idx].value).strip() if row[col_idx].value else ''
         if val:
             barcodes.append(val)

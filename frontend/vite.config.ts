@@ -9,4 +9,15 @@ export default defineConfig({
       '/api': 'http://localhost:5000',
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-antd': ['antd', '@ant-design/icons'],
+          'vendor-axios': ['axios'],
+        },
+      },
+    },
+  },
 })

@@ -91,6 +91,15 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
     if not root:
         return {'error': 'Scan root not found'}
 
+    try:
+        return _do_scan(root, root_id, full_scan, progress_callback)
+    except Exception:
+        session.rollback()
+        raise
+
+
+def _do_scan(root, root_id, full_scan, progress_callback):
+
     def _report(phase, **kw):
         if progress_callback:
             progress_callback(phase, **kw)
@@ -105,15 +114,15 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
 
     _report('scan_start', current_root_path=root.path)
 
-    # Full scan: delete all existing images for this root
-    if full_scan:
-        deleted = session.query(Image).filter(
+    # Build indexed_map BEFORE any deletion so we can safely recover on failure
+    indexed_map = {
+        img.file_path: img for img in session.query(Image).filter(
             Image.scan_root_id == root_id
-        ).delete()
-        session.commit()
-        broken_cleaned = deleted
-    else:
-        # Clean up broken records for this root
+        ).all()
+    }
+
+    if not full_scan:
+        # Incremental: clean up broken records for this root
         broken = session.query(Image).filter(
             Image.scan_root_id == root_id, Image.status == 'broken'
         ).all()
@@ -121,12 +130,6 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
             session.delete(img)
         broken_cleaned = len(broken)
         session.commit()
-
-    indexed_map = {
-        img.file_path: img for img in session.query(Image).filter(
-            Image.scan_root_id == root_id
-        ).all()
-    }
 
     walk = os.walk if root.recursive else _walk_nonrecursive
 
@@ -199,9 +202,15 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
             thumb_jobs.append((img.id, full_path))
             added += 1
 
-    # 磁盘上已不存在的文件标记为 broken
-    for img in indexed_map.values():
-        img.status = 'broken'
+    # Handle leftover records not found on disk
+    leftover_count = len(indexed_map)
+    if full_scan:
+        for img in indexed_map.values():
+            session.delete(img)
+        broken_cleaned += leftover_count
+    else:
+        for img in indexed_map.values():
+            img.status = 'broken'
 
     session.commit()
 
@@ -226,6 +235,6 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
         session.commit()
 
     _report('root_done', added=added, skipped=skipped,
-            broken_cleaned=broken_cleaned, broken_new=len(indexed_map))
+            broken_cleaned=broken_cleaned, broken_new=leftover_count)
 
-    return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': len(indexed_map)}
+    return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count}
