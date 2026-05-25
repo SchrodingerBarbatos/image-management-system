@@ -267,7 +267,8 @@ const ImageCardDetail: React.FC<Props> = ({
   };
 
   const handleDuplicateDelete = async (deleteFile: boolean) => {
-    if (!dupDeleteTarget) return;
+    if (!dupDeleteTarget || deletingRef.current) return;
+    deletingRef.current = true;
     const targetFolderMtime = dupDeleteTarget.folderMtime;
     const targetImageType = dupDeleteTarget.imageType;
     try {
@@ -313,6 +314,7 @@ const ImageCardDetail: React.FC<Props> = ({
     } catch {
       message.error("删除重复图片失败，请重试");
     } finally {
+      deletingRef.current = false;
       setLoading(false);
     }
   };

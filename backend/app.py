@@ -1,4 +1,5 @@
 import os, sys
+import ctypes
 import threading
 import socket
 import logging
@@ -8,6 +9,40 @@ from config import DB_PATH
 from models import Base, engine, session
 
 IS_PACKAGED = getattr(sys, 'frozen', False)
+
+
+def _is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def _request_admin():
+    """Re-launch the current script with administrator privileges."""
+    if IS_PACKAGED:
+        exe = sys.executable
+        args = sys.argv[1:]
+        params = ' '.join(f'"{a}"' for a in args)
+        ret = ctypes.windll.shell32.ShellExecuteW(None, 'runas', exe, params, None, 1)
+    else:
+        exe = sys.executable
+        script = os.path.abspath(sys.argv[0])
+        args = sys.argv[1:]
+        params = f'"{script}" ' + ' '.join(f'"{a}"' for a in args)
+        ret = ctypes.windll.shell32.ShellExecuteW(None, 'runas', exe, params, None, 1)
+    if ret <= 32:
+        import tkinter.messagebox
+        tkinter.messagebox.showerror(
+            "权限不足",
+            "需要管理员权限来配置防火墙规则。\n请以管理员身份重新运行此程序。",
+        )
+
+
+if not _is_admin():
+    _request_admin()
+    sys.exit(0)
+
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
@@ -125,6 +160,34 @@ def _check_port(host, port):
             return False
 
 
+def _ensure_firewall_rule(port):
+    """Add Windows Firewall inbound rule for the given port, if not already present."""
+    import subprocess
+    rule_name = '图片管理系统 (Image Manager)'
+    try:
+        check = subprocess.run(
+            ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if rule_name in check.stdout:
+            return
+        subprocess.run(
+            [
+                'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                f'name={rule_name}',
+                'dir=in',
+                'action=allow',
+                'protocol=TCP',
+                f'localport={port}',
+                'profile=any',
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        import sys as _sys
+        print(f"[WARNING] 防火墙规则配置失败: {e}", file=_sys.stderr)
+
+
 def start_tray(port, open_browser_on_start=True):
     import pystray
     from PIL import Image as PILImage
@@ -158,6 +221,8 @@ def start_tray(port, open_browser_on_start=True):
             return
         logger.info("Using fallback port %s", fallback)
         port = fallback
+
+    _ensure_firewall_rule(port)
 
     stop_event = threading.Event()
 
@@ -218,6 +283,7 @@ if __name__ == '__main__':
         if args.tray:
             start_tray(port=args.port, open_browser_on_start=args.open_browser)
         else:
+            _ensure_firewall_rule(args.port)
             if args.open_browser:
                 import webbrowser
                 threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
