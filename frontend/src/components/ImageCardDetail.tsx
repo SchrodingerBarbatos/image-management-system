@@ -218,7 +218,8 @@ const ImageCardDetail: React.FC<Props> = ({
   };
 
   const handleVersionDelete = async (deleteFile: boolean) => {
-    if (!versionDeleteTarget) return;
+    if (!versionDeleteTarget || deletingRef.current) return;
+    deletingRef.current = true;
     const deletedMtime = versionDeleteTarget.folder_mtime;
     const deletedImageType = versionDeleteTarget.image_type;
     try {
@@ -260,6 +261,7 @@ const ImageCardDetail: React.FC<Props> = ({
     } catch {
       message.error("删除版本失败，请重试");
     } finally {
+      deletingRef.current = false;
       setLoading(false);
     }
   };
@@ -473,6 +475,18 @@ const ImageCardDetail: React.FC<Props> = ({
             <Button size="small" onClick={() => toggleAll(mainImages, "main")}>
               全选主图
             </Button>
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              disabled={!mainVersion}
+              onClick={() => {
+                const v = versions.find(
+                  (ver) => ver.folder_mtime === mainVersion && ver.image_type === "main",
+                );
+                if (v) setVersionDeleteTarget(v);
+              }}
+            />
           </Space>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {mainImages.map(renderImage)}
@@ -498,6 +512,18 @@ const ImageCardDetail: React.FC<Props> = ({
             >
               全选详情图
             </Button>
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              disabled={!detailVersion}
+              onClick={() => {
+                const v = versions.find(
+                  (ver) => ver.folder_mtime === detailVersion && ver.image_type === "detail",
+                );
+                if (v) setVersionDeleteTarget(v);
+              }}
+            />
           </Space>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {detailImages.map(renderImage)}
@@ -534,7 +560,8 @@ const ImageCardDetail: React.FC<Props> = ({
         width={360}
       >
         <p>
-          将删除版本 <Text strong>{versionDeleteTarget?.version_label}</Text>{" "}
+          将删除{versionDeleteTarget?.image_type === "main" ? "主图" : "详情图"}版本{" "}
+          <Text strong>{versionDeleteTarget?.version_label}</Text>{" "}
           下的所有图片：
         </p>
         <Space style={{ marginTop: 12 }}>

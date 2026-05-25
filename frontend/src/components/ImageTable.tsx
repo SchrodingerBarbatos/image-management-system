@@ -29,11 +29,11 @@ const columns: ColumnsType<BarcodeRec> = [
   },
   {
     title: '主图版本', dataIndex: 'main_versions', width: 90, sorter: true,
-    render: (c: number) => <Tag color="purple">{c}</Tag>,
+    render: (c: number) => c > 0 ? <Tag color="purple">{c}</Tag> : <Tag>无</Tag>,
   },
   {
     title: '详情图版本', dataIndex: 'detail_versions', width: 95, sorter: true,
-    render: (c: number) => <Tag color="geekblue">{c}</Tag>,
+    render: (c: number) => c > 0 ? <Tag color="geekblue">{c}</Tag> : <Tag>无</Tag>,
   },
 ];
 
