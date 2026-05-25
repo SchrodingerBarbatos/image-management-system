@@ -59,6 +59,7 @@ jobs:
         run: |
           pyinstaller --onefile `
             --name "image-manager" `
+            --icon image_manager_flat_multires.ico `
             --add-data "frontend/dist;frontend" `
             --add-data "image_manager_flat_multires.ico;." `
             --hidden-import flask `

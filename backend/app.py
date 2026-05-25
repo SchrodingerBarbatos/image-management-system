@@ -162,7 +162,7 @@ def start_tray(port, open_browser_on_start=True):
     stop_event = threading.Event()
 
     flask_thread = threading.Thread(
-        target=lambda: app.run(debug=False, port=port, use_reloader=False),
+        target=lambda: app.run(host='0.0.0.0', debug=False, port=port, use_reloader=False),
         daemon=True,
     )
     flask_thread.start()
@@ -221,4 +221,4 @@ if __name__ == '__main__':
             if args.open_browser:
                 import webbrowser
                 threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
-            app.run(debug=args.debug, port=args.port)
+            app.run(host='0.0.0.0', debug=args.debug, port=args.port)
