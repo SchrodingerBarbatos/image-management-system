@@ -12,6 +12,8 @@ import { BarcodeRec, imageApi, barcodeApi, pendingApi, exportApi } from '../serv
 const { Header, Content, Footer } = Layout;
 const { Text } = Typography;
 
+const BARCODE_RESOLVE_PAGE_SIZE = 500;
+
 const Home: React.FC = () => {
   // Barcode-level table data
   const [barcodes, setBarcodes] = useState<BarcodeRec[]>([]);
@@ -34,6 +36,7 @@ const Home: React.FC = () => {
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchDeleteVisible, setBatchDeleteVisible] = useState(false);
   const [resolvedBarcodeIds, setResolvedBarcodeIds] = useState<number[]>([]);
+  const [capturedAllIds, setCapturedAllIds] = useState<number[]>([]);
 
   // Modals
   const [scanVisible, setScanVisible] = useState(false);
@@ -60,13 +63,13 @@ const Home: React.FC = () => {
     if (selectedBarcodes.size === 0) return [];
     const results = await Promise.all(
       Array.from(selectedBarcodes).map(async (bc) => {
-        const firstPage = await imageApi.list({ barcode: bc, page_size: 500 });
+        const firstPage = await imageApi.list({ barcode: bc, page_size: BARCODE_RESOLVE_PAGE_SIZE });
         const allIds = firstPage.items.map(i => i.id);
-        const totalPages = Math.ceil(firstPage.total / 500);
+        const totalPages = Math.ceil(firstPage.total / BARCODE_RESOLVE_PAGE_SIZE);
         if (totalPages > 1) {
           const pages = await Promise.all(
             Array.from({ length: totalPages - 1 }, (_, i) =>
-              imageApi.list({ barcode: bc, page: i + 2, page_size: 500 })
+              imageApi.list({ barcode: bc, page: i + 2, page_size: BARCODE_RESOLVE_PAGE_SIZE })
             )
           );
           for (const page of pages) {
@@ -80,16 +83,16 @@ const Home: React.FC = () => {
   };
 
   const executeBatchDelete = async (deleteFile: boolean) => {
-    const allIds = [...new Set([...Array.from(allSelectedIds), ...resolvedBarcodeIds])];
-    if (allIds.length === 0) return;
+    if (capturedAllIds.length === 0) return;
     setBatchLoading(true);
     setBatchDeleteVisible(false);
     try {
-      await imageApi.batchDelete(allIds, deleteFile);
-      message.success(deleteFile ? `已删除 ${allIds.length} 张图片索引和文件` : `已删除 ${allIds.length} 张图片索引`);
+      await imageApi.batchDelete(capturedAllIds, deleteFile);
+      message.success(deleteFile ? `已删除 ${capturedAllIds.length} 张图片索引和文件` : `已删除 ${capturedAllIds.length} 张图片索引`);
       setSelectedMainIds(new Set()); setSelectedDetailIds(new Set());
       setSelectedBarcodes(new Set());
       setResolvedBarcodeIds([]);
+      setCapturedAllIds([]);
       fetchBarcodes();
     } finally { setBatchLoading(false); }
   };
@@ -98,7 +101,9 @@ const Home: React.FC = () => {
     setBatchLoading(true);
     try {
       const barcodeIds = await resolveBarcodeImageIds();
+      const allIds = [...new Set([...Array.from(allSelectedIds), ...barcodeIds])];
       setResolvedBarcodeIds(barcodeIds);
+      setCapturedAllIds(allIds);
       setBatchDeleteVisible(true);
     } finally { setBatchLoading(false); }
   };
@@ -193,7 +198,7 @@ const Home: React.FC = () => {
 
       <Modal title="批量删除" open={batchDeleteVisible} onCancel={() => setBatchDeleteVisible(false)}
         footer={null} width={400}>
-        <p>确定删除选中的 {allSelectedIds.size + resolvedBarcodeIds.length} 条记录？</p>
+        <p>确定删除选中的 {capturedAllIds.length} 条记录？</p>
         <Space style={{ marginTop: 12 }}>
           <Button onClick={() => executeBatchDelete(false)}>删除索引</Button>
           <Button danger onClick={() => executeBatchDelete(true)}>删除索引和文件</Button>

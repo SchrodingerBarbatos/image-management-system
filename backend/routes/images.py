@@ -63,6 +63,8 @@ def list_barcodes():
         sort = 'barcode'
     reverse = request.args.get('order') == 'desc'
     sort_col = Image.barcode if sort == 'barcode' else sort
+    # sort_col may be a string label (e.g. 'main_count'), resolved by SQLAlchemy via query labels.
+    # Must stay in sync with label names in the SELECT clause above.
     q = q.order_by(desc(sort_col) if reverse else asc(sort_col))
 
     # Paginate
@@ -148,6 +150,8 @@ def update_image(img_id):
         return jsonify({'error': 'scan root is disabled'}), 403
     data = request.json
     if 'image_type' in data:
+        if data['image_type'] not in ('main', 'detail'):
+            return jsonify({'error': 'image_type must be "main" or "detail"'}), 400
         img.image_type = data['image_type']
     if 'confirmed' in data:
         img.confirmed = data['confirmed']

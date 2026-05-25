@@ -57,7 +57,7 @@ def update_versions_for_barcode(barcode):
             _do_update_versions_for_barcode(barcode)
             return
         except Exception as e:
-            if 'locked' not in str(e).lower() and attempt == 1:
+            if 'locked' not in str(e).lower():
                 raise
             if attempt == _SQLITE_RETRY_ATTEMPTS:
                 _log.error("update_versions_for_barcode(%s) failed after %d retries: %s", barcode, _SQLITE_RETRY_ATTEMPTS, e)

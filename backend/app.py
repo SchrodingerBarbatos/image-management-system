@@ -3,6 +3,11 @@ import ctypes
 import threading
 import socket
 import logging
+import re
+try:
+    import tkinter.messagebox
+except ImportError:
+    tkinter = None
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 from config import DB_PATH
@@ -32,7 +37,6 @@ def _request_admin():
         params = f'"{script}" ' + ' '.join(f'"{a}"' for a in args)
         ret = ctypes.windll.shell32.ShellExecuteW(None, 'runas', exe, params, None, 1)
     if ret <= 32:
-        import tkinter.messagebox
         tkinter.messagebox.showerror(
             "权限不足",
             "需要管理员权限来配置防火墙规则。\n请以管理员身份重新运行此程序。",
@@ -181,7 +185,7 @@ def _ensure_firewall_rule(port):
             ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
             capture_output=True, text=True, timeout=10,
         )
-        if rule_name in check.stdout:
+        if re.search(r'Rule Name:\s+' + re.escape(rule_name) + r'\s*$', check.stdout, re.MULTILINE):
             return
         subprocess.run(
             [
@@ -224,7 +228,6 @@ def start_tray(port, open_browser_on_start=True):
     if resolved is None:
         logger.critical("No available port in range %s-%s", port, port + 9)
         try:
-            import tkinter.messagebox
             tkinter.messagebox.showerror("启动失败", f"端口 {port}-{port+9} 均被占用，无法启动服务")
         except Exception:
             pass

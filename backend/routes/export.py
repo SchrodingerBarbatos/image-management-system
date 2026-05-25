@@ -9,9 +9,15 @@ _log = logging.getLogger(__name__)
 
 
 def filter_to_single_version(imgs, barcodes, session):
-    """Return subset of imgs containing only the user-chosen default or latest version per barcode.
+    """Return subset of imgs containing only one version per (barcode, image_type).
 
-    Priority: user-chosen default > latest version > all images.
+    Priority chain (first match wins):
+    1. BarcodeSetting.default_{main,detail}_mtime — user-chosen default per barcode
+    2. ImageVersion.is_latest — most recent version detected by scanner
+    3. Pass-through — if no version data exists for a barcode, keep all its images
+
+    Relies on ImageVersion and BarcodeSetting tables for version resolution.
+    When a barcode has neither, images are kept as-is (fallback to "all images").
     """
     settings = session.query(BarcodeSetting).filter(
         BarcodeSetting.barcode.in_(barcodes)
@@ -56,6 +62,7 @@ def _build_zip(task_id, img_data, flat):
     try:
         task = sess.get(ExportTask, task_id)
         if not task:
+            _log.warning("_build_zip: task %s not found (may have been deleted)", task_id)
             return
         total = len(img_data)
         if total == 0:
@@ -79,7 +86,7 @@ def _build_zip(task_id, img_data, flat):
         sess.commit()
 
         written = 0
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:  # no compression — JPEG/PNG are already compressed
             for i, (file_path, barcode, image_type, sequence, ext) in enumerate(img_data):
                 if os.path.exists(file_path):
                     safe_type = image_type if image_type in ('main', 'detail') else 'detail'
@@ -114,7 +121,11 @@ def _build_zip(task_id, img_data, flat):
             task = sess.get(ExportTask, task_id)
             if task:
                 task.status = 'failed'
-                task.error_message = traceback.format_exc() if not getattr(sys, 'frozen', False) else f"{type(e).__name__}: {e}"
+                if getattr(sys, 'frozen', False):
+                    task.error_message = f"导出失败: {e}"
+                    _log.error("_build_zip task %s failed:\n%s", task_id, traceback.format_exc())
+                else:
+                    task.error_message = traceback.format_exc()
                 sess.commit()
         except Exception:
             pass
@@ -240,6 +251,8 @@ def download_zip(task_id):
     task = session.get(ExportTask, task_id)
     if not task or task.status != 'done':
         return jsonify({'error': 'not ready'}), 404
+    if not os.path.exists(task.zip_path):
+        return jsonify({'error': 'file has been cleaned up'}), 404
     return send_file(
         task.zip_path,
         as_attachment=True,
