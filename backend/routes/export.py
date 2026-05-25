@@ -79,26 +79,30 @@ def _build_zip(task_id, img_data, flat):
         sess.commit()
 
         written = 0
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
             for i, (file_path, barcode, image_type, sequence, ext) in enumerate(img_data):
                 if os.path.exists(file_path):
+                    safe_type = image_type if image_type in ('main', 'detail') else 'detail'
+                    if safe_type != image_type:
+                        _log.warning("_build_zip: unexpected image_type %r for barcode %s, defaulting to 'detail'", image_type, barcode)
                     # Main: barcode_seq.ext  Detail: barcode_详情图_seq.ext
-                    if image_type == 'main':
+                    if safe_type == 'main':
                         display_name = f"{barcode}_{sequence}.{ext}"
                     else:
                         display_name = f"{barcode}_详情图_{sequence}.{ext}"
                     if flat:
                         arcname = display_name
                     else:
-                        type_folder = '主图' if image_type == 'main' else '详情图'
+                        type_folder = '主图' if safe_type == 'main' else '详情图'
                         arcname = f"{type_folder}/{display_name}"
                     zf.write(file_path, arcname)
                     written += 1
                 task.progress = i + 1
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 100 == 0:
                     sess.commit()
 
         if written == 0:
+            _log.warning("_build_zip task %s: all %d files missing from disk", task_id, total)
             task.status = 'failed'
             task.error_message = '所有匹配的图片文件均不存在（可能已被移动或删除）'
         else:
@@ -110,7 +114,7 @@ def _build_zip(task_id, img_data, flat):
             task = sess.get(ExportTask, task_id)
             if task:
                 task.status = 'failed'
-                task.error_message = traceback.format_exc() if not getattr(sys, 'frozen', False) else str(e)
+                task.error_message = traceback.format_exc() if not getattr(sys, 'frozen', False) else f"{type(e).__name__}: {e}"
                 sess.commit()
         except Exception:
             pass
@@ -236,7 +240,13 @@ def download_zip(task_id):
     task = session.get(ExportTask, task_id)
     if not task or task.status != 'done':
         return jsonify({'error': 'not ready'}), 404
-    return send_file(task.zip_path, as_attachment=True, download_name=f'export_{task_id}.zip')
+    return send_file(
+        task.zip_path,
+        as_attachment=True,
+        download_name=f'export_{task_id}.zip',
+        mimetype='application/zip',
+        conditional=True,
+    )
 
 
 def cleanup_old_exports():
@@ -252,4 +262,5 @@ def cleanup_old_exports():
             except OSError:
                 pass
         session.delete(task)
-        session.commit()
+    session.commit()
+

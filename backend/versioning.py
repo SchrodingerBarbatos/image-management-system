@@ -1,6 +1,12 @@
-import hashlib, json
+import hashlib, json, time, logging
+from collections import defaultdict
 from models import session, Image, ImageVersion, ScanRoot
 from scanner import compute_md5
+
+_log = logging.getLogger(__name__)
+
+_SQLITE_RETRY_ATTEMPTS = 5
+_SQLITE_RETRY_DELAY = 0.5  # seconds
 
 
 def compute_content_hash(images):
@@ -46,6 +52,21 @@ def update_versions_for_barcode(barcode):
     """Rebuild version records for a single barcode, per image_type.
     Groups images by (folder_mtime, image_type), then uses funnel
     comparison to merge identical groups before creating versions."""
+    for attempt in range(1, _SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            _do_update_versions_for_barcode(barcode)
+            return
+        except Exception as e:
+            if 'locked' not in str(e).lower() and attempt == 1:
+                raise
+            if attempt == _SQLITE_RETRY_ATTEMPTS:
+                _log.error("update_versions_for_barcode(%s) failed after %d retries: %s", barcode, _SQLITE_RETRY_ATTEMPTS, e)
+                raise
+            _log.warning("update_versions_for_barcode(%s) retry %d/%d (locked)", barcode, attempt, _SQLITE_RETRY_ATTEMPTS)
+            time.sleep(_SQLITE_RETRY_DELAY)
+
+
+def _do_update_versions_for_barcode(barcode):
     images = session.query(Image).filter(
         Image.barcode == barcode, Image.confirmed == True, Image.status == 'active'
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
@@ -56,10 +77,10 @@ def update_versions_for_barcode(barcode):
         return
 
     # Group by (folder_mtime, image_type)
-    by_key = {}
+    by_key = defaultdict(list)
     for img in images:
         key = (img.folder_mtime, img.image_type)
-        by_key.setdefault(key, []).append(img)
+        by_key[key].append(img)
 
     # Per image_type: sort by mtime desc, funnel-merge duplicates
     versions_by_type = {}  # {img_type: [(mtime, imgs, duplicate_mtimes)]}
@@ -70,7 +91,7 @@ def update_versions_for_barcode(barcode):
             key=lambda k: k[0], reverse=True,
         )
         accepted = []  # [(mtime, imgs)]
-        dup_map = {}   # {mtime: [duplicate_mtime, ...]}
+        dup_map = defaultdict(list)  # {mtime: [duplicate_mtime, ...]}
 
         for mtime, _ in type_keys:
             imgs = by_key[(mtime, img_type)]
@@ -80,7 +101,7 @@ def update_versions_for_barcode(barcode):
                     duplicate_of = acc_mtime
                     break
             if duplicate_of:
-                dup_map.setdefault(duplicate_of, []).append(mtime)
+                dup_map[duplicate_of].append(mtime)
             else:
                 accepted.append((mtime, imgs))
 

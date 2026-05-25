@@ -30,6 +30,7 @@ def generate_thumbnail(image_id, source_path):
     try:
         img = PILImage.open(io.BytesIO(data))
         orig_mode = img.mode
+        img_info = dict(img.info) if img.info else {}
 
         # thumbnail() before convert() so JPEG draft mode can decode at reduced resolution
         img.thumbnail(THUMBNAIL_SIZE, PILImage.LANCZOS)
@@ -38,7 +39,7 @@ def generate_thumbnail(image_id, source_path):
 
         # detect transparency from original mode after thumbnail is already small
         has_transparency = orig_mode in ('RGBA', 'LA', 'PA') or (
-            orig_mode == 'P' and 'transparency' in img.info
+            orig_mode == 'P' and 'transparency' in img_info
         )
 
         offset = (

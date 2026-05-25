@@ -133,7 +133,7 @@ with engine.connect() as conn:
 # Rebuild versions if we just added the image_type column
 if need_rebuild:
     from versioning import update_all_versions
-    update_all_versions()
+    threading.Thread(target=update_all_versions, daemon=True).start()
 
 from routes.scan import scan_bp
 from routes.images import images_bp
@@ -160,6 +160,16 @@ def _check_port(host, port):
             return True
         except OSError:
             return False
+
+
+def _resolve_port(host, preferred):
+    """Return first available port starting from preferred, or None if all 10 are taken."""
+    if _check_port(host, preferred):
+        return preferred
+    for p in range(preferred + 1, preferred + 10):
+        if _check_port(host, p):
+            return p
+    return None
 
 
 def _ensure_firewall_rule(port):
@@ -210,23 +220,18 @@ def start_tray(port, open_browser_on_start=True):
     cleanup_old_exports()
 
     # Check port availability with fallback
-    if not _check_port('127.0.0.1', port):
-        logger.warning("Port %s is in use, trying fallback ports", port)
-        fallback = None
-        for p in range(port + 1, port + 10):
-            if _check_port('127.0.0.1', p):
-                fallback = p
-                break
-        if fallback is None:
-            logger.critical("No available port in range %s-%s", port, port + 9)
-            try:
-                import tkinter.messagebox
-                tkinter.messagebox.showerror("启动失败", f"端口 {port}-{port+9} 均被占用，无法启动服务")
-            except Exception:
-                pass
-            return
-        logger.info("Using fallback port %s", fallback)
-        port = fallback
+    resolved = _resolve_port('127.0.0.1', port)
+    if resolved is None:
+        logger.critical("No available port in range %s-%s", port, port + 9)
+        try:
+            import tkinter.messagebox
+            tkinter.messagebox.showerror("启动失败", f"端口 {port}-{port+9} 均被占用，无法启动服务")
+        except Exception:
+            pass
+        return
+    if resolved != port:
+        logger.warning("Port %s is in use, using fallback port %s", port, resolved)
+    port = resolved
 
     _ensure_firewall_rule(port)
 
@@ -294,18 +299,13 @@ if __name__ == '__main__':
             start_tray(port=args.port, open_browser_on_start=args.open_browser)
         else:
             port = args.port
-            if not _check_port('127.0.0.1', port):
-                logging.warning("Port %s is in use, trying fallback ports", port)
-                fallback = None
-                for p in range(port + 1, port + 10):
-                    if _check_port('127.0.0.1', p):
-                        fallback = p
-                        break
-                if fallback is None:
-                    print(f"Error: ports {port}-{port+9} are all in use", file=sys.stderr)
-                    sys.exit(1)
-                print(f"Port {port} in use, using {fallback} instead")
-                port = fallback
+            resolved = _resolve_port('127.0.0.1', port)
+            if resolved is None:
+                print(f"Error: ports {port}-{port+9} are all in use", file=sys.stderr)
+                sys.exit(1)
+            if resolved != port:
+                print(f"Port {port} in use, using {resolved} instead")
+            port = resolved
             from routes.export import cleanup_old_exports
             cleanup_old_exports()
             _ensure_firewall_rule(port)

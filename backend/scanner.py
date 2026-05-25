@@ -74,7 +74,9 @@ def compute_md5(filepath):
 def _walk_nonrecursive(path):
     """Yield (dirpath, [], filenames) for a single directory, with error handling."""
     try:
-        yield path, [], os.listdir(path)
+        entries = os.listdir(path)
+        files = [e for e in entries if os.path.isfile(os.path.join(path, e))]
+        yield path, [], files
     except OSError:
         return
 

@@ -119,8 +119,10 @@ def get_image(img_id):
     if not img:
         return jsonify({'error': 'not found'}), 404
     root = session.get(ScanRoot, img.scan_root_id)
-    if not root or not root.enabled:
+    if not root:
         return jsonify({'error': 'not found'}), 404
+    if not root.enabled:
+        return jsonify({'error': 'scan root is disabled'}), 403
     versions = session.query(ImageVersion).filter(
         ImageVersion.barcode == img.barcode
     ).order_by(ImageVersion.image_type.desc(), ImageVersion.folder_mtime.desc()).all()
@@ -140,8 +142,10 @@ def update_image(img_id):
     if not img:
         return jsonify({'error': 'not found'}), 404
     root = session.get(ScanRoot, img.scan_root_id)
-    if not root or not root.enabled:
+    if not root:
         return jsonify({'error': 'not found'}), 404
+    if not root.enabled:
+        return jsonify({'error': 'scan root is disabled'}), 403
     data = request.json
     if 'image_type' in data:
         img.image_type = data['image_type']
@@ -157,8 +161,10 @@ def delete_image(img_id):
     if not img:
         return jsonify({'error': 'not found'}), 404
     root = session.get(ScanRoot, img.scan_root_id)
-    if not root or not root.enabled:
+    if not root:
         return jsonify({'error': 'not found'}), 404
+    if not root.enabled:
+        return jsonify({'error': 'scan root is disabled'}), 403
     delete_file = request.args.get('delete_file', 'false').lower() == 'true'
     barcode = img.barcode
     if delete_file:
@@ -177,8 +183,10 @@ def serve_file(img_id):
     if not img:
         return jsonify({'error': 'not found'}), 404
     root = session.get(ScanRoot, img.scan_root_id)
-    if not root or not root.enabled:
+    if not root:
         return jsonify({'error': 'not found'}), 404
+    if not root.enabled:
+        return jsonify({'error': 'scan root is disabled'}), 403
     if not os.path.exists(img.file_path):
         img.status = 'broken'
         session.commit()
@@ -191,8 +199,10 @@ def serve_thumbnail(img_id):
     if not img:
         return jsonify({'error': 'not found'}), 404
     root = session.get(ScanRoot, img.scan_root_id)
-    if not root or not root.enabled:
+    if not root:
         return jsonify({'error': 'not found'}), 404
+    if not root.enabled:
+        return jsonify({'error': 'scan root is disabled'}), 403
     if not os.path.exists(img.file_path):
         img.status = 'broken'
         session.commit()
@@ -272,13 +282,13 @@ def batch_export():
     imgs = q.all()
 
     # Filter to single version: user-chosen default, or latest version as fallback
+    scanroot_excluded = len(ids) - len(imgs)
     barcodes_in = list(set(img.barcode for img in imgs))
-    before_version_filter = len(imgs)
     if barcodes_in:
+        # Lazy import to avoid circular dependency (routes.export imports from models)
         from routes.export import filter_to_single_version
         imgs = filter_to_single_version(imgs, barcodes_in, session)
-    excluded = len(ids) - len(imgs)
-    version_filtered = before_version_filter - len(imgs)
+    version_filtered = len(ids) - scanroot_excluded - len(imgs)
     task = ExportTask(status='processing')
     session.add(task)
     session.commit()
@@ -288,7 +298,7 @@ def batch_export():
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
     threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
 
-    return jsonify({'task_id': task.id, 'total': len(imgs), 'excluded': excluded, 'version_filtered': version_filtered})
+    return jsonify({'task_id': task.id, 'total': len(imgs), 'scanroot_excluded': scanroot_excluded, 'version_filtered': version_filtered})
 
 @images_bp.route('/barcodes/<barcode>/duplicate-images', methods=['DELETE'])
 def delete_duplicate_images(barcode):
@@ -356,8 +366,6 @@ def delete_version(version_id):
         Image.barcode == barcode,
         Image.folder_mtime == folder_mtime,
         Image.image_type == v.image_type,
-    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-        ScanRoot.enabled == True
     ).all()
     for img in imgs:
         if delete_file:
