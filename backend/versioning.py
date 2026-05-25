@@ -48,6 +48,17 @@ def groups_are_identical(imgs1, imgs2):
     return True
 
 
+def _is_sqlite_locked(exc):
+    """Check whether an exception is a SQLite 'database is locked' error."""
+    orig = getattr(exc, 'orig', None)
+    if orig is not None:
+        if getattr(orig, 'sqlite_errorcode', None) == 5:
+            return True
+        if getattr(orig, 'sqlite_errorname', '') == 'SQLITE_BUSY':
+            return True
+    return 'database is locked' in str(exc).lower()
+
+
 def update_versions_for_barcode(barcode):
     """Rebuild version records for a single barcode, per image_type.
     Groups images by (folder_mtime, image_type), then uses funnel
@@ -57,8 +68,9 @@ def update_versions_for_barcode(barcode):
             _do_update_versions_for_barcode(barcode)
             return
         except Exception as e:
-            if 'locked' not in str(e).lower():
+            if not _is_sqlite_locked(e):
                 raise
+            session.rollback()
             if attempt == _SQLITE_RETRY_ATTEMPTS:
                 _log.error("update_versions_for_barcode(%s) failed after %d retries: %s", barcode, _SQLITE_RETRY_ATTEMPTS, e)
                 raise

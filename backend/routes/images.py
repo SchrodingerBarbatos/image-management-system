@@ -321,8 +321,6 @@ def delete_duplicate_images(barcode):
         Image.barcode == barcode,
         Image.folder_mtime == folder_mtime,
         Image.image_type == image_type,
-    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-        ScanRoot.enabled == True
     ).all()
 
     if not imgs:

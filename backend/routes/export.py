@@ -19,10 +19,14 @@ def filter_to_single_version(imgs, barcodes, session):
     Relies on ImageVersion and BarcodeSetting tables for version resolution.
     When a barcode has neither, images are kept as-is (fallback to "all images").
     """
-    settings = session.query(BarcodeSetting).filter(
+    settings = session.query(
+        BarcodeSetting.barcode, BarcodeSetting.default_main_mtime, BarcodeSetting.default_detail_mtime
+    ).filter(
         BarcodeSetting.barcode.in_(barcodes)
     ).all()
-    latest_versions = session.query(ImageVersion).filter(
+    latest_versions = session.query(
+        ImageVersion.barcode, ImageVersion.image_type, ImageVersion.folder_mtime
+    ).filter(
         ImageVersion.barcode.in_(barcodes),
         ImageVersion.is_latest == True,
     ).all()
@@ -123,7 +127,6 @@ def _build_zip(task_id, img_data, flat):
                 task.status = 'failed'
                 if getattr(sys, 'frozen', False):
                     task.error_message = f"导出失败: {e}"
-                    _log.error("_build_zip task %s failed:\n%s", task_id, traceback.format_exc())
                 else:
                     task.error_message = traceback.format_exc()
                 sess.commit()
@@ -266,7 +269,8 @@ def cleanup_old_exports():
     """Remove export tasks and their files older than ZIP_CLEANUP_HOURS."""
     cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
     old_tasks = session.query(ExportTask).filter(
-        ExportTask.created_at < cutoff.isoformat()
+        ExportTask.created_at < cutoff.isoformat(),
+        ExportTask.status != 'processing',
     ).all()
     for task in old_tasks:
         if task.zip_path and os.path.exists(task.zip_path):

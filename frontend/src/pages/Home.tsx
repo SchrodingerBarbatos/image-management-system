@@ -35,7 +35,6 @@ const Home: React.FC = () => {
   const [selectedDetailIds, setSelectedDetailIds] = useState<Set<number>>(new Set());
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchDeleteVisible, setBatchDeleteVisible] = useState(false);
-  const [resolvedBarcodeIds, setResolvedBarcodeIds] = useState<number[]>([]);
   const [capturedAllIds, setCapturedAllIds] = useState<number[]>([]);
 
   // Modals
@@ -91,7 +90,6 @@ const Home: React.FC = () => {
       message.success(deleteFile ? `已删除 ${capturedAllIds.length} 张图片索引和文件` : `已删除 ${capturedAllIds.length} 张图片索引`);
       setSelectedMainIds(new Set()); setSelectedDetailIds(new Set());
       setSelectedBarcodes(new Set());
-      setResolvedBarcodeIds([]);
       setCapturedAllIds([]);
       fetchBarcodes();
     } finally { setBatchLoading(false); }
@@ -102,7 +100,6 @@ const Home: React.FC = () => {
     try {
       const barcodeIds = await resolveBarcodeImageIds();
       const allIds = [...new Set([...Array.from(allSelectedIds), ...barcodeIds])];
-      setResolvedBarcodeIds(barcodeIds);
       setCapturedAllIds(allIds);
       setBatchDeleteVisible(true);
     } finally { setBatchLoading(false); }
