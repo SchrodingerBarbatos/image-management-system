@@ -1,6 +1,6 @@
 # 商品图片管理系统 / Product Image Management System
 
-[English](#english) | [中文](#chinese)
+[中文](#chinese) | [English](#englishv)
 
 ---
 
