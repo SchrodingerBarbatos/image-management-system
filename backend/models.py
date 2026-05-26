@@ -37,7 +37,7 @@ class Image(Base):
     md5_hash = Column(Text, default='')  # size_mtime fingerprint for fast change detection (name retained for compat)
     content_md5 = Column(Text, default='')  # real MD5 of file content, computed at scan time; survives DB portability
     folder_path = Column(Text, default='')
-    folder_mtime = Column(Text, default='')
+    folder_ctime = Column('folder_mtime', Text, default='')
     scan_root_id = Column(Integer, ForeignKey('scan_root.id'), nullable=False)
     confirmed = Column(Boolean, default=True)
     status = Column(Text, default='active')
@@ -47,7 +47,7 @@ class Image(Base):
     __table_args__ = (
         Index('idx_barcode_type', 'barcode', 'image_type'),
         Index('idx_md5', 'md5_hash'),
-        Index('idx_folder_mtime', 'folder_mtime'),
+        Index('idx_folder_ctime', 'folder_mtime'),
         Index('idx_status_barcode_type', 'status', 'barcode', 'image_type'),
     )
 
@@ -57,7 +57,7 @@ class ImageVersion(Base):
     barcode = Column(Text, nullable=False, index=True)
     image_type = Column(Text, nullable=False, default='main')
     version_label = Column(Text, nullable=False)
-    folder_mtime = Column(Text, default='')
+    folder_ctime = Column('folder_mtime', Text, default='')
     content_hash = Column(Text, nullable=False)
     is_latest = Column(Boolean, default=False)
     duplicate_mtimes = Column(Text, default='')
@@ -81,8 +81,8 @@ class BarcodeSetting(Base):
     __tablename__ = 'barcode_setting'
     id = Column(Integer, primary_key=True)
     barcode = Column(Text, unique=True, nullable=False, index=True)
-    default_main_mtime = Column(Text, default='')
-    default_detail_mtime = Column(Text, default='')
+    default_main_ctime = Column('default_main_mtime', Text, default='')
+    default_detail_ctime = Column('default_detail_mtime', Text, default='')
 
 class ScanLog(Base):
     __tablename__ = 'scan_log'

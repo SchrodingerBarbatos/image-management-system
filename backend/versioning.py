@@ -11,7 +11,7 @@ _SQLITE_RETRY_DELAY = 0.5  # seconds
 
 def compute_content_hash(images):
     """Deterministic hash from sorted (filename, file_size, content_md5) triples.
-    Same content → same hash, regardless of file paths or mtimes.
+    Same content → same hash, regardless of file paths or ctimes.
     Uses content_md5 (real MD5) when available; falls back to md5_hash (fingerprint)
     for legacy data that predates content_md5."""
     pairs = sorted(
@@ -61,7 +61,7 @@ def _is_sqlite_locked(exc):
 
 def update_versions_for_barcode(barcode):
     """Rebuild version records for a single barcode, per image_type.
-    Groups images by (folder_mtime, image_type), then uses funnel
+    Groups images by (folder_ctime, image_type), then uses funnel
     comparison to merge identical groups before creating versions."""
     for attempt in range(1, _SQLITE_RETRY_ATTEMPTS + 1):
         try:
@@ -88,38 +88,38 @@ def _do_update_versions_for_barcode(barcode):
     if not images:
         return
 
-    # Group by (folder_mtime, image_type)
+    # Group by (folder_ctime, image_type)
     by_key = defaultdict(list)
     for img in images:
-        key = (img.folder_mtime, img.image_type)
+        key = (img.folder_ctime, img.image_type)
         by_key[key].append(img)
 
-    # Per image_type: sort by mtime desc, funnel-merge duplicates
-    versions_by_type = {}  # {img_type: [(mtime, imgs, duplicate_mtimes)]}
+    # Per image_type: sort by ctime desc, funnel-merge duplicates
+    versions_by_type = {}  # {img_type: [(ctime, imgs, duplicate_ctimes)]}
 
     for img_type in ('main', 'detail'):
         type_keys = sorted(
             [k for k in by_key if k[1] == img_type],
             key=lambda k: k[0], reverse=True,
         )
-        accepted = []  # [(mtime, imgs)]
-        dup_map = defaultdict(list)  # {mtime: [duplicate_mtime, ...]}
+        accepted = []  # [(ctime, imgs)]
+        dup_map = defaultdict(list)  # {ctime: [duplicate_ctime, ...]}
 
-        for mtime, _ in type_keys:
-            imgs = by_key[(mtime, img_type)]
+        for ctime, _ in type_keys:
+            imgs = by_key[(ctime, img_type)]
             duplicate_of = None
-            for acc_mtime, acc_imgs in accepted:
+            for acc_ctime, acc_imgs in accepted:
                 if groups_are_identical(imgs, acc_imgs):
-                    duplicate_of = acc_mtime
+                    duplicate_of = acc_ctime
                     break
             if duplicate_of:
-                dup_map[duplicate_of].append(mtime)
+                dup_map[duplicate_of].append(ctime)
             else:
-                accepted.append((mtime, imgs))
+                accepted.append((ctime, imgs))
 
         versions_by_type[img_type] = [
-            (mtime, imgs, json.dumps(dup_map.get(mtime, [])))
-            for mtime, imgs in accepted
+            (ctime, imgs, json.dumps(dup_map.get(ctime, [])))
+            for ctime, imgs in accepted
         ]
 
     # Delete old versions for this barcode
@@ -128,7 +128,7 @@ def _do_update_versions_for_barcode(barcode):
     # Create new versions per image_type
     for img_type, vers in versions_by_type.items():
         total = len(vers)
-        for i, (mtime, imgs, dup_mtimes) in enumerate(vers):
+        for i, (ctime, imgs, dup_ctimes) in enumerate(vers):
             version_num = total - i
             is_latest = (i == 0)
             ch = compute_content_hash(imgs)
@@ -136,10 +136,10 @@ def _do_update_versions_for_barcode(barcode):
                 barcode=barcode,
                 image_type=img_type,
                 version_label=f'v{version_num}',
-                folder_mtime=mtime,
+                folder_ctime=ctime,
                 content_hash=ch,
                 is_latest=is_latest,
-                duplicate_mtimes=dup_mtimes,
+                duplicate_mtimes=dup_ctimes,
             )
             session.add(v)
     session.commit()

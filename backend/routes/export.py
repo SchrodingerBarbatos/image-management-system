@@ -12,7 +12,7 @@ def filter_to_single_version(imgs, barcodes, session):
     """Return subset of imgs containing only one version per (barcode, image_type).
 
     Priority chain (first match wins):
-    1. BarcodeSetting.default_{main,detail}_mtime — user-chosen default per barcode
+    1. BarcodeSetting.default_{main,detail}_ctime — user-chosen default per barcode
     2. ImageVersion.is_latest — most recent version detected by scanner
     3. Pass-through — if no version data exists for a barcode, keep all its images
 
@@ -20,30 +20,30 @@ def filter_to_single_version(imgs, barcodes, session):
     When a barcode has neither, images are kept as-is (fallback to "all images").
     """
     settings = session.query(
-        BarcodeSetting.barcode, BarcodeSetting.default_main_mtime, BarcodeSetting.default_detail_mtime
+        BarcodeSetting.barcode, BarcodeSetting.default_main_ctime, BarcodeSetting.default_detail_ctime
     ).filter(
         BarcodeSetting.barcode.in_(barcodes)
     ).all()
     latest_versions = session.query(
-        ImageVersion.barcode, ImageVersion.image_type, ImageVersion.folder_mtime
+        ImageVersion.barcode, ImageVersion.image_type, ImageVersion.folder_ctime
     ).filter(
         ImageVersion.barcode.in_(barcodes),
         ImageVersion.is_latest == True,
     ).all()
-    allowed = {}  # {barcode: {image_type: folder_mtime}}
+    allowed = {}  # {barcode: {image_type: folder_ctime}}
     for v in latest_versions:
-        allowed.setdefault(v.barcode, {})[v.image_type] = v.folder_mtime
+        allowed.setdefault(v.barcode, {})[v.image_type] = v.folder_ctime
     for s in settings:
-        if s.default_main_mtime:
-            allowed.setdefault(s.barcode, {})['main'] = s.default_main_mtime
-        if s.default_detail_mtime:
-            allowed.setdefault(s.barcode, {})['detail'] = s.default_detail_mtime
+        if s.default_main_ctime:
+            allowed.setdefault(s.barcode, {})['main'] = s.default_main_ctime
+        if s.default_detail_ctime:
+            allowed.setdefault(s.barcode, {})['detail'] = s.default_detail_ctime
     filtered = []
     for img in imgs:
         type_map = allowed.get(img.barcode)
         if type_map:
-            allowed_mtime = type_map.get(img.image_type)
-            if allowed_mtime and img.folder_mtime != allowed_mtime:
+            allowed_ctime = type_map.get(img.image_type)
+            if allowed_ctime and img.folder_ctime != allowed_ctime:
                 continue
         filtered.append(img)
     return filtered

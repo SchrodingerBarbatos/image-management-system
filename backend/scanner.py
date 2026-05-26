@@ -40,11 +40,11 @@ def parse_filename(filename, fuzzy_image_type='main'):
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
 
-def get_folder_mtime(folder_path):
-    """Get ISO8601 mtime for a folder."""
+def get_folder_ctime(folder_path):
+    """Get ISO8601 creation time for a folder."""
     try:
         return datetime.datetime.fromtimestamp(
-            os.path.getmtime(folder_path)
+            os.path.getctime(folder_path)
         ).isoformat()
     except OSError:
         return ''
@@ -135,7 +135,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     walk = os.walk if root.recursive else _walk_nonrecursive
 
     for dirpath, _, filenames in walk(root.path):
-        folder_mtime = get_folder_mtime(dirpath)
+        folder_ctime = get_folder_ctime(dirpath)
         for fname in filenames:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in IMAGE_EXTS:
@@ -168,7 +168,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                     existing.confirmed = reparsed['confirmed']
                 existing.md5_hash = fp
                 existing.file_size = new_size
-                existing.folder_mtime = folder_mtime
+                existing.folder_ctime = folder_ctime
                 existing.status = 'active'
                 added += 1
                 thumb_jobs.append((existing.id, full_path))
@@ -194,7 +194,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                 file_size=fsize,
                 md5_hash=fp,
                 folder_path=dirpath,
-                folder_mtime=folder_mtime,
+                folder_ctime=folder_ctime,
                 scan_root_id=root_id,
                 confirmed=parsed['confirmed'],
             )

@@ -17,14 +17,14 @@ export interface ImageRec {
   filename: string; ext: string; file_path: string; file_size: number;
   md5_hash: string; // stores size_mtime fingerprint, not actual MD5
   content_md5: string; // real MD5 of file content, computed at scan time
-  folder_path: string; folder_mtime: string;
+  folder_path: string; folder_ctime: string;
   scan_root_id: number; confirmed: boolean; status: string;
   created_at: string; updated_at: string;
 }
 
 export interface ImageVersion {
   id: number; barcode: string; image_type: string; version_label: string;
-  folder_mtime: string; content_hash: string; is_latest: boolean;
+  folder_ctime: string; content_hash: string; is_latest: boolean;
   created_at: string;
   duplicate_mtimes: string[];
 }
@@ -111,8 +111,8 @@ export const imageApi = {
 export const barcodeApi = {
   list: (params: BarcodeListParams) =>
     api.get<Paginated<BarcodeRec>>('/barcodes', { params }).then(r => r.data),
-  deleteDuplicateImages: (barcode: string, folderMtime: string, imageType: string, deleteFile = false) =>
-    api.delete(`/barcodes/${barcode}/duplicate-images`, { params: { folder_mtime: folderMtime, image_type: imageType, delete_file: deleteFile } }).then(r => r.data),
+  deleteDuplicateImages: (barcode: string, folderCtime: string, imageType: string, deleteFile = false) =>
+    api.delete(`/barcodes/${barcode}/duplicate-images`, { params: { folder_ctime: folderCtime, image_type: imageType, delete_file: deleteFile } }).then(r => r.data),
 };
 
 export const pendingApi = {
@@ -146,14 +146,14 @@ export const versionApi = {
 
 export interface BarcodeSetting {
   barcode: string;
-  default_main_mtime: string;
-  default_detail_mtime: string;
+  default_main_ctime: string;
+  default_detail_ctime: string;
 }
 
 export const barcodeSettingApi = {
   get: (barcode: string) =>
     api.get<BarcodeSetting>(`/barcode-settings/${barcode}`).then(r => r.data),
-  update: (barcode: string, data: { default_main_mtime?: string; default_detail_mtime?: string }) =>
+  update: (barcode: string, data: { default_main_ctime?: string; default_detail_ctime?: string }) =>
     api.put<BarcodeSetting>(`/barcode-settings/${barcode}`, data).then(r => r.data),
 };
 

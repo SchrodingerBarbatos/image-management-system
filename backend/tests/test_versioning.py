@@ -49,15 +49,15 @@ def sess(engine):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_image(barcode, image_type, folder_mtime, filename="a.jpg", **kw):
+def _make_image(barcode, image_type, folder_ctime, filename="a.jpg", **kw):
     """Minimal Image row factory with sensible defaults."""
     defaults = dict(
         barcode=barcode,
         image_type=image_type,
-        folder_mtime=folder_mtime,
+        folder_ctime=folder_ctime,
         filename=filename,
         ext="jpg",
-        file_path=f"/fake/{barcode}/{folder_mtime}/{filename}",
+        file_path=f"/fake/{barcode}/{folder_ctime}/{filename}",
         file_size=100,
         md5_hash="abc",
         content_md5="abc",
@@ -70,12 +70,12 @@ def _make_image(barcode, image_type, folder_mtime, filename="a.jpg", **kw):
     return Image(**defaults)
 
 
-def _make_version(barcode, image_type, folder_mtime, **kw):
+def _make_version(barcode, image_type, folder_ctime, **kw):
     defaults = dict(
         barcode=barcode,
         image_type=image_type,
         version_label="v1",
-        folder_mtime=folder_mtime,
+        folder_ctime=folder_ctime,
         content_hash="hash1",
         is_latest=False,
         duplicate_mtimes="[]",
@@ -84,11 +84,11 @@ def _make_version(barcode, image_type, folder_mtime, **kw):
     return ImageVersion(**defaults)
 
 
-def _make_setting(barcode, main_mtime="", detail_mtime=""):
+def _make_setting(barcode, main_ctime="", detail_ctime=""):
     return BarcodeSetting(
         barcode=barcode,
-        default_main_mtime=main_mtime,
-        default_detail_mtime=detail_mtime,
+        default_main_ctime=main_ctime,
+        default_detail_ctime=detail_ctime,
     )
 
 
@@ -111,7 +111,7 @@ def test_filter_no_settings_no_versions_keeps_all(sess):
 
 
 def test_filter_is_latest_version_used(sess):
-    """When ImageVersion.is_latest is set, only matching mtimes are kept."""
+    """When ImageVersion.is_latest is set, only matching ctimes are kept."""
     from routes.export import filter_to_single_version
 
     img_v1 = _make_image("BC1", "main", "2024-01-01T00:00:00")
@@ -122,11 +122,11 @@ def test_filter_is_latest_version_used(sess):
 
     result = filter_to_single_version([img_v1, img_v2], ["BC1"], sess)
     assert len(result) == 1
-    assert result[0].folder_mtime == "2024-02-01T00:00:00"
+    assert result[0].folder_ctime == "2024-02-01T00:00:00"
 
 
 def test_filter_barcode_setting_overrides_is_latest(sess):
-    """BarcodeSetting default mtime takes priority over is_latest flag."""
+    """BarcodeSetting default ctime takes priority over is_latest flag."""
     from routes.export import filter_to_single_version
 
     img_v1 = _make_image("BC1", "main", "2024-01-01T00:00:00")
@@ -134,12 +134,12 @@ def test_filter_barcode_setting_overrides_is_latest(sess):
     sess.add_all([img_v1, img_v2])
     # is_latest points to v2, but user setting prefers v1
     sess.add(_make_version("BC1", "main", "2024-02-01T00:00:00", is_latest=True))
-    sess.add(_make_setting("BC1", main_mtime="2024-01-01T00:00:00"))
+    sess.add(_make_setting("BC1", main_ctime="2024-01-01T00:00:00"))
     sess.commit()
 
     result = filter_to_single_version([img_v1, img_v2], ["BC1"], sess)
     assert len(result) == 1
-    assert result[0].folder_mtime == "2024-01-01T00:00:00"
+    assert result[0].folder_ctime == "2024-01-01T00:00:00"
 
 
 def test_filter_detail_type_respected(sess):

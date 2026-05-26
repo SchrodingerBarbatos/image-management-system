@@ -60,10 +60,10 @@ const ImageCardDetail: React.FC<Props> = ({
   const [versionDeleteTarget, setVersionDeleteTarget] =
     useState<ImageVersion | null>(null);
   const [dupDeleteTarget, setDupDeleteTarget] = useState<{
-    barcode: string; folderMtime: string; imageType: string;
+    barcode: string; folderCtime: string; imageType: string;
   } | null>(null);
 
-  // Per-type version selection (stored as folder_mtime)
+  // Per-type version selection (stored as folder_ctime)
   const [mainVersion, setMainVersion] = useState<string>("");
   const [detailVersion, setDetailVersion] = useState<string>("");
   const barcodeRef = useRef(barcode);
@@ -87,8 +87,8 @@ const ImageCardDetail: React.FC<Props> = ({
             setVersions(detail.versions);
             const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
             const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
-            const newMainVersion = settings.default_main_mtime || latestMain?.folder_mtime || "";
-            const newDetailVersion = settings.default_detail_mtime || latestDetail?.folder_mtime || "";
+            const newMainVersion = settings.default_main_ctime || latestMain?.folder_ctime || "";
+            const newDetailVersion = settings.default_detail_ctime || latestDetail?.folder_ctime || "";
             setMainVersion(newMainVersion);
             setDetailVersion(newDetailVersion);
           });
@@ -111,7 +111,7 @@ const ImageCardDetail: React.FC<Props> = ({
       images.filter(
         (i) =>
           i.image_type === "main" &&
-          (!mainVersion || i.folder_mtime === mainVersion),
+          (!mainVersion || i.folder_ctime === mainVersion),
       ),
     [images, mainVersion],
   );
@@ -120,7 +120,7 @@ const ImageCardDetail: React.FC<Props> = ({
       images.filter(
         (i) =>
           i.image_type === "detail" &&
-          (!detailVersion || i.folder_mtime === detailVersion),
+          (!detailVersion || i.folder_ctime === detailVersion),
       ),
     [images, detailVersion],
   );
@@ -131,7 +131,7 @@ const ImageCardDetail: React.FC<Props> = ({
       versions
         .filter((v) => v.image_type === "main")
         .map((v) => ({
-          value: v.folder_mtime,
+          value: v.folder_ctime,
           label: `${v.version_label}${v.is_latest ? " (最新)" : ""}`,
         })),
     [versions],
@@ -141,20 +141,20 @@ const ImageCardDetail: React.FC<Props> = ({
       versions
         .filter((v) => v.image_type === "detail")
         .map((v) => ({
-          value: v.folder_mtime,
+          value: v.folder_ctime,
           label: `${v.version_label}${v.is_latest ? " (最新)" : ""}`,
         })),
     [versions],
   );
 
   const handleVersionChange = useCallback(
-    (type: "main" | "detail", mtime: string) => {
+    (type: "main" | "detail", ctime: string) => {
       if (type === "main") {
-        setMainVersion(mtime);
-        barcodeSettingApi.update(barcode!, { default_main_mtime: mtime });
+        setMainVersion(ctime);
+        barcodeSettingApi.update(barcode!, { default_main_ctime: ctime });
       } else {
-        setDetailVersion(mtime);
-        barcodeSettingApi.update(barcode!, { default_detail_mtime: mtime });
+        setDetailVersion(ctime);
+        barcodeSettingApi.update(barcode!, { default_detail_ctime: ctime });
       }
     },
     [barcode],
@@ -220,7 +220,7 @@ const ImageCardDetail: React.FC<Props> = ({
   const handleVersionDelete = async (deleteFile: boolean) => {
     if (!versionDeleteTarget || deletingRef.current) return;
     deletingRef.current = true;
-    const deletedMtime = versionDeleteTarget.folder_mtime;
+    const deletedCtime = versionDeleteTarget.folder_ctime;
     const deletedImageType = versionDeleteTarget.image_type;
     try {
       await versionApi.delete(versionDeleteTarget.id, deleteFile);
@@ -242,13 +242,13 @@ const ImageCardDetail: React.FC<Props> = ({
           const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
           // Reset to latest if deleted version was the selected one
           setMainVersion((prev) =>
-            prev === deletedMtime && deletedImageType === "main"
-              ? settings.default_main_mtime || latestMain?.folder_mtime || ""
+            prev === deletedCtime && deletedImageType === "main"
+              ? settings.default_main_ctime || latestMain?.folder_ctime || ""
               : prev,
           );
           setDetailVersion((prev) =>
-            prev === deletedMtime && deletedImageType === "detail"
-              ? settings.default_detail_mtime || latestDetail?.folder_mtime || ""
+            prev === deletedCtime && deletedImageType === "detail"
+              ? settings.default_detail_ctime || latestDetail?.folder_ctime || ""
               : prev,
           );
         } else {
@@ -269,12 +269,12 @@ const ImageCardDetail: React.FC<Props> = ({
   const handleDuplicateDelete = async (deleteFile: boolean) => {
     if (!dupDeleteTarget || deletingRef.current) return;
     deletingRef.current = true;
-    const targetFolderMtime = dupDeleteTarget.folderMtime;
+    const targetFolderCtime = dupDeleteTarget.folderCtime;
     const targetImageType = dupDeleteTarget.imageType;
     try {
       await barcodeApi.deleteDuplicateImages(
         dupDeleteTarget.barcode,
-        targetFolderMtime,
+        targetFolderCtime,
         targetImageType,
         deleteFile,
       );
@@ -295,13 +295,13 @@ const ImageCardDetail: React.FC<Props> = ({
           const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
           const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
           setMainVersion((prev) =>
-            prev === targetFolderMtime && targetImageType === "main"
-              ? settings.default_main_mtime || latestMain?.folder_mtime || ""
+            prev === targetFolderCtime && targetImageType === "main"
+              ? settings.default_main_ctime || latestMain?.folder_ctime || ""
               : prev,
           );
           setDetailVersion((prev) =>
-            prev === targetFolderMtime && targetImageType === "detail"
-              ? settings.default_detail_mtime || latestDetail?.folder_mtime || ""
+            prev === targetFolderCtime && targetImageType === "detail"
+              ? settings.default_detail_ctime || latestDetail?.folder_ctime || ""
               : prev,
           );
         } else {
@@ -372,7 +372,7 @@ const ImageCardDetail: React.FC<Props> = ({
             </div>
             <div>
               <Text type="secondary">版本时间：</Text>
-              <Text>{img.folder_mtime?.replace("T", " ").slice(0, 19)}</Text>
+              <Text>{img.folder_ctime?.replace("T", " ").slice(0, 19)}</Text>
             </div>
           </div>
         }
@@ -409,14 +409,14 @@ const ImageCardDetail: React.FC<Props> = ({
                       style={{ cursor: "pointer" }}
                       onClick={() => {
                         if (v.image_type === "main") {
-                          setMainVersion(v.folder_mtime);
+                          setMainVersion(v.folder_ctime);
                           barcodeSettingApi.update(barcode!, {
-                            default_main_mtime: v.folder_mtime,
+                            default_main_ctime: v.folder_ctime,
                           });
                         } else {
-                          setDetailVersion(v.folder_mtime);
+                          setDetailVersion(v.folder_ctime);
                           barcodeSettingApi.update(barcode!, {
-                            default_detail_mtime: v.folder_mtime,
+                            default_detail_ctime: v.folder_ctime,
                           });
                         }
                       }}
@@ -444,7 +444,7 @@ const ImageCardDetail: React.FC<Props> = ({
                               e.preventDefault();
                               setDupDeleteTarget({
                                 barcode: barcode!,
-                                folderMtime: mtime,
+                                folderCtime: mtime,
                                 imageType: v.image_type,
                               });
                             }}
@@ -484,7 +484,7 @@ const ImageCardDetail: React.FC<Props> = ({
               disabled={!mainVersion}
               onClick={() => {
                 const v = versions.find(
-                  (ver) => ver.folder_mtime === mainVersion && ver.image_type === "main",
+                  (ver) => ver.folder_ctime === mainVersion && ver.image_type === "main",
                 );
                 if (v) setVersionDeleteTarget(v);
               }}
@@ -521,7 +521,7 @@ const ImageCardDetail: React.FC<Props> = ({
               disabled={!detailVersion}
               onClick={() => {
                 const v = versions.find(
-                  (ver) => ver.folder_mtime === detailVersion && ver.image_type === "detail",
+                  (ver) => ver.folder_ctime === detailVersion && ver.image_type === "detail",
                 );
                 if (v) setVersionDeleteTarget(v);
               }}
@@ -584,7 +584,7 @@ const ImageCardDetail: React.FC<Props> = ({
         <p>
           将删除文件夹{" "}
           <Text strong>
-            {dupDeleteTarget?.folderMtime?.replace("T", " ").slice(0, 19)}
+            {dupDeleteTarget?.folderCtime?.replace("T", " ").slice(0, 19)}
           </Text>{" "}
           下的重复图片（{dupDeleteTarget?.imageType === "main" ? "主图" : "详情图"}）：
         </p>

@@ -11,7 +11,7 @@ images_bp = Blueprint('images', __name__)
 _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 
 _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
-                   'file_size', 'folder_path', 'folder_mtime', 'created_at', 'updated_at'}
+                   'file_size', 'folder_path', 'folder_ctime', 'created_at', 'updated_at'}
 
 _BARCODE_SORT_WHITELIST = {'barcode', 'main_count', 'detail_count', 'main_versions', 'detail_versions'}
 
@@ -127,12 +127,12 @@ def get_image(img_id):
         return jsonify({'error': 'scan root is disabled'}), 403
     versions = session.query(ImageVersion).filter(
         ImageVersion.barcode == img.barcode
-    ).order_by(ImageVersion.image_type.desc(), ImageVersion.folder_mtime.desc()).all()
+    ).order_by(ImageVersion.image_type.desc(), ImageVersion.folder_ctime.desc()).all()
     return jsonify({
         'image': _image_to_dict(img),
         'versions': [{
             'id': v.id, 'barcode': v.barcode, 'image_type': v.image_type, 'version_label': v.version_label,
-            'folder_mtime': v.folder_mtime, 'content_hash': v.content_hash,
+            'folder_ctime': v.folder_ctime, 'content_hash': v.content_hash,
             'is_latest': v.is_latest, 'created_at': v.created_at,
             'duplicate_mtimes': json.loads(v.duplicate_mtimes) if v.duplicate_mtimes else [],
         } for v in versions],
@@ -320,20 +320,20 @@ def batch_export():
 
 @images_bp.route('/barcodes/<barcode>/duplicate-images', methods=['DELETE'])
 def delete_duplicate_images(barcode):
-    """Delete images from a specific duplicate folder_mtime for a barcode."""
-    folder_mtime = request.args.get('folder_mtime', '')
+    """Delete images from a specific duplicate folder_ctime for a barcode."""
+    folder_ctime = request.args.get('folder_ctime', '')
     image_type = request.args.get('image_type', '')
     delete_file = request.args.get('delete_file', 'false').lower() == 'true'
 
-    if not folder_mtime or not image_type:
-        return jsonify({'error': 'folder_mtime and image_type are required'}), 400
+    if not folder_ctime or not image_type:
+        return jsonify({'error': 'folder_ctime and image_type are required'}), 400
 
-    if not _ISO_RE.match(folder_mtime):
-        return jsonify({'error': 'folder_mtime must be ISO8601 format'}), 400
+    if not _ISO_RE.match(folder_ctime):
+        return jsonify({'error': 'folder_ctime must be ISO8601 format'}), 400
 
     imgs = session.query(Image).filter(
         Image.barcode == barcode,
-        Image.folder_mtime == folder_mtime,
+        Image.folder_ctime == folder_ctime,
         Image.image_type == image_type,
     ).all()
 
@@ -363,7 +363,7 @@ def _image_to_dict(img):
         'file_path': img.file_path, 'file_size': img.file_size,
         'md5_hash': img.md5_hash, 'content_md5': img.content_md5,
         'folder_path': img.folder_path,
-        'folder_mtime': img.folder_mtime, 'scan_root_id': img.scan_root_id,
+        'folder_ctime': img.folder_ctime, 'scan_root_id': img.scan_root_id,
         'confirmed': img.confirmed, 'status': img.status,
         'created_at': img.created_at, 'updated_at': img.updated_at,
     }
@@ -375,12 +375,12 @@ def delete_version(version_id):
         return jsonify({'error': 'not found'}), 404
     delete_file = request.args.get('delete_file', 'false').lower() == 'true'
     barcode = v.barcode
-    folder_mtime = v.folder_mtime
+    folder_ctime = v.folder_ctime
 
     # Delete all images belonging to this version
     imgs = session.query(Image).filter(
         Image.barcode == barcode,
-        Image.folder_mtime == folder_mtime,
+        Image.folder_ctime == folder_ctime,
         Image.image_type == v.image_type,
     ).all()
     for img in imgs:
@@ -404,11 +404,11 @@ def delete_version(version_id):
 def get_barcode_setting(barcode):
     s = session.query(BarcodeSetting).filter(BarcodeSetting.barcode == barcode).first()
     if not s:
-        return jsonify({'barcode': barcode, 'default_main_mtime': '', 'default_detail_mtime': ''})
+        return jsonify({'barcode': barcode, 'default_main_ctime': '', 'default_detail_ctime': ''})
     return jsonify({
         'barcode': s.barcode,
-        'default_main_mtime': s.default_main_mtime,
-        'default_detail_mtime': s.default_detail_mtime,
+        'default_main_ctime': s.default_main_ctime,
+        'default_detail_ctime': s.default_detail_ctime,
     })
 
 @images_bp.route('/barcode-settings/<barcode>', methods=['PUT'])
@@ -418,13 +418,13 @@ def update_barcode_setting(barcode):
     if not s:
         s = BarcodeSetting(barcode=barcode)
         session.add(s)
-    if 'default_main_mtime' in data:
-        s.default_main_mtime = data['default_main_mtime']
-    if 'default_detail_mtime' in data:
-        s.default_detail_mtime = data['default_detail_mtime']
+    if 'default_main_ctime' in data:
+        s.default_main_ctime = data['default_main_ctime']
+    if 'default_detail_ctime' in data:
+        s.default_detail_ctime = data['default_detail_ctime']
     session.commit()
     return jsonify({
         'barcode': s.barcode,
-        'default_main_mtime': s.default_main_mtime,
-        'default_detail_mtime': s.default_detail_mtime,
+        'default_main_ctime': s.default_main_ctime,
+        'default_detail_ctime': s.default_detail_ctime,
     })
