@@ -151,6 +151,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                 fp = file_fingerprint(full_path)
                 if not fp:
                     existing.status = 'broken'
+                    affected_barcodes.add(existing.barcode)
                     continue
                 if fp == existing.md5_hash:
                     # fingerprint 未变（文件大小 + mtime 均未变），跳过
