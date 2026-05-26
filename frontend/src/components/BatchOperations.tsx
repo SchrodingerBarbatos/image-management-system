@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
-import { Modal, Tabs, Button, Checkbox, Collapse, Table, Space, InputNumber, Tag, Divider, message, Typography } from 'antd';
-import { batchApi, DuplicateGroup, LowVersionGroup } from '../services/api';
+import React, { useState, useEffect, useRef } from 'react';
+import { Modal, Tabs, Button, Checkbox, Table, Space, InputNumber, Tag, Divider, message, Typography } from 'antd';
+import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults } from '../services/api';
+import { TaskList, TaskProgress } from './TaskList';
 
 const { Text } = Typography;
 
@@ -17,11 +18,12 @@ const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
   keep_only: { color: 'blue', label: '保留（唯一版本）' },
   keep_disabled: { color: 'default', label: '保留（未启用）' },
 };
-const MAX_INITIAL_EXPAND_GROUPS = 20;
-
-function initialExpandedKeys(barcodes: string[]): string[] {
-  return barcodes.length <= MAX_INITIAL_EXPAND_GROUPS ? barcodes : [];
-}
+const DELETE_STATUS_CONFIG: Record<string, { color: string; label: string }> = {
+  pending: { color: 'default', label: '待删除' },
+  deleted: { color: 'success', label: '已删除' },
+  skipped: { color: 'warning', label: '已跳过' },
+  failed: { color: 'error', label: '失败' },
+};
 
 function fmtSize(bytes: number): string {
   if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
@@ -33,23 +35,32 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   const [activeTab, setActiveTab] = useState<string>('duplicates');
 
   // ===== Tab 1: Duplicates =====
-  const [dupGroups, setDupGroups] = useState<DuplicateGroup[]>([]);
   const [dupLoading, setDupLoading] = useState(false);
-  const [dupScanned, setDupScanned] = useState(false);
-  const [dupSelected, setDupSelected] = useState<Set<string>>(new Set());
-  const [dupExpanded, setDupExpanded] = useState<string[]>([]);
+  const [dupTaskId, setDupTaskId] = useState<number | null>(null);
+  const [dupTaskStatus, setDupTaskStatus] = useState<string>('');
+  const [dupCurrentTask, setDupCurrentTask] = useState<BatchTaskInfo | null>(null);
+  const [dupTasks, setDupTasks] = useState<BatchTaskInfo[]>([]);
+  const [dupResults, setDupResults] = useState<PaginatedResults<DuplicateScanResultItem> | null>(null);
+  const [dupResultsPage, setDupResultsPage] = useState(1);
+  const [dupResultsPageSize] = useState(100);
+  const [dupResultSelectedIds, setDupResultSelectedIds] = useState<Set<number>>(new Set());
+  const [dupPolling, setDupPolling] = useState(false);
 
   // ===== Tab 2: Low Versions =====
   const [mainEnabled, setMainEnabled] = useState(false);
   const [mainThreshold, setMainThreshold] = useState(3);
   const [detailEnabled, setDetailEnabled] = useState(false);
   const [detailThreshold, setDetailThreshold] = useState(5);
-  const [lowGroups, setLowGroups] = useState<LowVersionGroup[]>([]);
   const [lowLoading, setLowLoading] = useState(false);
-  const [lowMatched, setLowMatched] = useState(false);
-  const [lowSelected, setLowSelected] = useState<Set<string>>(new Set());
-  const [lowExpanded, setLowExpanded] = useState<string[]>([]);
-  const [lowSummary, setLowSummary] = useState<Record<string, number>>({});
+  const [lowTaskId, setLowTaskId] = useState<number | null>(null);
+  const [lowTaskStatus, setLowTaskStatus] = useState<string>('');
+  const [lowCurrentTask, setLowCurrentTask] = useState<BatchTaskInfo | null>(null);
+  const [lowTasks, setLowTasks] = useState<BatchTaskInfo[]>([]);
+  const [lowResults, setLowResults] = useState<PaginatedResults<LowVersionScanResultItem> | null>(null);
+  const [lowResultsPage, setLowResultsPage] = useState(1);
+  const [lowResultsPageSize] = useState(100);
+  const [lowResultSelectedIds, setLowResultSelectedIds] = useState<Set<number>>(new Set());
+  const [lowPolling, setLowPolling] = useState(false);
 
   // ===== Confirm modal =====
   const [confirmVisible, setConfirmVisible] = useState(false);
@@ -61,81 +72,110 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   // ===== Deleting state =====
   const [deleting, setDeleting] = useState(false);
 
-  // ---- Helpers ----
-  const dupKey = (g: DuplicateGroup) => `${g.barcode}|${g.image_type}|${g.folder_ctime}`;
-  const lowKey = (g: LowVersionGroup) => `${g.barcode}|${g.image_type}|${g.folder_ctime}`;
+  // Poll timer refs for cleanup on unmount
+  const dupPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lowPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Group duplicates by barcode for collapse panels
-  const dupByBarcode = useMemo(() => {
-    const map: Record<string, DuplicateGroup[]> = {};
-    for (const g of dupGroups) {
-      (map[g.barcode] ??= []).push(g);
-    }
-    return map;
-  }, [dupGroups]);
+  // Load task history on mount
+  useEffect(() => {
+    taskApi.listDuplicateScanTasks().then(setDupTasks).catch(() => {});
+    taskApi.listLowVersionScanTasks().then(setLowTasks).catch(() => {});
+  }, []);
 
-  // Group low versions by barcode for collapse panels
-  const lowByBarcode = useMemo(() => {
-    const map: Record<string, LowVersionGroup[]> = {};
-    for (const g of lowGroups) {
-      (map[g.barcode] ??= []).push(g);
-    }
-    return map;
-  }, [lowGroups]);
+  // Cleanup poll timers on unmount
+  useEffect(() => {
+    return () => {
+      if (dupPollTimerRef.current) clearTimeout(dupPollTimerRef.current);
+      if (lowPollTimerRef.current) clearTimeout(lowPollTimerRef.current);
+    };
+  }, []);
 
-  // ---- Tab 1: Scan ----
+  // ===== Duplicate scan task helpers =====
+  const refreshDupTasks = () => {
+    taskApi.listDuplicateScanTasks().then(setDupTasks).catch(() => {});
+  };
+
+  const loadDupResults = (taskId: number, page: number) => {
+    taskApi.getDuplicateScanResults(taskId, page, dupResultsPageSize).then(data => {
+      setDupResults(data);
+      setDupResultsPage(page);
+    }).catch(() => {});
+  };
+
+  const pollDupTask = (taskId: number) => {
+    setDupPolling(true);
+    taskApi.getTask(taskId).then(task => {
+      setDupTaskStatus(task.status);
+      setDupCurrentTask(task);
+      if (task.status === 'running' || task.status === 'queued') {
+        dupPollTimerRef.current = setTimeout(() => pollDupTask(taskId), 2000);
+      } else {
+        setDupPolling(false);
+        if (task.status === 'done') {
+          loadDupResults(taskId, 1);
+        }
+        refreshDupTasks();
+      }
+    }).catch(() => {
+      setDupPolling(false);
+    });
+  };
+
+  // ===== Low version scan task helpers =====
+  const refreshLowTasks = () => {
+    taskApi.listLowVersionScanTasks().then(setLowTasks).catch(() => {});
+  };
+
+  const loadLowResults = (taskId: number, page: number) => {
+    taskApi.getLowVersionScanResults(taskId, page, lowResultsPageSize).then(data => {
+      setLowResults(data);
+      setLowResultsPage(page);
+    }).catch(() => {});
+  };
+
+  const pollLowTask = (taskId: number) => {
+    setLowPolling(true);
+    taskApi.getTask(taskId).then(task => {
+      setLowTaskStatus(task.status);
+      setLowCurrentTask(task);
+      if (task.status === 'running' || task.status === 'queued') {
+        lowPollTimerRef.current = setTimeout(() => pollLowTask(taskId), 2000);
+      } else {
+        setLowPolling(false);
+        if (task.status === 'done') {
+          loadLowResults(taskId, 1);
+        }
+        refreshLowTasks();
+      }
+    }).catch(() => {
+      setLowPolling(false);
+    });
+  };
+
+  // ===== Tab 1: Scan duplicates =====
   const handleScanDuplicates = async () => {
     setDupLoading(true);
     try {
-      const res = await batchApi.listDuplicates();
-      setDupGroups(res.groups);
-      setDupScanned(true);
-      const allKeys = res.groups.map(dupKey);
-      setDupSelected(new Set(allKeys));
-      const barcodes = [...new Set(res.groups.map(g => g.barcode))];
-      setDupExpanded(initialExpandedKeys(barcodes));
-      if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
-        message.info(`共 ${barcodes.length} 个条码，已默认收起以避免页面卡顿，请按需展开`);
+      const task = await taskApi.createDuplicateScan();
+      setDupTaskId(task.id);
+      setDupTaskStatus(task.status);
+      setDupCurrentTask(task);
+      setDupResults(null);
+      setDupResultSelectedIds(new Set());
+      if (task.status === 'running' || task.status === 'queued') {
+        pollDupTask(task.id);
+      } else if (task.status === 'done') {
+        loadDupResults(task.id, 1);
+        refreshDupTasks();
       }
     } catch {
-      message.error('扫描重复文件夹失败');
+      message.error('创建扫描任务失败');
     } finally {
       setDupLoading(false);
     }
   };
 
-  const toggleDupAll = () => {
-    if (dupSelected.size === dupGroups.length) {
-      setDupSelected(new Set());
-    } else {
-      setDupSelected(new Set(dupGroups.map(dupKey)));
-    }
-  };
-
-  const toggleDupOne = (key: string) => {
-    const next = new Set(dupSelected);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    setDupSelected(next);
-  };
-
-  const toggleDupExpandAll = () => {
-    const barcodes = Object.keys(dupByBarcode);
-    if (dupExpanded.length === barcodes.length) {
-      setDupExpanded([]);
-    } else if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
-      Modal.confirm({
-        title: '展开全部条码',
-        content: `共 ${barcodes.length} 个条码，展开全部可能导致页面卡顿，是否继续？`,
-        okText: '继续展开',
-        cancelText: '取消',
-        onOk: () => setDupExpanded(barcodes),
-      });
-    } else {
-      setDupExpanded(barcodes);
-    }
-  };
-
-  // ---- Tab 2: Match ----
+  // ===== Tab 2: Match low versions =====
   const handleMatchLow = async () => {
     if (!mainEnabled && !detailEnabled) {
       message.warning('至少启用一项阈值');
@@ -143,53 +183,114 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     }
     setLowLoading(true);
     try {
-      const res = await batchApi.listLowVersions(
-        mainEnabled ? mainThreshold : 0,
-        detailEnabled ? detailThreshold : 0,
-      );
-      setLowGroups(res.groups);
-      setLowSummary(res.summary);
-      setLowMatched(true);
-      const deleteKeys = res.groups
-        .filter(g => g.status_tag === 'will_delete')
-        .map(lowKey);
-      setLowSelected(new Set(deleteKeys));
-      const barcodes = [...new Set(res.groups.map(g => g.barcode))];
-      setLowExpanded(initialExpandedKeys(barcodes));
-      if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
-        message.info(`共 ${barcodes.length} 个条码，已默认收起以避免页面卡顿，请按需展开`);
+      const task = await taskApi.createLowVersionScan({
+        main_enabled: mainEnabled,
+        main_threshold: mainThreshold,
+        detail_enabled: detailEnabled,
+        detail_threshold: detailThreshold,
+      });
+      setLowTaskId(task.id);
+      setLowTaskStatus(task.status);
+      setLowCurrentTask(task);
+      setLowResults(null);
+      setLowResultSelectedIds(new Set());
+      if (task.status === 'running' || task.status === 'queued') {
+        pollLowTask(task.id);
+      } else if (task.status === 'done') {
+        loadLowResults(task.id, 1);
+        refreshLowTasks();
       }
     } catch {
-      message.error('匹配失败');
+      message.error('创建匹配任务失败');
     } finally {
       setLowLoading(false);
     }
   };
 
-  const toggleLowOne = (key: string) => {
-    const next = new Set(lowSelected);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    setLowSelected(next);
-  };
-
-  const toggleLowExpandAll = () => {
-    const barcodes = Object.keys(lowByBarcode);
-    if (lowExpanded.length === barcodes.length) {
-      setLowExpanded([]);
-    } else if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
-      Modal.confirm({
-        title: '展开全部条码',
-        content: `共 ${barcodes.length} 个条码，展开全部可能导致页面卡顿，是否继续？`,
-        okText: '继续展开',
-        cancelText: '取消',
-        onOk: () => setLowExpanded(barcodes),
-      });
+  // ===== Duplicate selection helpers =====
+  const toggleDupAll = () => {
+    if (!dupResults || dupResults.items.length === 0) return;
+    if (dupResultSelectedIds.size === dupResults.items.length) {
+      setDupResultSelectedIds(new Set());
     } else {
-      setLowExpanded(barcodes);
+      setDupResultSelectedIds(new Set(dupResults.items.map(r => r.id)));
     }
   };
 
-  // ---- Confirm & Delete ----
+  const toggleDupOne = (id: number) => {
+    const next = new Set(dupResultSelectedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setDupResultSelectedIds(next);
+  };
+
+  // ===== Low version selection helpers =====
+  const toggleLowAll = () => {
+    if (!lowResults || lowResults.items.length === 0) return;
+    const selectable = lowResults.items.filter(r => r.status_tag === 'will_delete');
+    if (selectable.length === 0) return;
+    if (lowResultSelectedIds.size === selectable.length) {
+      setLowResultSelectedIds(new Set());
+    } else {
+      setLowResultSelectedIds(new Set(selectable.map(r => r.id)));
+    }
+  };
+
+  const toggleLowOne = (id: number) => {
+    const next = new Set(lowResultSelectedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setLowResultSelectedIds(next);
+  };
+
+  // ===== Task history handlers =====
+  const handleSelectDupTask = (taskId: number) => {
+    setDupTaskId(taskId);
+    setDupResults(null);
+    setDupResultSelectedIds(new Set());
+    setDupCurrentTask(null);
+    loadDupResults(taskId, 1);
+  };
+
+  const handleDeleteDupTask = async (taskId: number) => {
+    try {
+      await taskApi.deleteDuplicateScanTask(taskId);
+      if (taskId === dupTaskId) {
+        setDupTaskId(null);
+        setDupResults(null);
+        setDupResultSelectedIds(new Set());
+        setDupCurrentTask(null);
+      }
+      refreshDupTasks();
+      message.success('任务已删除');
+    } catch {
+      message.error('删除任务失败');
+    }
+  };
+
+  const handleSelectLowTask = (taskId: number) => {
+    setLowTaskId(taskId);
+    setLowResults(null);
+    setLowResultSelectedIds(new Set());
+    setLowCurrentTask(null);
+    loadLowResults(taskId, 1);
+  };
+
+  const handleDeleteLowTask = async (taskId: number) => {
+    try {
+      await taskApi.deleteLowVersionScanTask(taskId);
+      if (taskId === lowTaskId) {
+        setLowTaskId(null);
+        setLowResults(null);
+        setLowResultSelectedIds(new Set());
+        setLowCurrentTask(null);
+      }
+      refreshLowTasks();
+      message.success('任务已删除');
+    } catch {
+      message.error('删除任务失败');
+    }
+  };
+
+  // ===== Confirm & Delete =====
   const openConfirm = (action: () => Promise<void>, deleteFiles: boolean, title: string, body: string) => {
     setConfirmAction(() => action);
     setConfirmDeleteFiles(deleteFiles);
@@ -214,110 +315,76 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     }
   };
 
-  // ---- Delete actions ----
+  // ===== Delete action builders =====
   const buildDupDeleteAction = (deleteFiles: boolean) => async () => {
-    const items = dupGroups
-      .filter(g => dupSelected.has(dupKey(g)))
-      .map(g => ({ barcode: g.barcode, image_type: g.image_type, folder_ctime: g.folder_ctime }));
-    await batchApi.deleteDuplicates(items, deleteFiles);
+    if (!dupTaskId) return;
+    const ids = Array.from(dupResultSelectedIds);
+    await taskApi.deleteDuplicateScanResults(dupTaskId, ids, deleteFiles);
   };
 
   const buildLowDeleteAction = (deleteFiles: boolean) => async () => {
-    const items = lowGroups
-      .filter(g => lowSelected.has(lowKey(g)))
-      .map(g => ({ barcode: g.barcode, image_type: g.image_type, folder_ctime: g.folder_ctime }));
-    await batchApi.deleteLowVersions(
-      items,
-      deleteFiles,
-      mainEnabled ? mainThreshold : 0,
-      detailEnabled ? detailThreshold : 0,
-    );
+    if (!lowTaskId) return;
+    const ids = Array.from(lowResultSelectedIds);
+    await taskApi.deleteLowVersionScanResults(lowTaskId, ids, deleteFiles);
   };
 
-  // ---- Collapse panel builders ----
-  const dupPanelItems = useMemo(() => {
-    return Object.entries(dupByBarcode).map(([barcode, items]) => {
-      const mainItems = items.filter(i => i.image_type === 'main');
-      const detailItems = items.filter(i => i.image_type === 'detail');
-      const parts: string[] = [];
-      if (mainItems.length) parts.push(`主图${mainItems.length}组重复(${mainItems.reduce((s, i) => s + i.image_count, 0)}张)`);
-      if (detailItems.length) parts.push(`详情图${detailItems.length}组重复(${detailItems.reduce((s, i) => s + i.image_count, 0)}张)`);
+  // ===== Table columns =====
+  const dupResultColumns = [
+    { title: '条码', dataIndex: 'barcode', width: 140 },
+    { title: '类型', dataIndex: 'image_type', width: 70, render: (t: string) => TYPE_LABELS[t] || t },
+    { title: '版本', dataIndex: 'version_label', width: 70 },
+    { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
+    { title: '图片数', dataIndex: 'image_count', width: 60 },
+    { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
+    {
+      title: '删除状态', dataIndex: 'delete_status', width: 80,
+      render: (s: string) => {
+        const cfg = DELETE_STATUS_CONFIG[s] || { color: 'default', label: s };
+        return <Tag color={cfg.color}>{cfg.label}</Tag>;
+      },
+    },
+    {
+      title: '选择', width: 50,
+      render: (_: unknown, r: DuplicateScanResultItem) => (
+        <Checkbox checked={dupResultSelectedIds.has(r.id)} onChange={() => toggleDupOne(r.id)} />
+      ),
+    },
+  ];
 
-      const columns = [
-        { title: '类型', dataIndex: 'image_type', width: 70, render: (t: string) => TYPE_LABELS[t] || t },
-        { title: '保留版本', dataIndex: 'version_label', width: 70 },
-        { title: '重复文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
-        { title: '图片数', dataIndex: 'image_count', width: 60 },
-        { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
-        {
-          title: '选择', width: 50,
-          render: (_: unknown, r: DuplicateGroup) => (
-            <Checkbox checked={dupSelected.has(dupKey(r))} onChange={() => toggleDupOne(dupKey(r))} />
-          ),
-        },
-      ];
+  const lowResultColumns = [
+    { title: '条码', dataIndex: 'barcode', width: 140 },
+    { title: '类型', dataIndex: 'image_type', width: 70, render: (t: string) => TYPE_LABELS[t] || t },
+    { title: '版本', dataIndex: 'version_label', width: 60 },
+    { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
+    { title: '图片数', dataIndex: 'image_count', width: 60 },
+    { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
+    {
+      title: '状态', width: 150,
+      render: (_: unknown, r: LowVersionScanResultItem) => {
+        const cfg = STATUS_CONFIG[r.status_tag];
+        return <Tag color={cfg.color}>{cfg.label}</Tag>;
+      },
+    },
+    {
+      title: '选择', width: 50,
+      render: (_: unknown, r: LowVersionScanResultItem) => {
+        if (r.status_tag !== 'will_delete') return null;
+        return <Checkbox checked={lowResultSelectedIds.has(r.id)} onChange={() => toggleLowOne(r.id)} />;
+      },
+    },
+  ];
 
-      return {
-        key: barcode,
-        label: <Text strong>{barcode}</Text>,
-        extra: <Text type="secondary" style={{ fontSize: 12 }}>{parts.join('  ')}</Text>,
-        children: <Table rowKey={r => dupKey(r)} columns={columns} dataSource={items} size="small" pagination={false} />,
-      };
-    });
-  }, [dupByBarcode, dupSelected]);
+  // ===== Computed values =====
+  const dupAllChecked = dupResults !== null && dupResults.items.length > 0 && dupResultSelectedIds.size === dupResults.items.length;
+  const dupIndeterminate = dupResultSelectedIds.size > 0 && (!dupResults || dupResultSelectedIds.size < dupResults.items.length);
+  const dupSelectedCount = dupResultSelectedIds.size;
 
-  const lowPanelItems = useMemo(() => {
-    return Object.entries(lowByBarcode).map(([barcode, items]) => {
-      const willDel = items.filter(i => i.status_tag === 'will_delete').length;
-      const keepTh = items.filter(i => i.status_tag === 'keep_threshold').length;
-      const keepOnly = items.filter(i => i.status_tag === 'keep_only').length;
-      const parts: string[] = [];
-      if (willDel) parts.push(`删${willDel}`);
-      if (keepTh) parts.push(`保${keepTh}(满足阈值)`);
-      if (keepOnly) parts.push(`保${keepOnly}(唯一)`);
+  const lowSelectableCount = lowResults ? lowResults.items.filter(r => r.status_tag === 'will_delete').length : 0;
+  const lowAllChecked = lowSelectableCount > 0 && lowResultSelectedIds.size === lowSelectableCount;
+  const lowIndeterminate = lowResultSelectedIds.size > 0 && lowResultSelectedIds.size < lowSelectableCount;
+  const lowSelectedCount = lowResultSelectedIds.size;
 
-      // Color the header based on whether there are items to delete
-      const headerColor = willDel > 0 ? '#ff4d4f' : '#52c41a';
-
-      const columns = [
-        { title: '类型', dataIndex: 'image_type', width: 70, render: (t: string) => TYPE_LABELS[t] || t },
-        { title: '版本', dataIndex: 'version_label', width: 60 },
-        { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
-        { title: '图片数', dataIndex: 'image_count', width: 60 },
-        { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
-        {
-          title: '状态', width: 150,
-          render: (_: unknown, r: LowVersionGroup) => {
-            const cfg = STATUS_CONFIG[r.status_tag];
-            return <Tag color={cfg.color}>{cfg.label}</Tag>;
-          },
-        },
-        {
-          title: '选择', width: 50,
-          render: (_: unknown, r: LowVersionGroup) => {
-            if (r.status_tag !== 'will_delete') return null;
-            const key = lowKey(r);
-            return <Checkbox checked={lowSelected.has(key)} onChange={() => toggleLowOne(key)} />;
-          },
-        },
-      ];
-
-      return {
-        key: barcode,
-        label: <Text strong style={{ color: headerColor }}>{barcode}</Text>,
-        extra: <Text type="secondary" style={{ fontSize: 12 }}>{parts.join('  ')}</Text>,
-        children: <Table rowKey={r => lowKey(r)} columns={columns} dataSource={items} size="small" pagination={false} />,
-      };
-    });
-  }, [lowByBarcode, lowSelected]);
-
-  // ---- Render ----
-  const dupAllChecked = dupGroups.length > 0 && dupSelected.size === dupGroups.length;
-  const dupIndeterminate = dupSelected.size > 0 && dupSelected.size < dupGroups.length;
-  const dupSelectedCount = dupSelected.size;
-
-  const lowSelectedCount = lowSelected.size;
-
+  // ===== Tab items =====
   const tabItems = [
     {
       key: 'duplicates',
@@ -328,32 +395,58 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
             扫描重复
           </Button>
 
-          {dupScanned && dupGroups.length === 0 && !dupLoading && (
+          {dupPolling && dupCurrentTask && (
+            <div style={{ marginBottom: 16 }}>
+              <TaskProgress task={dupCurrentTask} />
+            </div>
+          )}
+
+          {dupTaskStatus === 'error' && !dupPolling && (
+            <div style={{ color: '#ff4d4f', marginBottom: 16 }}>任务执行失败</div>
+          )}
+
+          <Divider>任务历史</Divider>
+          <div style={{ marginBottom: 16 }}>
+            <TaskList
+              tasks={dupTasks}
+              onSelectTask={handleSelectDupTask}
+              onDeleteTask={handleDeleteDupTask}
+              selectedTaskId={dupTaskId}
+              typeLabel="重复扫描"
+            />
+          </div>
+
+          {dupResults && dupResults.items.length === 0 && (
             <div style={{ color: '#52c41a', marginBottom: 16 }}>未发现重复文件夹</div>
           )}
 
-          {dupGroups.length > 0 && (
+          {dupResults && dupResults.items.length > 0 && (
             <>
               <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
                 <Checkbox checked={dupAllChecked} indeterminate={dupIndeterminate} onChange={toggleDupAll}>
                   全选
                 </Checkbox>
-                <Button size="small" onClick={toggleDupExpandAll}>
-                  {dupExpanded.length === Object.keys(dupByBarcode).length ? '全部收起' : '全部展开'}
-                </Button>
-                <Text type="secondary">共 {dupGroups.length} 组重复，涉及 {Object.keys(dupByBarcode).length} 个条码</Text>
+                <Text type="secondary">共 {dupResults.total} 条结果</Text>
               </div>
 
-              <Collapse
-                activeKey={dupExpanded}
-                onChange={keys => setDupExpanded(keys as string[])}
-                items={dupPanelItems}
+              <Table
+                rowKey="id"
+                columns={dupResultColumns}
+                dataSource={dupResults.items}
+                size="small"
+                pagination={{
+                  current: dupResults.page,
+                  pageSize: dupResults.page_size,
+                  total: dupResults.total,
+                  showSizeChanger: false,
+                  onChange: (page) => loadDupResults(dupTaskId!, page),
+                }}
                 style={{ marginBottom: 16 }}
               />
 
               <Divider />
               <Space>
-                <Text strong>已选 {dupSelectedCount} 组重复</Text>
+                <Text strong>已选 {dupSelectedCount} 项</Text>
                 <Button
                   danger
                   disabled={dupSelectedCount === 0}
@@ -417,36 +510,58 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
             执行匹配
           </Button>
 
-          {lowMatched && lowGroups.length === 0 && !lowLoading && (
+          {lowPolling && lowCurrentTask && (
+            <div style={{ marginBottom: 16 }}>
+              <TaskProgress task={lowCurrentTask} />
+            </div>
+          )}
+
+          {lowTaskStatus === 'error' && !lowPolling && (
+            <div style={{ color: '#ff4d4f', marginBottom: 16 }}>任务执行失败</div>
+          )}
+
+          <Divider>任务历史</Divider>
+          <div style={{ marginBottom: 16 }}>
+            <TaskList
+              tasks={lowTasks}
+              onSelectTask={handleSelectLowTask}
+              onDeleteTask={handleDeleteLowTask}
+              selectedTaskId={lowTaskId}
+              typeLabel="低版本扫描"
+            />
+          </div>
+
+          {lowResults && lowResults.items.length === 0 && (
             <div style={{ color: '#52c41a', marginBottom: 16 }}>所有版本均满足阈值要求</div>
           )}
 
-          {lowGroups.length > 0 && (
+          {lowResults && lowResults.items.length > 0 && (
             <>
-              <div style={{ marginBottom: 12 }}>
-                {lowSummary.will_delete > 0 && <Tag color="red">将删除 {lowSummary.will_delete}</Tag>}
-                {lowSummary.keep_threshold > 0 && <Tag color="green">保留满足阈值 {lowSummary.keep_threshold}</Tag>}
-                {lowSummary.keep_only > 0 && <Tag color="blue">保留唯一版本 {lowSummary.keep_only}</Tag>}
-                {lowSummary.keep_disabled > 0 && <Tag>未启用 {lowSummary.keep_disabled}</Tag>}
-              </div>
-
               <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
-                <Button size="small" onClick={toggleLowExpandAll}>
-                  {lowExpanded.length === Object.keys(lowByBarcode).length ? '全部收起' : '全部展开'}
-                </Button>
-                <Text type="secondary">共 {Object.keys(lowByBarcode).length} 个条码</Text>
+                <Checkbox checked={lowAllChecked} indeterminate={lowIndeterminate} onChange={toggleLowAll}>
+                  全选（仅将删除项）
+                </Checkbox>
+                <Text type="secondary">共 {lowResults.total} 条结果</Text>
               </div>
 
-              <Collapse
-                activeKey={lowExpanded}
-                onChange={keys => setLowExpanded(keys as string[])}
-                items={lowPanelItems}
+              <Table
+                rowKey="id"
+                columns={lowResultColumns}
+                dataSource={lowResults.items}
+                size="small"
+                pagination={{
+                  current: lowResults.page,
+                  pageSize: lowResults.page_size,
+                  total: lowResults.total,
+                  showSizeChanger: false,
+                  onChange: (page) => loadLowResults(lowTaskId!, page),
+                }}
                 style={{ marginBottom: 16 }}
               />
 
               <Divider />
               <Space>
-                <Text strong>已选 {lowSelectedCount} 个版本</Text>
+                <Text strong>已选 {lowSelectedCount} 项</Text>
                 <Button
                   danger
                   disabled={lowSelectedCount === 0}
