@@ -123,12 +123,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     if (dupExpanded.length === barcodes.length) {
       setDupExpanded([]);
     } else {
-      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
-        setDupExpanded(barcodes.slice(0, MAX_AUTO_EXPAND_GROUPS));
-        message.warning(`结果较多，仅展开前 ${MAX_AUTO_EXPAND_GROUPS} 个条码，请按需单独展开`);
-      } else {
-        setDupExpanded(barcodes);
-      }
+      setDupExpanded(barcodes);
     }
   };
 
@@ -174,12 +169,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     if (lowExpanded.length === barcodes.length) {
       setLowExpanded([]);
     } else {
-      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
-        setLowExpanded(barcodes.slice(0, MAX_AUTO_EXPAND_GROUPS));
-        message.warning(`结果较多，仅展开前 ${MAX_AUTO_EXPAND_GROUPS} 个条码，请按需单独展开`);
-      } else {
-        setLowExpanded(barcodes);
-      }
+      setLowExpanded(barcodes);
     }
   };
 

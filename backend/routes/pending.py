@@ -4,6 +4,7 @@ from versioning import update_all_versions
 
 pending_bp = Blueprint('pending', __name__)
 
+@pending_bp.route('/pending/count', methods=['GET'])
 def pending_count():
     count = session.query(Image).filter(
         Image.confirmed == False, Image.status == 'active'

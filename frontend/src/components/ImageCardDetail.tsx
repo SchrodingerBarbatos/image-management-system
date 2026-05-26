@@ -37,6 +37,7 @@ const PLACEHOLDER_SVG =
   );
 
 const THUMBNAIL_PAGE_SIZE = 100;
+const IMAGE_PAGE_SIZE = 200;
 const DUP_MTIME_COLLAPSE = 20;
 
 interface Props {
@@ -57,6 +58,7 @@ const ImageCardDetail: React.FC<Props> = ({
   onDeleted,
 }) => {
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [images, setImages] = useState<ImageRec[]>([]);
   const [versions, setVersions] = useState<ImageVersion[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<ImageRec | null>(null);
@@ -69,9 +71,15 @@ const ImageCardDetail: React.FC<Props> = ({
   const [detailShowCount, setDetailShowCount] = useState(THUMBNAIL_PAGE_SIZE);
   const [collapsedDupVersions, setCollapsedDupVersions] = useState<Set<number>>(new Set());
 
+  // Server-side pagination
+  const [imagePage, setImagePage] = useState(1);
+  const [imageTotal, setImageTotal] = useState(0);
+
   // Per-type version selection (stored as folder_ctime)
   const [mainVersion, setMainVersion] = useState<string>("");
   const [detailVersion, setDetailVersion] = useState<string>("");
+  const [defaultMainVersion, setDefaultMainVersion] = useState<string>("");
+  const [defaultDetailVersion, setDefaultDetailVersion] = useState<string>("");
   const barcodeRef = useRef(barcode);
   barcodeRef.current = barcode;
   const deletingRef = useRef(false);
@@ -83,13 +91,18 @@ const ImageCardDetail: React.FC<Props> = ({
     setMainShowCount(THUMBNAIL_PAGE_SIZE);
     setDetailShowCount(THUMBNAIL_PAGE_SIZE);
     setCollapsedDupVersions(new Set());
+    setImagePage(1);
+    setImageTotal(0);
     Promise.all([
-      imageApi.list({ barcode, page_size: 500 }),
+      imageApi.list({ barcode, page: 1, page_size: IMAGE_PAGE_SIZE }),
       barcodeSettingApi.get(barcode),
     ])
       .then(([imgRes, settings]) => {
         if (cancelled) return;
         setImages(imgRes.items);
+        setImageTotal(imgRes.total);
+        setDefaultMainVersion(settings.default_main_ctime || "");
+        setDefaultDetailVersion(settings.default_detail_ctime || "");
         if (imgRes.items.length > 0) {
           return imageApi.get(imgRes.items[0].id).then((detail) => {
             if (cancelled) return;
@@ -141,9 +154,9 @@ const ImageCardDetail: React.FC<Props> = ({
         .filter((v) => v.image_type === "main")
         .map((v) => ({
           value: v.folder_ctime,
-          label: `${v.version_label}${v.is_latest ? " (最新)" : ""}`,
+          label: `${v.version_label}${v.is_latest ? " (最新)" : ""}${defaultMainVersion && v.folder_ctime === defaultMainVersion ? " (默认)" : ""}`,
         })),
-    [versions],
+    [versions, defaultMainVersion],
   );
   const detailVersionOptions = useMemo(
     () =>
@@ -151,23 +164,63 @@ const ImageCardDetail: React.FC<Props> = ({
         .filter((v) => v.image_type === "detail")
         .map((v) => ({
           value: v.folder_ctime,
-          label: `${v.version_label}${v.is_latest ? " (最新)" : ""}`,
+          label: `${v.version_label}${v.is_latest ? " (最新)" : ""}${defaultDetailVersion && v.folder_ctime === defaultDetailVersion ? " (默认)" : ""}`,
         })),
-    [versions],
+    [versions, defaultDetailVersion],
   );
 
   const handleVersionChange = useCallback(
     (type: "main" | "detail", ctime: string) => {
       if (type === "main") {
         setMainVersion(ctime);
-        barcodeSettingApi.update(barcode!, { default_main_ctime: ctime });
       } else {
         setDetailVersion(ctime);
-        barcodeSettingApi.update(barcode!, { default_detail_ctime: ctime });
       }
     },
-    [barcode],
+    [],
   );
+
+  const handleSetDefault = useCallback(
+    async (type: "main" | "detail") => {
+      if (!barcode) return;
+      const ctime = type === "main" ? mainVersion : detailVersion;
+      if (!ctime) return;
+      try {
+        const data = type === "main"
+          ? { default_main_ctime: ctime }
+          : { default_detail_ctime: ctime };
+        await barcodeSettingApi.update(barcode, data);
+        if (type === "main") {
+          setDefaultMainVersion(ctime);
+        } else {
+          setDefaultDetailVersion(ctime);
+        }
+        message.success(type === "main" ? "已设为默认主图版本" : "已设为默认详情图版本");
+      } catch {
+        message.error("设置默认版本失败");
+      }
+    },
+    [barcode, mainVersion, detailVersion],
+  );
+
+  const hasMoreServer = imagePage * IMAGE_PAGE_SIZE < imageTotal;
+
+  const loadMoreImages = useCallback(async () => {
+    if (!barcode || loadingMore || !hasMoreServer) return;
+    setLoadingMore(true);
+    try {
+      const nextPage = imagePage + 1;
+      const res = await imageApi.list({ barcode, page: nextPage, page_size: IMAGE_PAGE_SIZE });
+      if (barcodeRef.current !== barcode) return;
+      setImages((prev) => [...prev, ...res.items]);
+      setImagePage(nextPage);
+      setImageTotal(res.total);
+    } catch {
+      message.error("加载更多图片失败");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [barcode, imagePage, hasMoreServer, loadingMore]);
 
   const toggleCheck = useCallback(
     (id: number, type: "main" | "detail") => {
@@ -226,6 +279,44 @@ const ImageCardDetail: React.FC<Props> = ({
     }
   };
 
+  const reloadImages = useCallback(async () => {
+    if (!barcode) return;
+    setLoading(true);
+    try {
+      const [imgRes, settings] = await Promise.all([
+        imageApi.list({ barcode, page: 1, page_size: IMAGE_PAGE_SIZE }),
+        barcodeSettingApi.get(barcode),
+      ]);
+      if (barcodeRef.current !== barcode) return;
+      setImages(imgRes.items);
+      setImageTotal(imgRes.total);
+      setImagePage(1);
+      setDefaultMainVersion(settings.default_main_ctime || "");
+      setDefaultDetailVersion(settings.default_detail_ctime || "");
+      if (imgRes.items.length > 0) {
+        const detail = await imageApi.get(imgRes.items[0].id);
+        if (barcodeRef.current !== barcode) return;
+        setVersions(detail.versions);
+        const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
+        const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
+        setMainVersion((prev) =>
+          prev === "" ? (settings.default_main_ctime || latestMain?.folder_ctime || "") : prev,
+        );
+        setDetailVersion((prev) =>
+          prev === "" ? (settings.default_detail_ctime || latestDetail?.folder_ctime || "") : prev,
+        );
+      } else {
+        setVersions([]);
+        setMainVersion("");
+        setDetailVersion("");
+      }
+    } catch {
+      message.error("刷新数据失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [barcode]);
+
   const handleVersionDelete = async (deleteFile: boolean) => {
     if (!versionDeleteTarget || deletingRef.current) return;
     deletingRef.current = true;
@@ -235,96 +326,46 @@ const ImageCardDetail: React.FC<Props> = ({
       await versionApi.delete(versionDeleteTarget.id, deleteFile);
       message.success(deleteFile ? "已删除版本索引和文件" : "已删除版本索引");
       setVersionDeleteTarget(null);
-      if (barcode) {
-        setLoading(true);
-        const [imgRes, settings] = await Promise.all([
-          imageApi.list({ barcode, page_size: 500 }),
-          barcodeSettingApi.get(barcode),
-        ]);
-        if (barcodeRef.current !== barcode) return;
-        setImages(imgRes.items);
-        if (imgRes.items.length > 0) {
-          const detail = await imageApi.get(imgRes.items[0].id);
-          if (barcodeRef.current !== barcode) return;
-          setVersions(detail.versions);
-          const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
-          const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
-          // Reset to latest if deleted version was the selected one
-          setMainVersion((prev) =>
-            prev === deletedCtime && deletedImageType === "main"
-              ? settings.default_main_ctime || latestMain?.folder_ctime || ""
-              : prev,
-          );
-          setDetailVersion((prev) =>
-            prev === deletedCtime && deletedImageType === "detail"
-              ? settings.default_detail_ctime || latestDetail?.folder_ctime || ""
-              : prev,
-          );
-        } else {
-          setVersions([]);
-          setMainVersion("");
-          setDetailVersion("");
-        }
+      // Reset selection if we deleted the currently selected version
+      if (deletedImageType === "main" && mainVersion === deletedCtime) {
+        setMainVersion("");
       }
+      if (deletedImageType === "detail" && detailVersion === deletedCtime) {
+        setDetailVersion("");
+      }
+      if (deletedImageType === "main" && defaultMainVersion === deletedCtime) {
+        setDefaultMainVersion("");
+      }
+      if (deletedImageType === "detail" && defaultDetailVersion === deletedCtime) {
+        setDefaultDetailVersion("");
+      }
+      await reloadImages();
       onDeleted();
     } catch {
       message.error("删除版本失败，请重试");
     } finally {
       deletingRef.current = false;
-      setLoading(false);
     }
   };
 
   const handleDuplicateDelete = async (deleteFile: boolean) => {
     if (!dupDeleteTarget || deletingRef.current) return;
     deletingRef.current = true;
-    const targetFolderCtime = dupDeleteTarget.folderCtime;
-    const targetImageType = dupDeleteTarget.imageType;
     try {
       await barcodeApi.deleteDuplicateImages(
         dupDeleteTarget.barcode,
-        targetFolderCtime,
-        targetImageType,
+        dupDeleteTarget.folderCtime,
+        dupDeleteTarget.imageType,
         deleteFile,
       );
       message.success(deleteFile ? "已删除重复图片和文件" : "已删除重复图片索引");
       setDupDeleteTarget(null);
-      if (barcode) {
-        setLoading(true);
-        const [imgRes, settings] = await Promise.all([
-          imageApi.list({ barcode, page_size: 500 }),
-          barcodeSettingApi.get(barcode),
-        ]);
-        if (barcodeRef.current !== barcode) return;
-        setImages(imgRes.items);
-        if (imgRes.items.length > 0) {
-          const detail = await imageApi.get(imgRes.items[0].id);
-          if (barcodeRef.current !== barcode) return;
-          setVersions(detail.versions);
-          const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
-          const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
-          setMainVersion((prev) =>
-            prev === targetFolderCtime && targetImageType === "main"
-              ? settings.default_main_ctime || latestMain?.folder_ctime || ""
-              : prev,
-          );
-          setDetailVersion((prev) =>
-            prev === targetFolderCtime && targetImageType === "detail"
-              ? settings.default_detail_ctime || latestDetail?.folder_ctime || ""
-              : prev,
-          );
-        } else {
-          setVersions([]);
-          setMainVersion("");
-          setDetailVersion("");
-        }
-      }
+      await reloadImages();
       onDeleted();
     } catch {
       message.error("删除重复图片失败，请重试");
     } finally {
       deletingRef.current = false;
-      setLoading(false);
     }
   };
 
@@ -419,14 +460,8 @@ const ImageCardDetail: React.FC<Props> = ({
                       onClick={() => {
                         if (v.image_type === "main") {
                           setMainVersion(v.folder_ctime);
-                          barcodeSettingApi.update(barcode!, {
-                            default_main_ctime: v.folder_ctime,
-                          });
                         } else {
                           setDetailVersion(v.folder_ctime);
-                          barcodeSettingApi.update(barcode!, {
-                            default_detail_ctime: v.folder_ctime,
-                          });
                         }
                       }}
                       closable
@@ -437,6 +472,9 @@ const ImageCardDetail: React.FC<Props> = ({
                     >
                       {v.image_type === "main" ? "主" : "详"} {v.version_label}{" "}
                       {v.is_latest ? "(最新)" : ""}
+                      {(v.image_type === "main" && defaultMainVersion && v.folder_ctime === defaultMainVersion)
+                        || (v.image_type === "detail" && defaultDetailVersion && v.folder_ctime === defaultDetailVersion)
+                        ? " (默认)" : ""}
                     </Tag>
                     {v.duplicate_mtimes && v.duplicate_mtimes.length > 0 && (() => {
                       const all = v.duplicate_mtimes!;
@@ -508,6 +546,13 @@ const ImageCardDetail: React.FC<Props> = ({
             </Button>
             <Button
               size="small"
+              disabled={!mainVersion || mainVersion === defaultMainVersion}
+              onClick={() => handleSetDefault("main")}
+            >
+              {mainVersion && mainVersion === defaultMainVersion ? "已是默认" : "设为默认"}
+            </Button>
+            <Button
+              size="small"
               danger
               icon={<DeleteOutlined />}
               disabled={!mainVersion}
@@ -522,14 +567,23 @@ const ImageCardDetail: React.FC<Props> = ({
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {mainImages.slice(0, mainShowCount).map(renderImage)}
           </div>
-          {mainImages.length > mainShowCount && (
+          {(mainImages.length > mainShowCount || hasMoreServer) && (
             <Button
               type="link"
               size="small"
-              onClick={() => setMainShowCount(prev => prev + THUMBNAIL_PAGE_SIZE)}
+              loading={loadingMore}
+              onClick={() => {
+                if (hasMoreServer) {
+                  loadMoreImages();
+                } else {
+                  setMainShowCount((prev) => prev + THUMBNAIL_PAGE_SIZE);
+                }
+              }}
               style={{ padding: 0, marginTop: 4 }}
             >
-              加载更多 ({mainShowCount}/{mainImages.length})
+              {hasMoreServer
+                ? `加载更多 (已加载 ${images.length}/${imageTotal})`
+                : `加载更多 (${mainShowCount}/${mainImages.length})`}
             </Button>
           )}
         </div>
@@ -555,6 +609,13 @@ const ImageCardDetail: React.FC<Props> = ({
             </Button>
             <Button
               size="small"
+              disabled={!detailVersion || detailVersion === defaultDetailVersion}
+              onClick={() => handleSetDefault("detail")}
+            >
+              {detailVersion && detailVersion === defaultDetailVersion ? "已是默认" : "设为默认"}
+            </Button>
+            <Button
+              size="small"
               danger
               icon={<DeleteOutlined />}
               disabled={!detailVersion}
@@ -569,14 +630,23 @@ const ImageCardDetail: React.FC<Props> = ({
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {detailImages.slice(0, detailShowCount).map(renderImage)}
           </div>
-          {detailImages.length > detailShowCount && (
+          {(detailImages.length > detailShowCount || hasMoreServer) && (
             <Button
               type="link"
               size="small"
-              onClick={() => setDetailShowCount(prev => prev + THUMBNAIL_PAGE_SIZE)}
+              loading={loadingMore}
+              onClick={() => {
+                if (hasMoreServer) {
+                  loadMoreImages();
+                } else {
+                  setDetailShowCount((prev) => prev + THUMBNAIL_PAGE_SIZE);
+                }
+              }}
               style={{ padding: 0, marginTop: 4 }}
             >
-              加载更多 ({detailShowCount}/{detailImages.length})
+              {hasMoreServer
+                ? `加载更多 (已加载 ${images.length}/${imageTotal})`
+                : `加载更多 (${detailShowCount}/${detailImages.length})`}
             </Button>
           )}
         </div>
