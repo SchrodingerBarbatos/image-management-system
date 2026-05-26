@@ -154,6 +154,10 @@ const ImageCardDetail: React.FC<Props> = ({
 
   useEffect(() => {
     if (!barcode) return;
+    mainLoadingMoreRef.current = false;
+    detailLoadingMoreRef.current = false;
+    setMainLoadingMore(false);
+    setDetailLoadingMore(false);
     setMainShowCount(THUMBNAIL_PAGE_SIZE);
     setDetailShowCount(THUMBNAIL_PAGE_SIZE);
     setCollapsedDupVersions(new Set());
@@ -258,10 +262,12 @@ const ImageCardDetail: React.FC<Props> = ({
       setMainImagePage(nextPage);
       setMainImageTotal(res.total);
     } catch {
-      message.error("加载更多主图失败");
-    } finally {
       if (barcodeRef.current === barcode) {
-        mainLoadingMoreRef.current = false;
+        message.error("加载更多主图失败");
+      }
+    } finally {
+      mainLoadingMoreRef.current = false;
+      if (barcodeRef.current === barcode) {
         setMainLoadingMore(false);
       }
     }
@@ -283,10 +289,12 @@ const ImageCardDetail: React.FC<Props> = ({
       setDetailImagePage(nextPage);
       setDetailImageTotal(res.total);
     } catch {
-      message.error("加载更多详情图失败");
-    } finally {
       if (barcodeRef.current === barcode) {
-        detailLoadingMoreRef.current = false;
+        message.error("加载更多详情图失败");
+      }
+    } finally {
+      detailLoadingMoreRef.current = false;
+      if (barcodeRef.current === barcode) {
         setDetailLoadingMore(false);
       }
     }
