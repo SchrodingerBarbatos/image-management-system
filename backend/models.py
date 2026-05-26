@@ -49,6 +49,8 @@ class Image(Base):
         Index('idx_md5', 'md5_hash'),
         Index('idx_folder_ctime', 'folder_mtime'),
         Index('idx_status_barcode_type', 'status', 'barcode', 'image_type'),
+        Index('idx_barcode_type_ctime', 'barcode', 'image_type', 'folder_mtime'),
+        Index('idx_scanroot_status', 'scan_root_id', 'status'),
     )
 
 class ImageVersion(Base):
@@ -65,6 +67,8 @@ class ImageVersion(Base):
 
     __table_args__ = (
         UniqueConstraint('barcode', 'image_type', 'content_hash', name='uq_barcode_type_content'),
+        Index('idx_iv_barcode_type', 'barcode', 'image_type'),
+        Index('idx_iv_barcode_type_latest', 'barcode', 'image_type', 'is_latest'),
     )
 
 class ExportTask(Base):

@@ -83,6 +83,35 @@ def list_barcodes():
         'total': total, 'page': page, 'page_size': page_size,
     })
 
+@images_bp.route('/barcodes/image-ids', methods=['POST'])
+def batch_barcode_image_ids():
+    """Return all image IDs for a list of barcodes in a single request.
+    Replaces N paginated /images calls for batch operations."""
+    data = request.json
+    barcodes = data.get('barcodes', [])
+    if not barcodes:
+        return jsonify({'image_ids': [], 'barcode_counts': {}})
+
+    rows = session.query(
+        Image.barcode,
+        Image.id,
+    ).filter(
+        Image.barcode.in_(barcodes),
+        Image.status == 'active',
+        Image.confirmed == True,
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True,
+    ).all()
+
+    image_ids = []
+    barcode_counts = {}
+    for barcode, img_id in rows:
+        image_ids.append(img_id)
+        barcode_counts[barcode] = barcode_counts.get(barcode, 0) + 1
+
+    return jsonify({'image_ids': image_ids, 'barcode_counts': barcode_counts})
+
+
 @images_bp.route('/images', methods=['GET'])
 def list_images():
     q = session.query(Image).join(

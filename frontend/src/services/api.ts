@@ -106,6 +106,8 @@ export const imageApi = {
     api.post('/images/batch-delete', { ids, delete_file: deleteFile }).then(r => r.data),
   batchExport: (ids: number[], image_type?: string, flat?: boolean) =>
     api.post<{ task_id: number; total: number; scanroot_excluded: number; version_filtered: number }>('/images/batch-export', { ids, image_type, flat }).then(r => r.data),
+  getBarcodeImageIds: (barcodes: string[]) =>
+    api.post<{ image_ids: number[]; barcode_counts: Record<string, number> }>('/barcodes/image-ids', { barcodes }).then(r => r.data),
 };
 
 export const barcodeApi = {
@@ -184,8 +186,7 @@ export interface LowVersionGroup {
 
 interface BatchDeleteResult {
   deleted_image_count: number;
-  deleted_folder_count?: number;
-  deleted_version_count?: number;
+  deleted_item_count: number;
   affected_barcodes: string[];
 }
 

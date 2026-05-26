@@ -111,6 +111,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     skipped = 0
     broken_cleaned = 0  # in full_scan mode this counts all deleted records, not just broken
     thumb_jobs = []
+    affected_barcodes = set()
 
     _report('scan_start', current_root_path=root.path)
 
@@ -121,6 +122,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             Image.scan_root_id == root_id, Image.status == 'broken'
         ).all()
         for img in broken:
+            affected_barcodes.add(img.barcode)
             session.delete(img)
         broken_cleaned = len(broken)
         session.commit()
@@ -170,6 +172,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                 existing.file_size = new_size
                 existing.folder_ctime = folder_ctime
                 existing.status = 'active'
+                affected_barcodes.add(existing.barcode)
                 added += 1
                 thumb_jobs.append((existing.id, full_path))
                 continue
@@ -201,10 +204,13 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             session.add(img)
             session.flush()  # 获取 img.id
             thumb_jobs.append((img.id, full_path))
+            affected_barcodes.add(parsed['barcode'])
             added += 1
 
     # Handle leftover records not found on disk
     leftover_count = len(indexed_map)
+    for img in indexed_map.values():
+        affected_barcodes.add(img.barcode)
     if full_scan:
         for img in indexed_map.values():
             session.delete(img)
@@ -238,4 +244,5 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     _report('root_done', added=added, skipped=skipped,
             broken_cleaned=broken_cleaned, broken_new=leftover_count)
 
-    return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count}
+    return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count,
+            'affected_barcodes': list(affected_barcodes)}

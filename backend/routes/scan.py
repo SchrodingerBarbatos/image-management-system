@@ -2,7 +2,7 @@ import os, json, uuid, threading, datetime, traceback
 from flask import Blueprint, request, jsonify
 from models import session, ScanRoot, Image, ScanLog
 from scanner import scan_root
-from versioning import update_all_versions
+from versioning import update_versions_for_barcode, update_all_versions
 
 scan_bp = Blueprint('scan', __name__)
 
@@ -50,6 +50,7 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
 
     try:
         total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0}
+        all_affected = set()
         roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
 
         for i, r in enumerate(roots):
@@ -62,9 +63,13 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             res = scan_root(r.id, full_scan=full_scan, progress_callback=progress)
             for k in total:
                 total[k] += res.get(k, 0)
+            all_affected.update(res.get('affected_barcodes', []))
 
-        progress('versioning')
-        update_all_versions()
+        progress('versioning', versioning_total=len(all_affected))
+        for idx, bc in enumerate(sorted(all_affected)):
+            update_versions_for_barcode(bc)
+            if (idx + 1) % 50 == 0:
+                progress('versioning', versioning_total=len(all_affected), versioning_current=idx + 1)
 
         _add_log('scan', 'success',
             f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}",

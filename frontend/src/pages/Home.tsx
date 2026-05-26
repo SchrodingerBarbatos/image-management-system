@@ -1,19 +1,24 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Layout, message, Space, Button, Typography, Modal } from 'antd';
+import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { Layout, message, Space, Button, Typography, Modal, Spin } from 'antd';
 import { DeleteOutlined, ExportOutlined } from '@ant-design/icons';
 import SearchBar from '../components/SearchBar';
 import ImageTable from '../components/ImageTable';
 import ImageCardDetail from '../components/ImageCardDetail';
-import ScanManager from '../components/ScanManager';
-import PendingList from '../components/PendingList';
-import BatchOperations from '../components/BatchOperations';
-import ExportDialog from '../components/ExportDialog';
 import { BarcodeRec, imageApi, barcodeApi, pendingApi, exportApi } from '../services/api';
+
+const ScanManager = React.lazy(() => import('../components/ScanManager'));
+const PendingList = React.lazy(() => import('../components/PendingList'));
+const BatchOperations = React.lazy(() => import('../components/BatchOperations'));
+const ExportDialog = React.lazy(() => import('../components/ExportDialog'));
+
+const LazyFallback: React.FC = () => (
+  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 48 }}>
+    <Spin />
+  </div>
+);
 
 const { Header, Content, Footer } = Layout;
 const { Text } = Typography;
-
-const BARCODE_RESOLVE_PAGE_SIZE = 500;
 
 const Home: React.FC = () => {
   // Barcode-level table data
@@ -63,25 +68,8 @@ const Home: React.FC = () => {
   // Resolve barcode selections to image IDs for batch operations
   const resolveBarcodeImageIds = async (): Promise<number[]> => {
     if (selectedBarcodes.size === 0) return [];
-    const results = await Promise.all(
-      Array.from(selectedBarcodes).map(async (bc) => {
-        const firstPage = await imageApi.list({ barcode: bc, page_size: BARCODE_RESOLVE_PAGE_SIZE });
-        const allIds = firstPage.items.map(i => i.id);
-        const totalPages = Math.ceil(firstPage.total / BARCODE_RESOLVE_PAGE_SIZE);
-        if (totalPages > 1) {
-          const pages = await Promise.all(
-            Array.from({ length: totalPages - 1 }, (_, i) =>
-              imageApi.list({ barcode: bc, page: i + 2, page_size: BARCODE_RESOLVE_PAGE_SIZE })
-            )
-          );
-          for (const page of pages) {
-            allIds.push(...page.items.map(i => i.id));
-          }
-        }
-        return allIds;
-      })
-    );
-    return results.flat();
+    const result = await imageApi.getBarcodeImageIds(Array.from(selectedBarcodes));
+    return result.image_ids;
   };
 
   const executeBatchDelete = async (deleteFile: boolean) => {
@@ -233,10 +221,18 @@ const Home: React.FC = () => {
         <Text type="secondary">图片库系统 v1.0</Text>
       </Footer>
 
-      <ScanManager visible={scanVisible} onClose={() => setScanVisible(false)} onScanComplete={handleScanComplete} />
-      <PendingList visible={pendingVisible} onClose={() => setPendingVisible(false)} onConfirmed={() => { fetchBarcodes(); fetchPendingCount(); }} />
-      <BatchOperations visible={batchVisible} onClose={() => setBatchVisible(false)} onCompleted={() => { fetchBarcodes(); fetchPendingCount(); }} />
-      <ExportDialog visible={exportVisible} onClose={() => setExportVisible(false)} />
+      <Suspense fallback={<LazyFallback />}>
+        {scanVisible && <ScanManager visible={scanVisible} onClose={() => setScanVisible(false)} onScanComplete={handleScanComplete} />}
+      </Suspense>
+      <Suspense fallback={<LazyFallback />}>
+        {pendingVisible && <PendingList visible={pendingVisible} onClose={() => setPendingVisible(false)} onConfirmed={() => { fetchBarcodes(); fetchPendingCount(); }} />}
+      </Suspense>
+      <Suspense fallback={<LazyFallback />}>
+        {batchVisible && <BatchOperations visible={batchVisible} onClose={() => setBatchVisible(false)} onCompleted={() => { fetchBarcodes(); fetchPendingCount(); }} />}
+      </Suspense>
+      <Suspense fallback={<LazyFallback />}>
+        {exportVisible && <ExportDialog visible={exportVisible} onClose={() => setExportVisible(false)} />}
+      </Suspense>
 
       <Modal title="批量删除" open={batchDeleteVisible} onCancel={() => setBatchDeleteVisible(false)}
         footer={null} width={400}>

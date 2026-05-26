@@ -102,6 +102,10 @@ with engine.connect() as conn:
     conn.commit()
     # Create performance indexes if not exist
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_status_barcode_type ON image (status, barcode, image_type)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_barcode_type_ctime ON image (barcode, image_type, folder_mtime)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_scanroot_status ON image (scan_root_id, status)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_iv_barcode_type ON image_version (barcode, image_type)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_iv_barcode_type_latest ON image_version (barcode, image_type, is_latest)'))
     conn.commit()
     # Migration: add image_type to image_version and update unique constraint
     ver_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('image_version')"))}

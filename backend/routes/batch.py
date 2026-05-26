@@ -1,8 +1,11 @@
-import json, os, re
+import json, os, re, logging
 from collections import defaultdict
 from flask import Blueprint, request, jsonify
+from sqlalchemy import func, or_
 from models import session, Image, ImageVersion, ScanRoot
 from versioning import update_versions_for_barcode
+
+_log = logging.getLogger(__name__)
 
 batch_bp = Blueprint('batch', __name__)
 
@@ -27,7 +30,7 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
             try:
                 os.remove(img.file_path)
             except OSError:
-                pass
+                _log.warning("Failed to delete file: %s", img.file_path)
         session.delete(img)
         count += 1
     return count
@@ -38,7 +41,6 @@ def _check_disabled_scan_roots(items):
     if not items:
         return 0
     # Build OR conditions for (barcode, image_type, folder_ctime)
-    from sqlalchemy import or_
     conditions = []
     for item in items:
         conditions.append(
@@ -60,7 +62,6 @@ def _check_disabled_scan_roots(items):
 def _compute_folder_stats():
     """Return {(barcode, image_type, folder_ctime): (count, total_size)}
     for all active+confirmed images in enabled scan roots."""
-    from sqlalchemy import func
     rows = session.query(
         Image.barcode, Image.image_type, Image.folder_ctime,
         func.count(Image.id).label('cnt'),
@@ -200,7 +201,7 @@ def delete_duplicates():
 
     return jsonify({
         'deleted_image_count': total_deleted,
-        'deleted_folder_count': len(items),
+        'deleted_item_count': len(items),
         'affected_barcodes': list(affected_barcodes),
     })
 
@@ -314,10 +315,10 @@ def delete_low_versions():
         by_barcode_type[(v.barcode, v.image_type)].append(v)
 
     for i, item in enumerate(items):
-        key = (item['barcode'], item['image_type'], item['folder_ctime'])
-        count, _ = stats.get(key, (0, 0))
-        threshold = main_threshold if item['image_type'] == 'main' else detail_threshold
-        total_versions = len(by_barcode_type.get(key[:2], []))
+        barcode, image_type, folder_ctime = item['barcode'], item['image_type'], item['folder_ctime']
+        count, _ = stats.get((barcode, image_type, folder_ctime), (0, 0))
+        threshold = main_threshold if image_type == 'main' else detail_threshold
+        total_versions = len(by_barcode_type.get((barcode, image_type), []))
 
         if count == 0:
             return jsonify({
@@ -347,6 +348,6 @@ def delete_low_versions():
 
     return jsonify({
         'deleted_image_count': total_deleted,
-        'deleted_version_count': len(items),
+        'deleted_item_count': len(items),
         'affected_barcodes': list(affected_barcodes),
     })

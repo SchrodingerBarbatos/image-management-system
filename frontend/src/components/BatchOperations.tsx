@@ -180,8 +180,8 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       message.success('删除完成');
       onCompleted();
       onClose();
-    } catch {
-      message.error('删除失败');
+    } catch (err: any) {
+      message.error(err?.response?.data?.error || '删除失败');
     } finally {
       setDeleting(false);
     }
