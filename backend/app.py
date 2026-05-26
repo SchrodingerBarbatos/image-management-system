@@ -225,12 +225,14 @@ from routes.images import images_bp
 from routes.export import export_bp
 from routes.pending import pending_bp
 from routes.batch import batch_bp
+from routes.batch_tasks import batch_tasks_bp
 
 app.register_blueprint(scan_bp, url_prefix='/api')
 app.register_blueprint(images_bp, url_prefix='/api')
 app.register_blueprint(export_bp, url_prefix='/api')
 app.register_blueprint(pending_bp, url_prefix='/api')
 app.register_blueprint(batch_bp, url_prefix='/api')
+app.register_blueprint(batch_tasks_bp, url_prefix='/api')
 
 
 def _get_icon_path():
