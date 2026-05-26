@@ -120,18 +120,21 @@ const ImageCardDetail: React.FC<Props> = ({
         const detail = await imageApi.get(merged[0].id);
         if (barcodeRef.current !== barcode) return;
         setVersions(detail.versions);
-        const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
-        const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
+        const resolveVersion = (
+          imageType: "main" | "detail",
+          preferred: string,
+        ) => {
+          const candidates = detail.versions.filter((v) => v.image_type === imageType);
+          const preferredExists = preferred && candidates.some((v) => v.folder_ctime === preferred);
+          if (preferredExists) return preferred;
+          return candidates.find((v) => v.is_latest)?.folder_ctime || "";
+        };
         if (options?.resetSelection) {
-          setMainVersion(settings.default_main_ctime || latestMain?.folder_ctime || "");
-          setDetailVersion(settings.default_detail_ctime || latestDetail?.folder_ctime || "");
+          setMainVersion(resolveVersion("main", settings.default_main_ctime || ""));
+          setDetailVersion(resolveVersion("detail", settings.default_detail_ctime || ""));
         } else {
-          setMainVersion((prev) =>
-            prev === "" ? (settings.default_main_ctime || latestMain?.folder_ctime || "") : prev,
-          );
-          setDetailVersion((prev) =>
-            prev === "" ? (settings.default_detail_ctime || latestDetail?.folder_ctime || "") : prev,
-          );
+          setMainVersion((prev) => resolveVersion("main", prev || settings.default_main_ctime || ""));
+          setDetailVersion((prev) => resolveVersion("detail", prev || settings.default_detail_ctime || ""));
         }
       } else {
         setVersions([]);
@@ -139,9 +142,13 @@ const ImageCardDetail: React.FC<Props> = ({
         setDetailVersion("");
       }
     } catch {
-      message.error("加载图片失败");
+      if (barcodeRef.current === barcode) {
+        message.error("加载图片失败");
+      }
     } finally {
-      setLoading(false);
+      if (barcodeRef.current === barcode) {
+        setLoading(false);
+      }
     }
   }, [barcode]);
 
@@ -253,8 +260,10 @@ const ImageCardDetail: React.FC<Props> = ({
     } catch {
       message.error("加载更多主图失败");
     } finally {
-      mainLoadingMoreRef.current = false;
-      setMainLoadingMore(false);
+      if (barcodeRef.current === barcode) {
+        mainLoadingMoreRef.current = false;
+        setMainLoadingMore(false);
+      }
     }
   }, [barcode, mainImagePage, mainHasMoreServer]);
 
@@ -276,8 +285,10 @@ const ImageCardDetail: React.FC<Props> = ({
     } catch {
       message.error("加载更多详情图失败");
     } finally {
-      detailLoadingMoreRef.current = false;
-      setDetailLoadingMore(false);
+      if (barcodeRef.current === barcode) {
+        detailLoadingMoreRef.current = false;
+        setDetailLoadingMore(false);
+      }
     }
   }, [barcode, detailImagePage, detailHasMoreServer]);
 
@@ -360,9 +371,15 @@ const ImageCardDetail: React.FC<Props> = ({
       }
       if (deletedImageType === "main" && defaultMainVersion === deletedCtime) {
         setDefaultMainVersion("");
+        if (barcode) {
+          barcodeSettingApi.update(barcode, { default_main_ctime: "" }).catch(() => {});
+        }
       }
       if (deletedImageType === "detail" && defaultDetailVersion === deletedCtime) {
         setDefaultDetailVersion("");
+        if (barcode) {
+          barcodeSettingApi.update(barcode, { default_detail_ctime: "" }).catch(() => {});
+        }
       }
       await reloadImages();
       onDeleted();
@@ -392,6 +409,18 @@ const ImageCardDetail: React.FC<Props> = ({
       }
       if (deletedType === "detail" && detailVersion === deletedCtime) {
         setDetailVersion("");
+      }
+      if (deletedType === "main" && defaultMainVersion === deletedCtime) {
+        setDefaultMainVersion("");
+        if (barcode) {
+          barcodeSettingApi.update(barcode, { default_main_ctime: "" }).catch(() => {});
+        }
+      }
+      if (deletedType === "detail" && defaultDetailVersion === deletedCtime) {
+        setDefaultDetailVersion("");
+        if (barcode) {
+          barcodeSettingApi.update(barcode, { default_detail_ctime: "" }).catch(() => {});
+        }
       }
       await reloadImages();
       onDeleted();

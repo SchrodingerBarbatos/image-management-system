@@ -118,6 +118,7 @@ def list_images():
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
     barcode_exact = request.args.get('barcode_exact')
+    barcode = request.args.get('barcode')
     if barcode_exact:
         q = q.filter(Image.barcode == barcode_exact)
     elif barcode:
