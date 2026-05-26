@@ -57,6 +57,26 @@ def _check_disabled_scan_roots(items):
     return disabled_count
 
 
+def _compute_folder_stats():
+    """Return {(barcode, image_type, folder_ctime): (count, total_size)}
+    for all active+confirmed images in enabled scan roots."""
+    from sqlalchemy import func
+    rows = session.query(
+        Image.barcode, Image.image_type, Image.folder_ctime,
+        func.count(Image.id).label('cnt'),
+        func.sum(Image.file_size).label('total_sz'),
+    ).filter(
+        Image.status == 'active',
+        Image.confirmed == True,
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True,
+    ).group_by(Image.barcode, Image.image_type, Image.folder_ctime).all()
+    stats = {}
+    for row in rows:
+        stats[(row.barcode, row.image_type, row.folder_ctime)] = (row.cnt, row.total_sz or 0)
+    return stats
+
+
 @batch_bp.route('/batch/duplicates', methods=['GET'])
 def list_duplicates():
     """扫描所有有重复文件夹的版本，返回分组数据"""
@@ -139,6 +159,30 @@ def delete_duplicates():
             'disabled_count': disabled_count,
         }), 403
 
+    # Build valid duplicate candidate set from current ImageVersion state.
+    # Reject items that are no longer recognized as duplicates — the data may
+    # have changed since the preview was loaded.
+    valid_duplicates = set()
+    versions = session.query(ImageVersion).filter(
+        ImageVersion.duplicate_mtimes != '',
+        ImageVersion.duplicate_mtimes != '[]',
+    ).all()
+    for v in versions:
+        try:
+            dup_ctimes = json.loads(v.duplicate_mtimes)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for dup_ctime in dup_ctimes:
+            valid_duplicates.add((v.barcode, v.image_type, dup_ctime))
+
+    for i, item in enumerate(items):
+        key = (item['barcode'], item['image_type'], item['folder_ctime'])
+        if key not in valid_duplicates:
+            return jsonify({
+                'error': f'第{i}项不是有效的重复文件夹，数据可能已变更，请刷新后重试',
+                'invalid_index': i,
+            }), 409
+
     affected_barcodes = set()
     total_deleted = 0
 
@@ -177,25 +221,7 @@ def list_low_versions():
 
     # Get all versions
     versions = session.query(ImageVersion).all()
-
-    # Build a single query to get all (barcode, image_type, folder_ctime) counts and sizes.
-    # Pre-compute per-folder stats to avoid N+1 queries inside the loop.
-    from sqlalchemy import func
-    stats_rows = session.query(
-        Image.barcode, Image.image_type, Image.folder_ctime,
-        func.count(Image.id).label('cnt'),
-        func.sum(Image.file_size).label('total_sz'),
-    ).filter(
-        Image.status == 'active',
-        Image.confirmed == True,
-    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-        ScanRoot.enabled == True,
-    ).group_by(Image.barcode, Image.image_type, Image.folder_ctime).all()
-
-    # Index: (barcode, image_type, folder_ctime) -> (count, total_size)
-    stats = {}
-    for row in stats_rows:
-        stats[(row.barcode, row.image_type, row.folder_ctime)] = (row.cnt, row.total_sz or 0)
+    stats = _compute_folder_stats()
 
     # Group by (barcode, image_type)
     by_barcode_type = defaultdict(list)
@@ -244,13 +270,21 @@ def list_low_versions():
 
 @batch_bp.route('/batch/delete-low-versions', methods=['POST'])
 def delete_low_versions():
-    """删除指定的低版本"""
+    """删除指定的低版本。必须传入与预览时相同的阈值以重新验证。"""
     data = request.json
     items = data.get('items', [])
     delete_files = data.get('delete_files', False)
+    main_threshold = data.get('main_threshold', 0)
+    detail_threshold = data.get('detail_threshold', 0)
 
     if not items:
         return jsonify({'error': 'items required'}), 400
+    if not isinstance(main_threshold, int) or not isinstance(detail_threshold, int):
+        return jsonify({'error': 'main_threshold and detail_threshold must be integers'}), 400
+    if main_threshold < 0 or detail_threshold < 0:
+        return jsonify({'error': 'threshold must be >= 0'}), 400
+    if main_threshold == 0 and detail_threshold == 0:
+        return jsonify({'error': 'at least one threshold must be > 0'}), 400
 
     for i, item in enumerate(items):
         if not isinstance(item, dict):
@@ -269,6 +303,32 @@ def delete_low_versions():
             'error': '部分图片属于已禁用的扫描目录，无法删除',
             'disabled_count': disabled_count,
         }), 403
+
+    # Re-validate eligibility using current database state.
+    # An item is only safe to delete when it still qualifies as "will_delete"
+    # under the same thresholds the user previewed.
+    stats = _compute_folder_stats()
+    versions = session.query(ImageVersion).all()
+    by_barcode_type = defaultdict(list)
+    for v in versions:
+        by_barcode_type[(v.barcode, v.image_type)].append(v)
+
+    for i, item in enumerate(items):
+        key = (item['barcode'], item['image_type'], item['folder_ctime'])
+        count, _ = stats.get(key, (0, 0))
+        threshold = main_threshold if item['image_type'] == 'main' else detail_threshold
+        total_versions = len(by_barcode_type.get(key[:2], []))
+
+        if count == 0:
+            return jsonify({
+                'error': f'第{i}项已无有效图片，数据可能已变更，请刷新后重试',
+                'invalid_index': i,
+            }), 409
+        if threshold == 0 or total_versions <= 1 or count >= threshold:
+            return jsonify({
+                'error': f'第{i}项不符合删除条件（阈值={threshold}，版本数={total_versions}，图片数={count}），数据可能已变更，请刷新后重试',
+                'invalid_index': i,
+            }), 409
 
     affected_barcodes = set()
     total_deleted = 0

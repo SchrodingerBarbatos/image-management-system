@@ -198,7 +198,7 @@ export const batchApi = {
     api.get<{ groups: LowVersionGroup[]; summary: Record<string, number> }>('/batch/low-versions', {
       params: { main_threshold: mainThreshold, detail_threshold: detailThreshold },
     }).then(r => r.data),
-  deleteLowVersions: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean) =>
-    api.post<BatchDeleteResult>('/batch/delete-low-versions', { items, delete_files: deleteFiles }).then(r => r.data),
+  deleteLowVersions: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean, mainThreshold: number, detailThreshold: number) =>
+    api.post<BatchDeleteResult>('/batch/delete-low-versions', { items, delete_files: deleteFiles, main_threshold: mainThreshold, detail_threshold: detailThreshold }).then(r => r.data),
 };
 

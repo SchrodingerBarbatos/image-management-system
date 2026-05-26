@@ -199,7 +199,12 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     const items = lowGroups
       .filter(g => lowSelected.has(lowKey(g)))
       .map(g => ({ barcode: g.barcode, image_type: g.image_type, folder_ctime: g.folder_ctime }));
-    await batchApi.deleteLowVersions(items, deleteFiles);
+    await batchApi.deleteLowVersions(
+      items,
+      deleteFiles,
+      mainEnabled ? mainThreshold : 0,
+      detailEnabled ? detailThreshold : 0,
+    );
   };
 
   // ---- Collapse panel builders ----
