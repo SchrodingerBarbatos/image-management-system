@@ -102,7 +102,7 @@ def _start_task_thread(task):
             _log.exception("Handler for task %d failed", task_id)
             try:
                 t = thread_sess.get(BatchTask, task_id)
-                if t and t.status == 'running':
+                if t and t.status == 'running' and not t.finished_at:
                     t.status = 'error'
                     t.error_message = f"{e}\n{traceback.format_exc()}"
                     t.finished_at = datetime.datetime.now().isoformat()
@@ -110,12 +110,13 @@ def _start_task_thread(task):
             except Exception:
                 thread_sess.rollback()
         finally:
-            thread_sess.remove()
-            del _thread_local.session
             try:
                 _on_task_done(task_type)
             except Exception:
                 _log.exception("_on_task_done failed for task_type %s", task_type)
+            finally:
+                thread_sess.remove()
+                del _thread_local.session
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

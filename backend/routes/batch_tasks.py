@@ -354,23 +354,27 @@ def delete_duplicate_scan_results(task_id):
         for dup_ctime in dup_ctimes:
             valid_duplicates.add((v.barcode, v.image_type, dup_ctime))
 
-    # Check disabled scan roots for all items
+    # Check disabled scan roots for all items (chunked to stay under
+    # SQLite expression depth limit of ~1000)
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-
-    # Subquery for disabled root check
-    conditions = []
-    for item in items:
-        conditions.append(
-            (Image.barcode == item['barcode']) &
-            (Image.image_type == item['image_type']) &
-            (Image.folder_ctime == item['folder_ctime'])
-        )
-    disabled_count = session.query(Image.id).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id,
-    ).filter(
-        ScanRoot.enabled == False,
-        or_(*conditions),
-    ).count() if conditions else 0
+    disabled_count = 0
+    _chunk_size = 500
+    for _chunk_start in range(0, len(items), _chunk_size):
+        _chunk = items[_chunk_start:_chunk_start + _chunk_size]
+        _conds = []
+        for item in _chunk:
+            _conds.append(
+                (Image.barcode == item['barcode']) &
+                (Image.image_type == item['image_type']) &
+                (Image.folder_ctime == item['folder_ctime'])
+            )
+        if _conds:
+            disabled_count += session.query(Image.id).join(
+                ScanRoot, Image.scan_root_id == ScanRoot.id,
+            ).filter(
+                ScanRoot.enabled == False,
+                or_(*_conds),
+            ).count()
 
     if disabled_count > 0:
         return jsonify({'error': '部分图片属于已禁用的扫描目录，无法删除', 'disabled_count': disabled_count}), 403
@@ -612,20 +616,27 @@ def delete_low_version_scan_results(task_id):
     for v in versions:
         by_barcode_type[(v.barcode, v.image_type)].append(v)
 
-    # Check disabled scan roots
+    # Check disabled scan roots for all items (chunked to stay under
+    # SQLite expression depth limit of ~1000)
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-    conditions = [
-        (Image.barcode == i['barcode']) &
-        (Image.image_type == i['image_type']) &
-        (Image.folder_ctime == i['folder_ctime'])
-        for i in items
-    ]
-    disabled_count = session.query(Image.id).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id,
-    ).filter(
-        ScanRoot.enabled == False,
-        or_(*conditions),
-    ).count() if conditions else 0
+    disabled_count = 0
+    _chunk_size = 500
+    for _chunk_start in range(0, len(items), _chunk_size):
+        _chunk = items[_chunk_start:_chunk_start + _chunk_size]
+        _conds = []
+        for i in _chunk:
+            _conds.append(
+                (Image.barcode == i['barcode']) &
+                (Image.image_type == i['image_type']) &
+                (Image.folder_ctime == i['folder_ctime'])
+            )
+        if _conds:
+            disabled_count += session.query(Image.id).join(
+                ScanRoot, Image.scan_root_id == ScanRoot.id,
+            ).filter(
+                ScanRoot.enabled == False,
+                or_(*_conds),
+            ).count()
 
     if disabled_count > 0:
         return jsonify({'error': '部分图片属于已禁用的扫描目录，无法删除', 'disabled_count': disabled_count}), 403

@@ -334,8 +334,21 @@ def test_cancel_queued_task(client, sess):
     """Cancelling a queued task should succeed."""
     from task_engine import create_task, cancel_task, get_task
 
+    # 404 for non-existent task
     resp = client.post('/api/tasks/9999/cancel')
     assert resp.status_code == 404
+
+    # Create a queued task (auto_start=False so it stays queued)
+    task_dict, is_new = create_task('duplicate_scan', params={}, auto_start=False)
+    assert is_new
+    assert task_dict['status'] == 'queued'
+
+    # Cancel it via the route
+    resp = client.post(f'/api/tasks/{task_dict["id"]}/cancel')
+    assert resp.status_code == 200
+    cancelled = resp.get_json()
+    assert cancelled['status'] == 'cancelled'
+    assert cancelled['finished_at']
 
 
 def test_cancel_nonexistent_task(client, sess):
