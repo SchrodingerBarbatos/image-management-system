@@ -791,27 +791,30 @@ def test_cleanup_old_exports_deletes_expired_non_processing(client, sess):
 # ===================================================================
 
 
-def test_cleanup_exports_on_startup_calls_both_in_order(monkeypatch):
+def test_cleanup_exports_on_startup_calls_both_in_order(sess, monkeypatch):
     """app.py _cleanup_exports_on_startup() must call reset_stale_processing
     first, then cleanup_old_exports.  Regression: non-tray path used to skip
-    reset_stale_processing, leaving stale processing unhandled."""
+    reset_stale_processing, leaving stale processing unhandled.
 
-    # Prevent app.py import-time side-effects (DB connection / migrations)
-    monkeypatch.setattr('models.Base.metadata.create_all', lambda **kw: None)
+    Uses the test's real temp SQLite engine so that app.py import-time
+    migrations (PRAGMA table_info / ALTER TABLE) succeed against actual
+    tables created by Base.metadata.create_all."""
 
-    fake_reset = []
-    fake_cleanup = []
+    # Point models at the test engine + session so import-time migrations
+    # and create_all run against the temp DB where tables actually exist.
+    monkeypatch.setattr('models.engine', sess.bind)
+    monkeypatch.setattr('models.session', sess)
 
+    # Mock the two export functions to verify call order without
+    # performing real cleanup against the test DB.
     import routes.export as _export
-    monkeypatch.setattr(_export, 'reset_stale_processing', lambda: fake_reset.append(1))
-    monkeypatch.setattr(_export, 'cleanup_old_exports', lambda: fake_cleanup.append(1))
+    calls = []
+    monkeypatch.setattr(_export, 'reset_stale_processing', lambda: calls.append('reset'))
+    monkeypatch.setattr(_export, 'cleanup_old_exports', lambda: calls.append('cleanup'))
 
     import app as _app
     _app._cleanup_exports_on_startup()
 
-    assert len(fake_reset) == 1, "reset_stale_processing was not called"
-    assert len(fake_cleanup) == 1, "cleanup_old_exports was not called"
-
-    # Verify correct order
-    assert fake_reset, "reset_stale_processing must be called before cleanup_old_exports"
-    assert fake_cleanup, "cleanup_old_exports must be called after reset_stale_processing"
+    assert calls == ['reset', 'cleanup'], (
+        f"Expected reset then cleanup, got {calls}"
+    )

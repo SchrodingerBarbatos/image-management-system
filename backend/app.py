@@ -43,18 +43,47 @@ def _request_admin():
         )
 
 
+def _migrate_export_task_schema(conn):
+    """Idempotent migration: add columns to export_task if the table exists."""
+    tables = {
+        row[0]
+        for row in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ))
+    }
+    if 'export_task' not in tables:
+        return
+
+    columns = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info('export_task')"))
+    }
+    if 'barcode_data' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN barcode_data TEXT DEFAULT ''"
+        ))
+    if 'progress' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN progress INTEGER DEFAULT 0"
+        ))
+    if 'total_images' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN total_images INTEGER DEFAULT 0"
+        ))
+    if 'error_message' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN error_message TEXT DEFAULT ''"
+        ))
+    conn.commit()
+
 app = Flask(__name__, static_folder=None)
 
 Base.metadata.create_all(bind=engine)
 
-# Migration: add barcode_data column if missing
+# Migration: add missing export_task columns (idempotent)
 from sqlalchemy import text
 with engine.connect() as conn:
-    result = conn.execute(text("PRAGMA table_info('export_task')"))
-    columns = [row[1] for row in result.fetchall()]
-    if 'barcode_data' not in columns:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN barcode_data TEXT DEFAULT ''"))
-        conn.commit()
+    _migrate_export_task_schema(conn)
 
 @app.teardown_appcontext
 def shutdown_session(exception=None):
@@ -136,15 +165,7 @@ with engine.connect() as conn:
     if 'content_md5' not in img_cols:
         conn.execute(text("ALTER TABLE image ADD COLUMN content_md5 TEXT DEFAULT ''"))
         conn.commit()
-    # Migration: add progress and total_images to export_task
-    task_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('export_task')"))}
-    if 'progress' not in task_cols:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN progress INTEGER DEFAULT 0"))
-    if 'total_images' not in task_cols:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN total_images INTEGER DEFAULT 0"))
-    if 'error_message' not in task_cols:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN error_message TEXT DEFAULT ''"))
-    conn.commit()
+    # export_task schema already migrated above via _migrate_export_task_schema
 
 # Rebuild versions if we just added the image_type column
 if need_rebuild:
