@@ -158,3 +158,47 @@ export const barcodeSettingApi = {
     api.put<BarcodeSetting>(`/barcode-settings/${barcode}`, data).then(r => r.data),
 };
 
+export interface DuplicateGroup {
+  barcode: string;
+  image_type: string;
+  version_label: string;
+  version_folder_ctime: string;
+  folder_ctime: string;
+  image_count: number;
+  total_file_size: number;
+}
+
+export interface LowVersionGroup {
+  barcode: string;
+  image_type: string;
+  version_label: string;
+  folder_ctime: string;
+  image_count: number;
+  total_file_size: number;
+  is_latest: boolean;
+  is_only_version: boolean;
+  meets_threshold: boolean;
+  threshold: number;
+  status_tag: 'will_delete' | 'keep_threshold' | 'keep_only' | 'keep_disabled';
+}
+
+interface BatchDeleteResult {
+  deleted_image_count: number;
+  deleted_folder_count?: number;
+  deleted_version_count?: number;
+  affected_barcodes: string[];
+}
+
+export const batchApi = {
+  listDuplicates: () =>
+    api.get<{ groups: DuplicateGroup[]; total_duplicate_count: number; total_barcode_count: number }>('/batch/duplicates').then(r => r.data),
+  deleteDuplicates: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean) =>
+    api.post<BatchDeleteResult>('/batch/delete-duplicates', { items, delete_files: deleteFiles }).then(r => r.data),
+  listLowVersions: (mainThreshold: number, detailThreshold: number) =>
+    api.get<{ groups: LowVersionGroup[]; summary: Record<string, number> }>('/batch/low-versions', {
+      params: { main_threshold: mainThreshold, detail_threshold: detailThreshold },
+    }).then(r => r.data),
+  deleteLowVersions: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean) =>
+    api.post<BatchDeleteResult>('/batch/delete-low-versions', { items, delete_files: deleteFiles }).then(r => r.data),
+};
+

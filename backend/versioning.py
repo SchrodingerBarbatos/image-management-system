@@ -86,6 +86,9 @@ def _do_update_versions_for_barcode(barcode):
     ).all()
 
     if not images:
+        # Clean up orphaned version records when all images are gone
+        session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
+        session.commit()
         return
 
     # Group by (folder_ctime, image_type)

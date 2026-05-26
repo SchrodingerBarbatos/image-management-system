@@ -6,6 +6,7 @@ import ImageTable from '../components/ImageTable';
 import ImageCardDetail from '../components/ImageCardDetail';
 import ScanManager from '../components/ScanManager';
 import PendingList from '../components/PendingList';
+import BatchOperations from '../components/BatchOperations';
 import ExportDialog from '../components/ExportDialog';
 import { BarcodeRec, imageApi, barcodeApi, pendingApi, exportApi } from '../services/api';
 
@@ -41,6 +42,7 @@ const Home: React.FC = () => {
   // Modals
   const [scanVisible, setScanVisible] = useState(false);
   const [pendingVisible, setPendingVisible] = useState(false);
+  const [batchVisible, setBatchVisible] = useState(false);
   const [exportVisible, setExportVisible] = useState(false);
 
   const fetchBarcodes = useCallback(() => {
@@ -182,6 +184,7 @@ const Home: React.FC = () => {
           onSearch={setBarcode}
           onOpenScanManager={() => setScanVisible(true)}
           onExportExcel={() => setExportVisible(true)}
+          onOpenBatch={() => setBatchVisible(true)}
           onOpenPending={() => setPendingVisible(true)}
           pendingCount={pendingCount}
         />
@@ -232,6 +235,7 @@ const Home: React.FC = () => {
 
       <ScanManager visible={scanVisible} onClose={() => setScanVisible(false)} onScanComplete={handleScanComplete} />
       <PendingList visible={pendingVisible} onClose={() => setPendingVisible(false)} onConfirmed={() => { fetchBarcodes(); fetchPendingCount(); }} />
+      <BatchOperations visible={batchVisible} onClose={() => setBatchVisible(false)} onCompleted={() => { fetchBarcodes(); fetchPendingCount(); }} />
       <ExportDialog visible={exportVisible} onClose={() => setExportVisible(false)} />
 
       <Modal title="批量删除" open={batchDeleteVisible} onCancel={() => setBatchDeleteVisible(false)}
