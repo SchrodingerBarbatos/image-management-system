@@ -1,6 +1,6 @@
-﻿import os, sys, uuid, zipfile, datetime, threading, logging, traceback, re
+﻿import os, sys, uuid, zipfile, datetime, threading, logging, traceback, re, json, io
 from flask import Blueprint, request, jsonify, send_file
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 from models import session, Image, ExportTask, ScanRoot, BarcodeSetting, ImageVersion
 from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS
 
@@ -47,6 +47,22 @@ def filter_to_single_version(imgs, barcodes, session):
                 continue
         filtered.append(img)
     return filtered
+
+def _compute_barcode_counts(imgs, all_barcodes=None):
+    """Compute per-barcode main/detail match counts.
+
+    If all_barcodes is provided, unmatched barcodes are included with zero counts.
+    Otherwise, only barcodes that appear in imgs are included.
+    """
+    counts = {}
+    if all_barcodes:
+        for b in all_barcodes:
+            counts[b] = {'main': 0, 'detail': 0}
+    for img in imgs:
+        counts.setdefault(img.barcode, {'main': 0, 'detail': 0})
+        if img.image_type in ('main', 'detail'):
+            counts[img.barcode][img.image_type] += 1
+    return counts
 
 def _col_letter(idx):
     """Convert 0-based column index to Excel column letter(s). 0->A, 25->Z, 26->AA."""
@@ -267,7 +283,10 @@ def generate_zip():
     matched_barcodes = set(img.barcode for img in imgs)
     excluded_barcodes = len(barcodes) - len(matched_barcodes)
 
-    task = ExportTask(status='processing')
+    # Compute per-barcode match counts (include all barcodes, even unmatched)
+    barcode_counts = _compute_barcode_counts(imgs, barcodes)
+
+    task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
     session.add(task)
     session.commit()
 
@@ -295,6 +314,7 @@ def list_tasks():
             'id': t.id, 'status': t.status, 'total_images': t.total_images,
             'created_at': t.created_at, 'file_available': file_available,
             'error_message': t.error_message,
+            'has_detail': bool(t.barcode_data),
         })
     return jsonify(result)
 
@@ -329,6 +349,51 @@ def download_zip(task_id):
         download_name=f'export_{task_id}.zip',
         mimetype='application/zip',
         conditional=True,
+    )
+
+
+@export_bp.route('/export/tasks/<int:task_id>/detail')
+def download_detail(task_id):
+    task = session.get(ExportTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+    if not task.barcode_data:
+        return jsonify({'error': 'no barcode data available'}), 404
+
+    try:
+        barcode_counts = json.loads(task.barcode_data)
+    except (json.JSONDecodeError, TypeError):
+        return jsonify({'error': 'barcode data is corrupted'}), 500
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = '导出详情'
+    ws.append(['条码', '匹配主图数量', '匹配详情图数量'])
+
+    for barcode, counts in barcode_counts.items():
+        ws.append([barcode, counts.get('main', 0), counts.get('detail', 0)])
+
+    # Auto-fit column widths
+    for col_idx, _ in enumerate(ws[1], start=1):
+        max_width = 0
+        for row in ws.iter_rows(min_col=col_idx, max_col=col_idx):
+            for cell in row:
+                if cell.value:
+                    # Estimate width: CJK chars ~2, ASCII ~1
+                    val = str(cell.value)
+                    width = sum(2 if ord(c) > 127 else 1 for c in val)
+                    max_width = max(max_width, width)
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_width + 4, 60)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f'export_detail_{task_id}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
 
 

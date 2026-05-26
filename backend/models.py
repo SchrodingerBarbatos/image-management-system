@@ -75,6 +75,7 @@ class ExportTask(Base):
     progress = Column(Integer, default=0)
     total_images = Column(Integer, default=0)
     error_message = Column(Text, default='')
+    barcode_data = Column(Text, default='')  # JSON: {barcode: {main: N, detail: N}}
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
 
 class BarcodeSetting(Base):

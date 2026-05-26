@@ -47,6 +47,15 @@ app = Flask(__name__, static_folder=None)
 
 Base.metadata.create_all(bind=engine)
 
+# Migration: add barcode_data column if missing
+from sqlalchemy import text
+with engine.connect() as conn:
+    result = conn.execute(text("PRAGMA table_info('export_task')"))
+    columns = [row[1] for row in result.fetchall()]
+    if 'barcode_data' not in columns:
+        conn.execute(text("ALTER TABLE export_task ADD COLUMN barcode_data TEXT DEFAULT ''"))
+        conn.commit()
+
 @app.teardown_appcontext
 def shutdown_session(exception=None):
     session.remove()

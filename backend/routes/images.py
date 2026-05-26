@@ -307,7 +307,10 @@ def batch_export():
         from routes.export import filter_to_single_version
         imgs = filter_to_single_version(imgs, barcodes_in, session)
     version_filtered = len(ids) - scanroot_excluded - len(imgs)
-    task = ExportTask(status='processing')
+
+    from routes.export import _compute_barcode_counts
+    barcode_counts = _compute_barcode_counts(imgs)
+    task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
     session.add(task)
     session.commit()
 

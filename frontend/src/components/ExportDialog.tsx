@@ -24,7 +24,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
   const [progress, setProgress] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
-  const [taskList, setTaskList] = useState<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean; error_message?: string }[]>([]);
+  const [taskList, setTaskList] = useState<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean; error_message?: string; has_detail: boolean }[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -159,8 +159,8 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
     { title: '状态', dataIndex: 'status', width: 70, render: (s: string, rec: { error_message?: string }) => s === 'done' ? '已完成' : s === 'processing' ? '生成中' : <span title={rec.error_message} style={{ color: '#cf1322', cursor: 'help' }}>失败</span> },
     { title: '文件数', dataIndex: 'total_images', width: 60 },
     { title: '时间', dataIndex: 'created_at', render: (t: string) => t ? new Date(t).toLocaleString() : '' },
-    { title: '操作', key: 'action', width: 130,
-      render: (_: unknown, rec: { id: number; file_available: boolean }) => (
+    { title: '操作', key: 'action', width: 180,
+      render: (_: unknown, rec: { id: number; file_available: boolean; has_detail: boolean }) => (
         <Space size="small">
           {rec.file_available
             ? <a href={exportApi.downloadUrl(rec.id)} target="_blank">下载</a>
@@ -168,6 +168,9 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
           <Popconfirm title="确定删除？" onConfirm={() => handleDeleteTask(rec.id)}>
             <Button type="link" size="small" danger>删除</Button>
           </Popconfirm>
+          {rec.has_detail
+            ? <a href={exportApi.detailUrl(rec.id)} target="_blank">详情</a>
+            : <span style={{ color: '#999' }}>详情</span>}
         </Space>
       ),
     },

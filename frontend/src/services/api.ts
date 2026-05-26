@@ -135,8 +135,9 @@ export const exportApi = {
   deleteTask: (taskId: number) =>
     api.delete(`/export/tasks/${taskId}`).then(r => r.data),
   listTasks: () =>
-    api.get<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean; error_message?: string }[]>('/export/tasks').then(r => r.data),
+    api.get<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean; error_message?: string; has_detail: boolean }[]>('/export/tasks').then(r => r.data),
   downloadUrl: (taskId: number) => `/api/export/download/${taskId}`,
+  detailUrl: (taskId: number) => `/api/export/tasks/${taskId}/detail`,
 };
 
 export const versionApi = {
