@@ -126,7 +126,7 @@ export const exportApi = {
   uploadExcel: (file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-    return api.post<{ columns: string[]; sheets: string[]; upload_id: string }>('/export/excel', fd).then(r => r.data);
+    return api.post<{ columns: string[]; sheets: string[]; sheet_columns: Record<string, string[]>; upload_id: string }>('/export/excel', fd).then(r => r.data);
   },
   generateZip: (data: { barcode_column: string; image_type: string; upload_id: string; sheet_name?: string; selected_barcodes?: string[]; flat?: boolean }) =>
     api.post<{ task_id: number; total_images: number; total_barcodes: number; excluded_barcodes: number }>('/export/zip', data).then(r => r.data),

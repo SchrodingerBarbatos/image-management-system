@@ -194,15 +194,30 @@ def upload_excel():
         wb.close()
         return jsonify({'error': 'Excel 文件中没有工作表'}), 400
 
-    ws = wb[sheet_names[0]] if sheet_names else wb.active
-    headers = [str(cell.value) for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    sheet_columns = {}
+    for sname in sheet_names:
+        ws = wb[sname]
+        row = next(ws.iter_rows(min_row=1, max_row=1), None)
+        if row is None:
+            sheet_columns[sname] = []
+        else:
+            headers = [str(cell.value) for cell in row]
+            if not headers or all(h == 'None' for h in headers):
+                sheet_columns[sname] = []
+            else:
+                sheet_columns[sname] = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
     wb.close()
 
-    if not headers or all(h == 'None' for h in headers):
-        return jsonify({'error': '表头为空，请检查 Excel 文件'}), 400
+    if not sheet_columns or all(v == [] for v in sheet_columns.values()):
+        return jsonify({'error': '所有工作表的表头均为空，请检查 Excel 文件'}), 400
 
-    column_names = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
-    return jsonify({'columns': column_names, 'sheets': sheet_names, 'upload_id': upload_id})
+    first_sheet = sheet_names[0] if sheet_names else ''
+    return jsonify({
+        'columns': sheet_columns.get(first_sheet, []),
+        'sheets': sheet_names,
+        'sheet_columns': sheet_columns,
+        'upload_id': upload_id,
+    })
 
 
 @export_bp.route('/export/zip', methods=['POST'])

@@ -14,6 +14,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
   const [step, setStep] = useState(0);
   const [columns, setColumns] = useState<string[]>([]);
   const [sheets, setSheets] = useState<string[]>([]);
+  const [sheetColumns, setSheetColumns] = useState<Record<string, string[]>>({});
   const [selectedSheet, setSelectedSheet] = useState('');
   const [uploadId, setUploadId] = useState('');
   const [barcodeColumn, setBarcodeColumn] = useState('');
@@ -92,6 +93,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
       const res = await exportApi.uploadExcel(file);
       setColumns(res.columns);
       setSheets(res.sheets || []);
+      setSheetColumns(res.sheet_columns || {});
       setSelectedSheet(res.sheets?.[0] || '');
       setUploadId(res.upload_id);
       setStep(1);
@@ -149,7 +151,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
 
   const reset = () => {
     clearTimer();
-    setStep(0); setColumns([]); setSheets([]); setSelectedSheet(''); setUploadId(''); setBarcodeColumn(''); setTaskId(null);
+    setStep(0); setColumns([]); setSheets([]); setSheetColumns({}); setSelectedSheet(''); setUploadId(''); setBarcodeColumn(''); setTaskId(null);
     setProgress(0); setProgressTotal(0); setShowHistory(false); setTaskList([]); setErrorMessage('');
     setFolderMode('folder'); setImageType('all');
   };
@@ -215,7 +217,7 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
           {sheets.length > 1 && (
             <div>
               <span>工作表：</span>
-              <Select value={selectedSheet} onChange={setSelectedSheet} style={{ width: '100%' }}
+              <Select value={selectedSheet} onChange={(v) => { setSelectedSheet(v); setColumns(sheetColumns[v] || []); setBarcodeColumn(''); }} style={{ width: '100%' }}
                 options={sheets.map(s => ({ value: s, label: s }))} />
             </div>
           )}
