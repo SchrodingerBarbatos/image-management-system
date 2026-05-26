@@ -1,4 +1,4 @@
-import os, sys
+import os, sys, datetime
 import ctypes
 import threading
 import socket
@@ -150,6 +150,75 @@ with engine.connect() as conn:
 if need_rebuild:
     from versioning import update_all_versions
     threading.Thread(target=update_all_versions, daemon=True).start()
+
+# Migration: create batch_task and related tables if not exist
+with engine.connect() as conn:
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS batch_task (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            progress INTEGER DEFAULT 0,
+            total INTEGER DEFAULT 0,
+            result_count INTEGER DEFAULT 0,
+            error_message TEXT DEFAULT '',
+            params_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now')),
+            started_at TEXT DEFAULT '',
+            finished_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_task_type_status ON batch_task (task_type, status, created_at)'))
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS duplicate_scan_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES batch_task(id),
+            barcode TEXT NOT NULL,
+            image_type TEXT NOT NULL,
+            version_label TEXT,
+            version_folder_ctime TEXT,
+            folder_ctime TEXT NOT NULL,
+            image_count INTEGER DEFAULT 0,
+            total_file_size INTEGER DEFAULT 0,
+            delete_status TEXT DEFAULT 'pending',
+            delete_message TEXT DEFAULT '',
+            deleted_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dup_task_id ON duplicate_scan_result (task_id)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dup_task_barcode ON duplicate_scan_result (task_id, barcode)'))
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS low_version_scan_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES batch_task(id),
+            barcode TEXT NOT NULL,
+            image_type TEXT NOT NULL,
+            version_label TEXT,
+            folder_ctime TEXT NOT NULL,
+            image_count INTEGER DEFAULT 0,
+            total_file_size INTEGER DEFAULT 0,
+            is_latest INTEGER DEFAULT 0,
+            is_only_version INTEGER DEFAULT 0,
+            meets_threshold INTEGER DEFAULT 0,
+            main_threshold INTEGER DEFAULT 0,
+            detail_threshold INTEGER DEFAULT 0,
+            status_tag TEXT DEFAULT 'will_delete',
+            delete_status TEXT DEFAULT 'pending',
+            delete_message TEXT DEFAULT '',
+            deleted_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_lv_task_id ON low_version_scan_result (task_id)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_lv_task_barcode ON low_version_scan_result (task_id, barcode)'))
+    conn.commit()
+
+    # Mark stale running tasks as interrupted on startup
+    _tasks = conn.execute(text("SELECT id FROM batch_task WHERE status = 'running'")).fetchall()
+    if _tasks:
+        conn.execute(text("UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务中断', finished_at = :now WHERE status = 'running'"), {'now': datetime.datetime.now().isoformat()})
+        conn.commit()
+        import logging
+        logging.getLogger(__name__).info("Marked %d running batch tasks as interrupted on startup", len(_tasks))
 
 from routes.scan import scan_bp
 from routes.images import images_bp

@@ -97,3 +97,69 @@ class ScanLog(Base):
     message = Column(Text, default='')
     details = Column(Text, default='')
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
+
+
+class BatchTask(Base):
+    __tablename__ = 'batch_task'
+    id = Column(Integer, primary_key=True)
+    task_type = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default='queued')
+    progress = Column(Integer, default=0)
+    total = Column(Integer, default=0)
+    result_count = Column(Integer, default=0)
+    error_message = Column(Text, default='')
+    params_json = Column(Text, default='{}')
+    created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
+    started_at = Column(Text, default='')
+    finished_at = Column(Text, default='')
+
+    __table_args__ = (
+        Index('idx_task_type_status', 'task_type', 'status', 'created_at'),
+    )
+
+
+class DuplicateScanResult(Base):
+    __tablename__ = 'duplicate_scan_result'
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey('batch_task.id'), nullable=False)
+    barcode = Column(Text, nullable=False)
+    image_type = Column(Text, nullable=False)
+    version_label = Column(Text)
+    version_folder_ctime = Column(Text)
+    folder_ctime = Column(Text, nullable=False)
+    image_count = Column(Integer, default=0)
+    total_file_size = Column(Integer, default=0)
+    delete_status = Column(Text, default='pending')
+    delete_message = Column(Text, default='')
+    deleted_at = Column(Text, default='')
+
+    __table_args__ = (
+        Index('idx_dup_task_id', 'task_id'),
+        Index('idx_dup_task_barcode', 'task_id', 'barcode'),
+    )
+
+
+class LowVersionScanResult(Base):
+    __tablename__ = 'low_version_scan_result'
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey('batch_task.id'), nullable=False)
+    barcode = Column(Text, nullable=False)
+    image_type = Column(Text, nullable=False)
+    version_label = Column(Text)
+    folder_ctime = Column(Text, nullable=False)
+    image_count = Column(Integer, default=0)
+    total_file_size = Column(Integer, default=0)
+    is_latest = Column(Boolean, default=False)
+    is_only_version = Column(Boolean, default=False)
+    meets_threshold = Column(Boolean, default=False)
+    main_threshold = Column(Integer, default=0)
+    detail_threshold = Column(Integer, default=0)
+    status_tag = Column(Text, default='will_delete')
+    delete_status = Column(Text, default='pending')
+    delete_message = Column(Text, default='')
+    deleted_at = Column(Text, default='')
+
+    __table_args__ = (
+        Index('idx_lv_task_id', 'task_id'),
+        Index('idx_lv_task_barcode', 'task_id', 'barcode'),
+    )
