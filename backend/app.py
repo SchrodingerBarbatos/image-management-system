@@ -328,6 +328,14 @@ def _configure_cors(app, port):
     CORS(app, origins=origins)
 
 
+def _cleanup_exports_on_startup():
+    """Shared startup cleanup — reset stale processing first, then remove old
+    export records.  Called by both tray and non-tray startup paths."""
+    from routes.export import cleanup_old_exports, reset_stale_processing
+    reset_stale_processing()
+    cleanup_old_exports()
+
+
 def start_tray(port, open_browser_on_start=True):
     import pystray
     from PIL import Image as PILImage
@@ -344,9 +352,7 @@ def start_tray(port, open_browser_on_start=True):
     logger = logging.getLogger(__name__)
 
     # Cleanup old export tasks on startup
-    from routes.export import cleanup_old_exports, reset_stale_processing
-    reset_stale_processing()
-    cleanup_old_exports()
+    _cleanup_exports_on_startup()
 
     # Check port availability with fallback
     resolved = _resolve_port('127.0.0.1', port)
@@ -435,8 +441,7 @@ if __name__ == '__main__':
             if resolved != port:
                 print(f"Port {port} in use, using {resolved} instead")
             port = resolved
-            from routes.export import cleanup_old_exports
-            cleanup_old_exports()
+            _cleanup_exports_on_startup()
             _ensure_firewall_rule(port)
             _configure_cors(app, port)
             if args.open_browser:

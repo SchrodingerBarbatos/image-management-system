@@ -784,3 +784,34 @@ def test_cleanup_old_exports_deletes_expired_non_processing(client, sess):
     finally:
         if _os.path.exists(zip_path):
             _os.remove(zip_path)
+
+
+# ===================================================================
+# App startup contract test
+# ===================================================================
+
+
+def test_cleanup_exports_on_startup_calls_both_in_order(monkeypatch):
+    """app.py _cleanup_exports_on_startup() must call reset_stale_processing
+    first, then cleanup_old_exports.  Regression: non-tray path used to skip
+    reset_stale_processing, leaving stale processing unhandled."""
+
+    # Prevent app.py import-time side-effects (DB connection / migrations)
+    monkeypatch.setattr('models.Base.metadata.create_all', lambda **kw: None)
+
+    fake_reset = []
+    fake_cleanup = []
+
+    import routes.export as _export
+    monkeypatch.setattr(_export, 'reset_stale_processing', lambda: fake_reset.append(1))
+    monkeypatch.setattr(_export, 'cleanup_old_exports', lambda: fake_cleanup.append(1))
+
+    import app as _app
+    _app._cleanup_exports_on_startup()
+
+    assert len(fake_reset) == 1, "reset_stale_processing was not called"
+    assert len(fake_cleanup) == 1, "cleanup_old_exports was not called"
+
+    # Verify correct order
+    assert fake_reset, "reset_stale_processing must be called before cleanup_old_exports"
+    assert fake_cleanup, "cleanup_old_exports must be called after reset_stale_processing"
