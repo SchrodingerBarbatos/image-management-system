@@ -204,3 +204,111 @@ export const batchApi = {
     api.post<BatchDeleteResult>('/batch/delete-low-versions', { items, delete_files: deleteFiles, main_threshold: mainThreshold, detail_threshold: detailThreshold }).then(r => r.data),
 };
 
+// ---------- Batch Task Framework ----------
+
+export interface BatchTaskInfo {
+  id: number;
+  task_type: 'duplicate_scan' | 'low_version_scan';
+  status: 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  progress: number;
+  total: number;
+  result_count: number;
+  error_message: string;
+  params_json: string;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface DuplicateScanResultItem {
+  id: number;
+  barcode: string;
+  image_type: string;
+  version_label: string;
+  version_folder_ctime: string;
+  folder_ctime: string;
+  image_count: number;
+  total_file_size: number;
+  delete_status: 'pending' | 'deleted' | 'skipped' | 'failed';
+  delete_message: string;
+  deleted_at: string;
+}
+
+export interface LowVersionScanResultItem {
+  id: number;
+  barcode: string;
+  image_type: string;
+  version_label: string;
+  folder_ctime: string;
+  image_count: number;
+  total_file_size: number;
+  is_latest: boolean;
+  is_only_version: boolean;
+  meets_threshold: boolean;
+  main_threshold: number;
+  detail_threshold: number;
+  status_tag: 'will_delete' | 'keep_threshold' | 'keep_only' | 'keep_disabled';
+  delete_status: 'pending' | 'deleted' | 'skipped' | 'failed';
+  delete_message: string;
+  deleted_at: string;
+}
+
+export interface PaginatedResults<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface TaskBatchDeleteResult {
+  deleted_image_count: number;
+  skipped_count: number;
+  affected_barcodes: string[];
+}
+
+export const taskApi = {
+  // Common task endpoints
+  listTasks: (params?: { type?: string; status?: string }) =>
+    api.get<BatchTaskInfo[]>('/tasks', { params }).then(r => r.data),
+  getTask: (taskId: number) =>
+    api.get<BatchTaskInfo>(`/tasks/${taskId}`).then(r => r.data),
+  deleteTask: (taskId: number) =>
+    api.delete<{ ok: true } | { error: string }>(`/tasks/${taskId}`).then(r => r.data),
+
+  // Duplicate scan
+  createDuplicateScan: () =>
+    api.post<BatchTaskInfo>('/batch/duplicate-scan/tasks').then(r => r.data),
+  listDuplicateScanTasks: () =>
+    api.get<BatchTaskInfo[]>('/batch/duplicate-scan/tasks').then(r => r.data),
+  getDuplicateScanTask: (taskId: number) =>
+    api.get<BatchTaskInfo>(`/batch/duplicate-scan/tasks/${taskId}`).then(r => r.data),
+  getDuplicateScanResults: (taskId: number, page: number, pageSize: number) =>
+    api.get<PaginatedResults<DuplicateScanResultItem>>(`/batch/duplicate-scan/tasks/${taskId}/results`, {
+      params: { page, page_size: pageSize },
+    }).then(r => r.data),
+  deleteDuplicateScanTask: (taskId: number) =>
+    api.delete(`/batch/duplicate-scan/tasks/${taskId}`).then(r => r.data),
+  deleteDuplicateScanResults: (taskId: number, resultIds: number[], deleteFiles: boolean) =>
+    api.post<TaskBatchDeleteResult>(`/batch/duplicate-scan/tasks/${taskId}/delete`, {
+      mode: 'selected', result_ids: resultIds, delete_files: deleteFiles,
+    }).then(r => r.data),
+
+  // Low version scan
+  createLowVersionScan: (params: { main_enabled: boolean; main_threshold: number; detail_enabled: boolean; detail_threshold: number }) =>
+    api.post<BatchTaskInfo>('/batch/low-version-scan/tasks', params).then(r => r.data),
+  listLowVersionScanTasks: () =>
+    api.get<BatchTaskInfo[]>('/batch/low-version-scan/tasks').then(r => r.data),
+  getLowVersionScanTask: (taskId: number) =>
+    api.get<BatchTaskInfo>(`/batch/low-version-scan/tasks/${taskId}`).then(r => r.data),
+  getLowVersionScanResults: (taskId: number, page: number, pageSize: number, filters?: { status_tag?: string; delete_status?: string }) =>
+    api.get<PaginatedResults<LowVersionScanResultItem>>(`/batch/low-version-scan/tasks/${taskId}/results`, {
+      params: { page, page_size: pageSize, ...filters },
+    }).then(r => r.data),
+  deleteLowVersionScanTask: (taskId: number) =>
+    api.delete(`/batch/low-version-scan/tasks/${taskId}`).then(r => r.data),
+  deleteLowVersionScanResults: (taskId: number, resultIds: number[], deleteFiles: boolean) =>
+    api.post<TaskBatchDeleteResult>(`/batch/low-version-scan/tasks/${taskId}/delete`, {
+      mode: 'selected', result_ids: resultIds, delete_files: deleteFiles,
+    }).then(r => r.data),
+};
+
