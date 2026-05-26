@@ -1,4 +1,4 @@
-import json, logging
+import json, logging, os, datetime
 from flask import Blueprint, request, jsonify
 from sqlalchemy import or_, select, func
 from models import (
@@ -224,6 +224,17 @@ def delete_task_route(task_id):
     return jsonify(result)
 
 
+@batch_tasks_bp.route('/tasks/<int:task_id>/cancel', methods=['POST'])
+def cancel_task_route(task_id):
+    from task_engine import cancel_task
+    result = cancel_task(task_id)
+    if result is None:
+        return jsonify({'error': 'not found'}), 404
+    if 'error' in result:
+        return jsonify(result), 409
+    return jsonify(result)
+
+
 # ---------- Duplicate scan routes ----------
 
 @batch_tasks_bp.route('/batch/duplicate-scan/tasks', methods=['POST'])
@@ -364,11 +375,15 @@ def delete_duplicate_scan_results(task_id):
     deleted_image_count = 0
     skipped_count = 0
 
+    # Pre-load scan roots for path validation
+    scan_roots = {sr.id: sr.path for sr in session.query(ScanRoot).all()}
+
     for r in results:
         key = (r.barcode, r.image_type, r.folder_ctime)
         if key not in valid_duplicates:
             r.delete_status = 'skipped'
             r.delete_message = '数据已变更，不再是有效重复'
+            skipped_count += 1
             continue
 
         # Delete images matching this key
@@ -383,17 +398,47 @@ def delete_duplicate_scan_results(task_id):
         )
 
         imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
+        result_failed = False
         for img in imgs:
             if delete_files:
+                root_path = scan_roots.get(img.scan_root_id)
+                if not root_path:
+                    r.delete_status = 'failed'
+                    r.delete_message = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
+                    skipped_count += 1
+                    result_failed = True
+                    break
+
+                real_file = os.path.realpath(img.file_path)
+                real_root = os.path.realpath(root_path)
                 try:
-                    import os
+                    safe = os.path.commonpath([real_file, real_root]) == real_root
+                except ValueError:
+                    safe = False
+                if not safe:
+                    r.delete_status = 'failed'
+                    r.delete_message = '文件路径不在扫描目录下，拒绝删除'
+                    skipped_count += 1
+                    result_failed = True
+                    break
+
+                try:
                     os.remove(img.file_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    r.delete_status = 'failed'
+                    r.delete_message = f'文件删除失败: {e}'
+                    skipped_count += 1
+                    result_failed = True
+                    break
+
             session.delete(img)
             deleted_image_count += 1
 
+        if result_failed:
+            continue
+
         r.delete_status = 'deleted'
+        r.deleted_at = datetime.datetime.now().isoformat()
         affected_barcodes.add(r.barcode)
 
     session.commit()
@@ -576,6 +621,9 @@ def delete_low_version_scan_results(task_id):
     deleted_image_count = 0
     skipped_count = 0
 
+    # Pre-load scan roots for path validation
+    scan_roots = {sr.id: sr.path for sr in session.query(ScanRoot).all()}
+
     for r in results:
         barcode, image_type, folder_ctime = r.barcode, r.image_type, r.folder_ctime
         key = (barcode, image_type, folder_ctime)
@@ -607,17 +655,47 @@ def delete_low_version_scan_results(task_id):
         )
 
         imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
+        result_failed = False
         for img in imgs:
             if delete_files:
+                root_path = scan_roots.get(img.scan_root_id)
+                if not root_path:
+                    r.delete_status = 'failed'
+                    r.delete_message = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
+                    skipped_count += 1
+                    result_failed = True
+                    break
+
+                real_file = os.path.realpath(img.file_path)
+                real_root = os.path.realpath(root_path)
                 try:
-                    import os
+                    safe = os.path.commonpath([real_file, real_root]) == real_root
+                except ValueError:
+                    safe = False
+                if not safe:
+                    r.delete_status = 'failed'
+                    r.delete_message = '文件路径不在扫描目录下，拒绝删除'
+                    skipped_count += 1
+                    result_failed = True
+                    break
+
+                try:
                     os.remove(img.file_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    r.delete_status = 'failed'
+                    r.delete_message = f'文件删除失败: {e}'
+                    skipped_count += 1
+                    result_failed = True
+                    break
+
             session.delete(img)
             deleted_image_count += 1
 
+        if result_failed:
+            continue
+
         r.delete_status = 'deleted'
+        r.deleted_at = datetime.datetime.now().isoformat()
         affected_barcodes.add(barcode)
 
     session.commit()

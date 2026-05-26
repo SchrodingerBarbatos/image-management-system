@@ -1,6 +1,6 @@
 import React from 'react';
-import { Tag, Space, Button, Progress, Spin, Typography } from 'antd';
-import { BatchTaskInfo } from '../services/api';
+import { Tag, Space, Button, Progress, Spin, Typography, message } from 'antd';
+import { BatchTaskInfo, taskApi } from '../services/api';
 
 const { Text } = Typography;
 
@@ -27,6 +27,7 @@ export function TaskProgress({ task }: { task: BatchTaskInfo }) {
   if (task.status === 'done') return <Text type="success">完成（{task.result_count} 条结果）</Text>;
   if (task.status === 'error') return <Text type="danger">{task.error_message || '执行失败'}</Text>;
   if (task.status === 'interrupted') return <Text type="danger">程序中断</Text>;
+  if (task.status === 'cancelled') return <Text type="warning">已取消</Text>;
   return null;
 }
 
@@ -43,6 +44,16 @@ export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDelet
     return <Text type="secondary">暂无{typeLabel}任务</Text>;
   }
 
+  const handleCancel = async (taskId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await taskApi.cancelTask(taskId);
+      message.success('任务已取消');
+    } catch (err: any) {
+      message.error(err?.response?.data?.error || '取消失败');
+    }
+  };
+
   return (
     <div style={{ maxHeight: 300, overflowY: 'auto' }}>
       {tasks.map(task => (
@@ -54,10 +65,10 @@ export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDelet
             border: '1px solid #f0f0f0',
             borderRadius: 4,
             background: task.id === selectedTaskId ? '#e6f7ff' : undefined,
-            cursor: ['done', 'error', 'interrupted'].includes(task.status) ? 'pointer' : 'default',
+            cursor: ['done', 'error', 'interrupted', 'cancelled'].includes(task.status) ? 'pointer' : 'default',
           }}
           onClick={() => {
-            if (['done', 'error', 'interrupted'].includes(task.status)) {
+            if (['done', 'error', 'interrupted', 'cancelled'].includes(task.status)) {
               onSelectTask(task.id);
             }
           }}
@@ -69,11 +80,18 @@ export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDelet
               <Text type="secondary" style={{ fontSize: 12 }}>{task.created_at?.slice(0, 19)}</Text>
             </Space>
             <TaskProgress task={task} />
-            {['done', 'error', 'interrupted', 'cancelled'].includes(task.status) && (
-              <Button size="small" danger type="link" onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}>
-                删除记录
-              </Button>
-            )}
+            <Space>
+              {['queued'].includes(task.status) && (
+                <Button size="small" type="link" onClick={(e) => handleCancel(task.id, e)}>
+                  取消
+                </Button>
+              )}
+              {['done', 'error', 'interrupted', 'cancelled'].includes(task.status) && (
+                <Button size="small" danger type="link" onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}>
+                  删除记录
+                </Button>
+              )}
+            </Space>
           </Space>
         </div>
       ))}

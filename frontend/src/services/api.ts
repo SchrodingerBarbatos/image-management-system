@@ -274,6 +274,8 @@ export const taskApi = {
     api.get<BatchTaskInfo>(`/tasks/${taskId}`).then(r => r.data),
   deleteTask: (taskId: number) =>
     api.delete<{ ok: true } | { error: string }>(`/tasks/${taskId}`).then(r => r.data),
+  cancelTask: (taskId: number) =>
+    api.post<BatchTaskInfo>(`/tasks/${taskId}/cancel`).then(r => r.data),
 
   // Duplicate scan
   createDuplicateScan: () =>

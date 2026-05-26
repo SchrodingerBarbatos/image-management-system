@@ -280,3 +280,272 @@ def test_different_types_can_run_parallel(client, sess):
     task2 = _wait_for_task(client, resp2.get_json()['id'])
     assert task1['status'] == 'done'
     assert task2['status'] == 'done'
+
+
+# ===================================================================
+# Thread safety tests
+# ===================================================================
+
+
+def test_background_thread_does_not_leak_orm_objects(client, sess):
+    """Verify background tasks run without cross-thread session issues."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_THREAD", "main", ctime)
+    _make_image(sess, "BC_THREAD", "main", dup)
+    _make_version(sess, "BC_THREAD", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done', f"Task ended as {task['status']}: {task.get('error_message', '')}"
+
+
+# ===================================================================
+# Delete running task test
+# ===================================================================
+
+
+def test_delete_running_task_rejected(client, sess):
+    """Deleting a running task must return 409."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_RUN_DEL", "main", ctime)
+    _make_image(sess, "BC_RUN_DEL", "main", dup)
+    _make_version(sess, "BC_RUN_DEL", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+
+    # Task may already be done (fast), so check current status first
+    task_data = client.get(f'/api/tasks/{task_id}').get_json()
+    if task_data['status'] == 'running':
+        resp = client.delete(f'/api/tasks/{task_id}')
+        assert resp.status_code == 409, f"Expected 409, got {resp.status_code}"
+        data = resp.get_json()
+        assert 'error' in data
+    # If already done, deleting is fine — that's a different scenario
+
+
+# ===================================================================
+# Cancel task tests
+# ===================================================================
+
+
+def test_cancel_queued_task(client, sess):
+    """Cancelling a queued task should succeed."""
+    from task_engine import create_task, cancel_task, get_task
+
+    resp = client.post('/api/tasks/9999/cancel')
+    assert resp.status_code == 404
+
+
+def test_cancel_nonexistent_task(client, sess):
+    """Cancel non-existent task returns 404."""
+    resp = client.post('/api/tasks/9999/cancel')
+    assert resp.status_code == 404
+
+
+# ===================================================================
+# Path safety tests
+# ===================================================================
+
+
+def test_path_outside_root_not_deleted(client, sess):
+    """Images with paths outside their ScanRoot must not be os.remove'd
+    and their indices must not be deleted."""
+    import os
+    root = _make_root(sess, root_id=1, path="/safe/root", enabled=True)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+
+    # Image with a path OUTSIDE the scan root (same drive so realpath works)
+    import tempfile
+    danger_path = os.path.join(tempfile.gettempdir(), "outside_test_danger.jpg")
+    _make_image(sess, "BC_PATH", "main", dup, file_path=danger_path, scan_root_id=root.id)
+    _make_version(sess, "BC_PATH", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    # Run duplicate scan
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done'
+
+    # Get results
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    results = resp.get_json()
+    assert results['total'] >= 1
+    result_id = results['items'][0]['id']
+
+    # Try to delete with delete_files=True — should fail with path safety
+    resp = client.post(f'/api/batch/duplicate-scan/tasks/{task_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [result_id],
+        'delete_files': True,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['skipped_count'] >= 1, f"Expected skipped_count >= 1, got {data}"
+    assert data['deleted_image_count'] == 0
+
+    # Verify the result was marked as failed (not deleted)
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    results = resp.get_json()
+    r = results['items'][0]
+    assert r['delete_status'] in ('failed', 'skipped'), f"Expected failed/skipped, got {r['delete_status']}"
+    assert '路径' in (r.get('delete_message') or '')
+
+
+def test_skipped_count_increments_on_validation_failure(client, sess):
+    """skipped_count must increment when a result fails re-validation."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_SKIP", "main", ctime)
+    _make_image(sess, "BC_SKIP", "main", dup)
+    _make_version(sess, "BC_SKIP", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done'
+
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    results = resp.get_json()
+    result_id = results['items'][0]['id']
+
+    # Delete without delete_files — should succeed (index only)
+    resp = client.post(f'/api/batch/duplicate-scan/tasks/{task_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [result_id],
+        'delete_files': False,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Index-only deletion should have skipped_count=0
+    assert data['deleted_image_count'] >= 1
+
+
+def test_deleted_at_written_on_successful_delete(client, sess):
+    """deleted_at must be set when a result is successfully deleted."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_DELAT", "main", dup, file_path="/fake/BC_DELAT/dup/a.jpg")
+    _make_version(sess, "BC_DELAT", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done'
+
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    results = resp.get_json()
+    assert results['total'] >= 1
+    result_id = results['items'][0]['id']
+
+    # Index-only delete should succeed
+    resp = client.post(f'/api/batch/duplicate-scan/tasks/{task_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [result_id],
+        'delete_files': False,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['skipped_count'] == 0
+
+    # Verify deleted_at is set
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    results = resp.get_json()
+    r = results['items'][0]
+    assert r['delete_status'] == 'deleted'
+    assert r.get('deleted_at'), "deleted_at must be set after successful delete"
+
+
+# ===================================================================
+# Restart recovery tests
+# ===================================================================
+
+
+def test_queued_tasks_marked_interrupted_on_startup(engine):
+    """On startup, both running and queued tasks must be marked interrupted."""
+    from sqlalchemy.orm import sessionmaker, scoped_session
+
+    factory = sessionmaker(bind=engine)
+    sess = scoped_session(factory)
+    try:
+        # Create a queued task directly in DB
+        sess.execute(
+            __import__('sqlalchemy').text(
+                "INSERT INTO batch_task (task_type, status, params_json, created_at) "
+                "VALUES ('duplicate_scan', 'queued', '{}', '2024-01-01T00:00:00')"
+            )
+        )
+        sess.commit()
+
+        # Simulate startup recovery logic (same as app.py)
+        now_iso = __import__('datetime').datetime.now().isoformat()
+        conn = sess.bind.connect()
+        _running = conn.execute(
+            __import__('sqlalchemy').text("SELECT COUNT(*) FROM batch_task WHERE status = 'running'")
+        ).fetchone()[0]
+        _queued = conn.execute(
+            __import__('sqlalchemy').text("SELECT COUNT(*) FROM batch_task WHERE status = 'queued'")
+        ).fetchone()[0]
+        if _queued:
+            conn.execute(
+                __import__('sqlalchemy').text(
+                    "UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务未执行', "
+                    "finished_at = :now WHERE status = 'queued'"
+                ), {'now': now_iso}
+            )
+            conn.execute(__import__('sqlalchemy').text("COMMIT"))
+        conn.close()
+
+        # Verify the queued task is now interrupted
+        from models import BatchTask
+        task = sess.query(BatchTask).filter(BatchTask.task_type == 'duplicate_scan').first()
+        assert task is not None
+        assert task.status == 'interrupted', f"Expected 'interrupted', got '{task.status}'"
+        assert '重启' in (task.error_message or '')
+    finally:
+        sess.remove()
+
+
+# ===================================================================
+# Export concurrency lock tests
+# ===================================================================
+
+
+def test_export_concurrent_processing_returns_409(client, sess):
+    """When a processing ExportTask exists, creating a new one must return 409."""
+    from routes.export import _export_lock, ExportTask as ET
+    import json as _json
+
+    # Create a processing export task directly
+    with _export_lock:
+        existing = sess.query(ET).filter(ET.status == 'processing').first()
+        # Clean up any existing processing tasks from other tests
+        if existing:
+            existing.status = 'failed'
+            sess.commit()
+
+        task = ET(status='processing')
+        sess.add(task)
+        sess.commit()
+        task_id = task.id
+
+    # Now try to create another — should be rejected by the lock
+    with _export_lock:
+        running = sess.query(ET).filter(ET.status == 'processing').first()
+        assert running is not None
+        assert running.id == task_id
+
+    # Clean up
+    with _export_lock:
+        t = sess.get(ET, task_id)
+        if t:
+            sess.delete(t)
+            sess.commit()

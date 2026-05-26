@@ -212,13 +212,24 @@ with engine.connect() as conn:
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_lv_task_barcode ON low_version_scan_result (task_id, barcode)'))
     conn.commit()
 
-    # Mark stale running tasks as interrupted on startup
-    _tasks = conn.execute(text("SELECT id FROM batch_task WHERE status = 'running'")).fetchall()
-    if _tasks:
-        conn.execute(text("UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务中断', finished_at = :now WHERE status = 'running'"), {'now': datetime.datetime.now().isoformat()})
+    # Mark stale running and queued tasks as interrupted on startup
+    now_iso = datetime.datetime.now().isoformat()
+    _running = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'running'")).fetchone()[0]
+    _queued = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'queued'")).fetchone()[0]
+    if _running:
+        conn.execute(text(
+            "UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务中断', finished_at = :now WHERE status = 'running'"
+        ), {'now': now_iso})
+    if _queued:
+        conn.execute(text(
+            "UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务未执行', finished_at = :now WHERE status = 'queued'"
+        ), {'now': now_iso})
+    if _running or _queued:
         conn.commit()
         import logging
-        logging.getLogger(__name__).info("Marked %d running batch tasks as interrupted on startup", len(_tasks))
+        logging.getLogger(__name__).info(
+            "Marked %d running and %d queued batch tasks as interrupted on startup", _running, _queued
+        )
 
 from routes.scan import scan_bp
 from routes.images import images_bp

@@ -210,11 +210,15 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   // ===== Duplicate selection helpers =====
   const toggleDupAll = () => {
     if (!dupResults || dupResults.items.length === 0) return;
-    if (dupResultSelectedIds.size === dupResults.items.length) {
-      setDupResultSelectedIds(new Set());
+    const pageIds = dupResults.items.map(r => r.id);
+    const allPageSelected = pageIds.every(id => dupResultSelectedIds.has(id));
+    const next = new Set(dupResultSelectedIds);
+    if (allPageSelected) {
+      pageIds.forEach(id => next.delete(id));
     } else {
-      setDupResultSelectedIds(new Set(dupResults.items.map(r => r.id)));
+      pageIds.forEach(id => next.add(id));
     }
+    setDupResultSelectedIds(next);
   };
 
   const toggleDupOne = (id: number) => {
@@ -228,11 +232,15 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     if (!lowResults || lowResults.items.length === 0) return;
     const selectable = lowResults.items.filter(r => r.status_tag === 'will_delete');
     if (selectable.length === 0) return;
-    if (lowResultSelectedIds.size === selectable.length) {
-      setLowResultSelectedIds(new Set());
+    const selectableIds = selectable.map(r => r.id);
+    const allSelected = selectableIds.every(id => lowResultSelectedIds.has(id));
+    const next = new Set(lowResultSelectedIds);
+    if (allSelected) {
+      selectableIds.forEach(id => next.delete(id));
     } else {
-      setLowResultSelectedIds(new Set(selectable.map(r => r.id)));
+      selectableIds.forEach(id => next.add(id));
     }
+    setLowResultSelectedIds(next);
   };
 
   const toggleLowOne = (id: number) => {
@@ -375,13 +383,15 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   ];
 
   // ===== Computed values =====
-  const dupAllChecked = dupResults !== null && dupResults.items.length > 0 && dupResultSelectedIds.size === dupResults.items.length;
-  const dupIndeterminate = dupResultSelectedIds.size > 0 && (!dupResults || dupResultSelectedIds.size < dupResults.items.length);
+  const dupPageIds = dupResults ? dupResults.items.map(r => r.id) : [];
+  const dupAllChecked = dupPageIds.length > 0 && dupPageIds.every(id => dupResultSelectedIds.has(id));
+  const dupIndeterminate = dupPageIds.some(id => dupResultSelectedIds.has(id)) && !dupAllChecked;
   const dupSelectedCount = dupResultSelectedIds.size;
 
-  const lowSelectableCount = lowResults ? lowResults.items.filter(r => r.status_tag === 'will_delete').length : 0;
-  const lowAllChecked = lowSelectableCount > 0 && lowResultSelectedIds.size === lowSelectableCount;
-  const lowIndeterminate = lowResultSelectedIds.size > 0 && lowResultSelectedIds.size < lowSelectableCount;
+  const lowSelectable = lowResults ? lowResults.items.filter(r => r.status_tag === 'will_delete') : [];
+  const lowSelectableCount = lowSelectable.length;
+  const lowAllChecked = lowSelectableCount > 0 && lowSelectable.every(r => lowResultSelectedIds.has(r.id));
+  const lowIndeterminate = lowSelectable.some(r => lowResultSelectedIds.has(r.id)) && !lowAllChecked;
   const lowSelectedCount = lowResultSelectedIds.size;
 
   // ===== Tab items =====

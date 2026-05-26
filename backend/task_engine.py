@@ -68,14 +68,18 @@ def _start_task_thread(task):
         _log.error("No handler for task_type %s", task.task_type)
         return
 
+    # Extract primitives before spawning thread — the ORM task object
+    # belongs to a session that must not be shared across threads.
+    task_id = task.id
+    task_type = task.task_type
+
     def _run():
-        local_task_id = task.id
         try:
-            handler(local_task_id)
+            handler(task_id)
         except Exception as e:
-            _log.exception("Handler for task %d failed", local_task_id)
+            _log.exception("Handler for task %d failed", task_id)
             try:
-                t = session.get(BatchTask, local_task_id)
+                t = session.get(BatchTask, task_id)
                 if t and t.status == 'running':
                     t.status = 'error'
                     t.error_message = f"{e}\n{traceback.format_exc()}"
@@ -85,7 +89,7 @@ def _start_task_thread(task):
                 session.rollback()
         finally:
             session.remove()
-            _on_task_done(task.task_type)
+            _on_task_done(task_type)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
