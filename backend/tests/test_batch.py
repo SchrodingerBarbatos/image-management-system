@@ -1,6 +1,7 @@
-"""Tests for batch delete endpoints — server-side revalidation and edge cases.
+"""Tests for batch endpoints — list duplicates, delete duplicates, low versions.
 
 Uses in-memory SQLite and Flask test client to verify that:
+- Duplicate listing returns correct groups and counts
 - Valid duplicate/low-version items are deleted successfully
 - Expired items (data changed since preview) return 409
 - Items belonging to disabled scan roots return 403
@@ -100,6 +101,149 @@ def _make_version(sess, barcode, image_type, folder_ctime,
     sess.add(v)
     sess.commit()
     return v
+
+
+# ===================================================================
+# list_duplicates  tests
+# ===================================================================
+
+
+def test_list_duplicates_basic(client, sess):
+    """Basic correctness: duplicate folders appear in response with correct counts."""
+    _make_root(sess)
+    ctime_v1 = "2024-06-01T00:00:00"
+    ctime_dup = "2024-05-01T00:00:00"
+
+    # Version v1 has one duplicate folder
+    _make_image(sess, "BC1", "main", ctime_v1)
+    _make_image(sess, "BC1", "main", ctime_dup)
+    _make_version(sess, "BC1", "main", ctime_v1, version_label="v1",
+                  duplicate_mtimes=json.dumps([ctime_dup]))
+
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['total_duplicate_count'] == 1
+    assert data['total_barcode_count'] == 1
+    assert len(data['groups']) == 1
+    g = data['groups'][0]
+    assert g['barcode'] == 'BC1'
+    assert g['image_type'] == 'main'
+    assert g['version_label'] == 'v1'
+    assert g['folder_ctime'] == ctime_dup
+    assert g['image_count'] == 1
+
+
+def test_list_duplicates_empty(client, sess):
+    """No duplicates: returns empty groups with zero counts."""
+    _make_root(sess)
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['groups'] == []
+    assert data['total_duplicate_count'] == 0
+    assert data['total_barcode_count'] == 0
+
+
+def test_list_duplicates_empty_duplicate_mtimes(client, sess):
+    """Versions with empty duplicate_mtimes are not included."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    _make_image(sess, "BC1", "main", ctime)
+    _make_version(sess, "BC1", "main", ctime, duplicate_mtimes="[]")
+
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['groups'] == []
+
+
+def test_list_duplicates_multiple_dup_ctimes(client, sess):
+    """One version with multiple duplicate_mtimes produces multiple groups."""
+    _make_root(sess)
+    ctime_v1 = "2024-06-01T00:00:00"
+    dup_a = "2024-05-01T00:00:00"
+    dup_b = "2024-04-01T00:00:00"
+
+    _make_image(sess, "BC1", "main", ctime_v1)
+    _make_image(sess, "BC1", "main", dup_a)
+    _make_image(sess, "BC1", "main", dup_b)
+    _make_version(sess, "BC1", "main", ctime_v1, version_label="v1",
+                  duplicate_mtimes=json.dumps([dup_a, dup_b]))
+
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['total_duplicate_count'] == 2
+    assert len(data['groups']) == 2
+    ctimes = {g['folder_ctime'] for g in data['groups']}
+    assert ctimes == {dup_a, dup_b}
+
+
+def test_list_duplicates_dedup_across_versions(client, sess):
+    """Same duplicate key across two versions is reported only once."""
+    _make_root(sess)
+    ctime_v1 = "2024-06-01T00:00:00"
+    ctime_v2 = "2024-07-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+
+    _make_image(sess, "BC1", "main", ctime_v1)
+    _make_image(sess, "BC1", "main", ctime_v2)
+    _make_image(sess, "BC1", "main", dup)
+    _make_version(sess, "BC1", "main", ctime_v1, version_label="v2",
+                  duplicate_mtimes=json.dumps([dup]))
+    _make_version(sess, "BC1", "main", ctime_v2, version_label="v1",
+                  duplicate_mtimes=json.dumps([dup]))
+
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Same (barcode, image_type, dup_ctime) should be de-duplicated
+    assert data['total_duplicate_count'] == 1
+    assert len(data['groups']) == 1
+
+
+def test_list_duplicates_excludes_disabled_roots(client, sess):
+    """Images from disabled scan roots are not counted."""
+    _make_root(sess, root_id=1, path="/enabled", enabled=True)
+    _make_root(sess, root_id=2, path="/disabled", enabled=False)
+    ctime_v1 = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+
+    # Image in duplicate folder is on a disabled root — should be excluded
+    _make_image(sess, "BC1", "main", ctime_v1, scan_root_id=1)
+    _make_image(sess, "BC1", "main", dup, scan_root_id=2)
+    _make_version(sess, "BC1", "main", ctime_v1, version_label="v1",
+                  duplicate_mtimes=json.dumps([dup]))
+
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Duplicate folder has no images in enabled roots → excluded from groups
+    assert data['total_duplicate_count'] == 0
+
+
+def test_list_duplicates_multiple_barcodes(client, sess):
+    """Duplicates across multiple barcodes are all reported."""
+    _make_root(sess)
+    ctime_a = "2024-06-01T00:00:00"
+    dup_a = "2024-05-01T00:00:00"
+    ctime_b = "2024-06-01T00:00:00"
+    dup_b = "2024-05-01T00:00:00"
+
+    _make_image(sess, "BC1", "main", ctime_a)
+    _make_image(sess, "BC1", "main", dup_a)
+    _make_image(sess, "BC2", "detail", ctime_b)
+    _make_image(sess, "BC2", "detail", dup_b)
+    _make_version(sess, "BC1", "main", ctime_a, duplicate_mtimes=json.dumps([dup_a]))
+    _make_version(sess, "BC2", "detail", ctime_b, duplicate_mtimes=json.dumps([dup_b]))
+
+    resp = client.get('/api/batch/duplicates')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['total_duplicate_count'] == 2
+    assert data['total_barcode_count'] == 2
+    assert len(data['groups']) == 2
 
 
 # ===================================================================

@@ -1,7 +1,7 @@
 import json, os, re, logging
 from collections import defaultdict
 from flask import Blueprint, request, jsonify
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from models import session, Image, ImageVersion, ScanRoot
 from versioning import update_versions_for_barcode
 
@@ -15,25 +15,27 @@ _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     """删除指定条码+类型+文件夹下 active+confirmed+enabled 的图片，返回删除数量。
     过滤条件与扫描端点一致，确保预览和实际操作匹配。"""
-    imgs = session.query(Image).filter(
+    # Subquery to get matching image IDs (join with ScanRoot for enabled check)
+    match_ids = select(Image.id).where(
         Image.barcode == barcode,
         Image.image_type == image_type,
         Image.folder_ctime == folder_ctime,
         Image.status == 'active',
         Image.confirmed == True,
-    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).where(
         ScanRoot.enabled == True,
-    ).all()
-    count = 0
-    for img in imgs:
-        if delete_files:
+    )
+    if delete_files:
+        imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
+        for img in imgs:
             try:
                 os.remove(img.file_path)
             except OSError:
                 _log.warning("Failed to delete file: %s", img.file_path)
-        session.delete(img)
-        count += 1
-    return count
+            session.delete(img)
+        return len(imgs)
+    else:
+        return session.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
 
 
 def _check_disabled_scan_roots(items):
@@ -59,10 +61,10 @@ def _check_disabled_scan_roots(items):
     return disabled_count
 
 
-def _compute_folder_stats():
-    """Return {(barcode, image_type, folder_ctime): (count, total_size)}
-    for all active+confirmed images in enabled scan roots."""
-    rows = session.query(
+def _build_image_stats_query():
+    """Return a base GROUP BY query for (barcode, image_type, folder_ctime) stats,
+    filtered to active+confirmed images in enabled scan roots."""
+    return session.query(
         Image.barcode, Image.image_type, Image.folder_ctime,
         func.count(Image.id).label('cnt'),
         func.sum(Image.file_size).label('total_sz'),
@@ -71,7 +73,13 @@ def _compute_folder_stats():
         Image.confirmed == True,
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
         ScanRoot.enabled == True,
-    ).group_by(Image.barcode, Image.image_type, Image.folder_ctime).all()
+    ).group_by(Image.barcode, Image.image_type, Image.folder_ctime)
+
+
+def _compute_folder_stats():
+    """Return {(barcode, image_type, folder_ctime): (count, total_size)}
+    for all active+confirmed images in enabled scan roots."""
+    rows = _build_image_stats_query().all()
     stats = {}
     for row in rows:
         stats[(row.barcode, row.image_type, row.folder_ctime)] = (row.cnt, row.total_sz or 0)
@@ -86,9 +94,8 @@ def list_duplicates():
         ImageVersion.duplicate_mtimes != '[]',
     ).all()
 
-    groups = []
-    seen = set()
-
+    # Build deduplicated key -> version info map
+    dup_map = {}  # (barcode, image_type, dup_ctime) -> {version_label, version_folder_ctime}
     for v in versions:
         try:
             dup_ctimes = json.loads(v.duplicate_mtimes)
@@ -98,30 +105,48 @@ def list_duplicates():
             continue
         for dup_ctime in dup_ctimes:
             key = (v.barcode, v.image_type, dup_ctime)
-            if key in seen:
-                continue
-            seen.add(key)
-            imgs = session.query(Image).filter(
-                Image.barcode == v.barcode,
-                Image.image_type == v.image_type,
-                Image.folder_ctime == dup_ctime,
-                Image.status == 'active',
-                Image.confirmed == True,
-            ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-                ScanRoot.enabled == True,
-            ).all()
-            if imgs:
-                groups.append({
-                    'barcode': v.barcode,
-                    'image_type': v.image_type,
-                    'version_label': v.version_label,
-                    'version_folder_ctime': v.folder_ctime,
-                    'folder_ctime': dup_ctime,
-                    'image_count': len(imgs),
-                    'total_file_size': sum(img.file_size for img in imgs),
-                })
+            if key not in dup_map:
+                dup_map[key] = {'version_label': v.version_label, 'version_folder_ctime': v.folder_ctime}
 
-    # Sort by barcode then image_type
+    if not dup_map:
+        return jsonify({'groups': [], 'total_duplicate_count': 0, 'total_barcode_count': 0})
+
+    # Batch query: chunked GROUP BY to avoid N+1 queries.
+    # SQLite expression-tree depth is limited, so split into chunks of 500 ORs.
+    keys = list(dup_map.keys())
+    chunk_size = 500
+    stats = {}  # (barcode, image_type, folder_ctime) -> (count, total_size)
+
+    for chunk_start in range(0, len(keys), chunk_size):
+        chunk = keys[chunk_start:chunk_start + chunk_size]
+        conditions = [
+            (Image.barcode == barcode) &
+            (Image.image_type == image_type) &
+            (Image.folder_ctime == folder_ctime)
+            for barcode, image_type, folder_ctime in chunk
+        ]
+        rows = _build_image_stats_query().filter(or_(*conditions)).all()
+
+        for row in rows:
+            stats[(row.barcode, row.image_type, row.folder_ctime)] = (row.cnt, row.total_sz or 0)
+
+    # Build response from precomputed stats
+    groups = []
+    for key, info in dup_map.items():
+        count_sz = stats.get(key)
+        if count_sz is None:
+            continue
+        count, total_sz = count_sz
+        groups.append({
+            'barcode': key[0],
+            'image_type': key[1],
+            'version_label': info['version_label'],
+            'version_folder_ctime': info['version_folder_ctime'],
+            'folder_ctime': key[2],
+            'image_count': count,
+            'total_file_size': total_sz,
+        })
+
     groups.sort(key=lambda g: (g['barcode'], g['image_type'], g['folder_ctime']))
 
     barcodes = set(g['barcode'] for g in groups)
