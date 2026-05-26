@@ -247,12 +247,6 @@ def test_delete_queued_task(client, sess):
     assert resp.status_code == 200
 
 
-def test_delete_running_task_rejected(client, sess):
-    """Deleting a running task should return 409."""
-    from task_engine import create_task, delete_task
-    assert callable(delete_task)
-
-
 # ===================================================================
 # Concurrent task dedup tests
 # ===================================================================

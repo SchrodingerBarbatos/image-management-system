@@ -73,23 +73,52 @@ def _start_task_thread(task):
     task_id = task.id
     task_type = task.task_type
 
+    # Grab the engine bind from the current session so the thread can
+    # create its own scoped_session.  This is essential in tests where
+    # the module-level `session` is monkeypatched per-function and may be
+    # removed before the background thread finishes.
+    bind = session.get_bind()
+
     def _run():
+        from sqlalchemy.orm import scoped_session as _ss, sessionmaker as _sm
+
+        # Thread-dedicated scoped_session — completely independent of the
+        # module-level `session` that callers / tests may replace or remove.
+        thread_sess = _ss(_sm(bind=bind))
+
+        # Install it where handlers, update_task_progress, finish_task,
+        # and _on_task_done expect to find `session`.
+        import routes.batch_tasks as _bt
+        import routes.batch as _batch
+        import task_engine as _te
+        import versioning as _ver
+
+        _saved = (_bt.session, _batch.session, _te.session, _ver.session)
+        _bt.session = thread_sess
+        _batch.session = thread_sess
+        _te.session = thread_sess
+        _ver.session = thread_sess
+
         try:
             handler(task_id)
         except Exception as e:
             _log.exception("Handler for task %d failed", task_id)
             try:
-                t = session.get(BatchTask, task_id)
+                t = thread_sess.get(BatchTask, task_id)
                 if t and t.status == 'running':
                     t.status = 'error'
                     t.error_message = f"{e}\n{traceback.format_exc()}"
                     t.finished_at = datetime.datetime.now().isoformat()
-                    session.commit()
+                    thread_sess.commit()
             except Exception:
-                session.rollback()
+                thread_sess.rollback()
         finally:
-            session.remove()
-            _on_task_done(task_type)
+            thread_sess.remove()
+            (_bt.session, _batch.session, _te.session, _ver.session) = _saved
+            try:
+                _on_task_done(task_type)
+            except Exception:
+                _log.exception("_on_task_done failed for task_type %s", task_type)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
