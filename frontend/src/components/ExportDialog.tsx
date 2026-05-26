@@ -208,7 +208,8 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
       {step === 0 && showHistory && (
         <>
           <Button size="small" onClick={() => setShowHistory(false)} style={{ marginBottom: 12 }}>{'< 返回'}</Button>
-          <Table columns={historyColumns} dataSource={taskList} rowKey="id" size="small" pagination={false} />
+          <Table columns={historyColumns} dataSource={taskList} rowKey="id" size="small"
+            pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }} />
         </>
       )}
 

@@ -4,6 +4,14 @@ from versioning import update_all_versions
 
 pending_bp = Blueprint('pending', __name__)
 
+def pending_count():
+    count = session.query(Image).filter(
+        Image.confirmed == False, Image.status == 'active'
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True
+    ).count()
+    return jsonify({'count': count})
+
 @pending_bp.route('/pending', methods=['GET'])
 def list_pending():
     imgs = session.query(Image).filter(

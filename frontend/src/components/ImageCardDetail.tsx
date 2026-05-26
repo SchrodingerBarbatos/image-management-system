@@ -36,6 +36,9 @@ const PLACEHOLDER_SVG =
       "</svg>",
   );
 
+const THUMBNAIL_PAGE_SIZE = 100;
+const DUP_MTIME_COLLAPSE = 20;
+
 interface Props {
   barcode: string | null;
   selectedMainIds: Set<number>;
@@ -62,6 +65,9 @@ const ImageCardDetail: React.FC<Props> = ({
   const [dupDeleteTarget, setDupDeleteTarget] = useState<{
     barcode: string; folderCtime: string; imageType: string;
   } | null>(null);
+  const [mainShowCount, setMainShowCount] = useState(THUMBNAIL_PAGE_SIZE);
+  const [detailShowCount, setDetailShowCount] = useState(THUMBNAIL_PAGE_SIZE);
+  const [collapsedDupVersions, setCollapsedDupVersions] = useState<Set<number>>(new Set());
 
   // Per-type version selection (stored as folder_ctime)
   const [mainVersion, setMainVersion] = useState<string>("");
@@ -74,6 +80,9 @@ const ImageCardDetail: React.FC<Props> = ({
     if (!barcode) return;
     let cancelled = false;
     setLoading(true);
+    setMainShowCount(THUMBNAIL_PAGE_SIZE);
+    setDetailShowCount(THUMBNAIL_PAGE_SIZE);
+    setCollapsedDupVersions(new Set());
     Promise.all([
       imageApi.list({ barcode, page_size: 500 }),
       barcodeSettingApi.get(barcode),
@@ -429,31 +438,51 @@ const ImageCardDetail: React.FC<Props> = ({
                       {v.image_type === "main" ? "主" : "详"} {v.version_label}{" "}
                       {v.is_latest ? "(最新)" : ""}
                     </Tag>
-                    {v.duplicate_mtimes && v.duplicate_mtimes.length > 0 && (
-                      <div style={{ marginLeft: 8, marginTop: 2 }}>
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          重复文件夹 ({v.duplicate_mtimes.length}):
-                        </Text>
-                        {v.duplicate_mtimes.map((mtime) => (
-                          <Tag
-                            key={mtime}
-                            color="orange"
-                            style={{ fontSize: 11, marginLeft: 4, cursor: "pointer" }}
-                            closable
-                            onClose={(e) => {
-                              e.preventDefault();
-                              setDupDeleteTarget({
-                                barcode: barcode!,
-                                folderCtime: mtime,
-                                imageType: v.image_type,
-                              });
-                            }}
-                          >
-                            {mtime.replace("T", " ").slice(0, 19)}
-                          </Tag>
-                        ))}
-                      </div>
-                    )}
+                    {v.duplicate_mtimes && v.duplicate_mtimes.length > 0 && (() => {
+                      const all = v.duplicate_mtimes!;
+                      const showAll = collapsedDupVersions.has(v.id);
+                      const overflow = all.length > 20;
+                      const visible = overflow && !showAll ? all.slice(0, 20) : all;
+                      return (
+                        <div style={{ marginLeft: 8, marginTop: 2 }}>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            重复文件夹 ({all.length}):
+                          </Text>
+                          {visible.map((mtime) => (
+                            <Tag
+                              key={mtime}
+                              color="orange"
+                              style={{ fontSize: 11, marginLeft: 4, cursor: "pointer" }}
+                              closable
+                              onClose={(e) => {
+                                e.preventDefault();
+                                setDupDeleteTarget({
+                                  barcode: barcode!,
+                                  folderCtime: mtime,
+                                  imageType: v.image_type,
+                                });
+                              }}
+                            >
+                              {mtime.replace("T", " ").slice(0, 19)}
+                            </Tag>
+                          ))}
+                          {overflow && (
+                            <Button
+                              type="link"
+                              size="small"
+                              style={{ fontSize: 11, padding: 0 }}
+                              onClick={() => {
+                                const next = new Set(collapsedDupVersions);
+                                showAll ? next.delete(v.id) : next.add(v.id);
+                                setCollapsedDupVersions(next);
+                              }}
+                            >
+                              {showAll ? "收起" : `展开全部 (${all.length - 20})`}
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )),
               },
@@ -491,8 +520,18 @@ const ImageCardDetail: React.FC<Props> = ({
             />
           </Space>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {mainImages.map(renderImage)}
+            {mainImages.slice(0, mainShowCount).map(renderImage)}
           </div>
+          {mainImages.length > mainShowCount && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => setMainShowCount(prev => prev + THUMBNAIL_PAGE_SIZE)}
+              style={{ padding: 0, marginTop: 4 }}
+            >
+              加载更多 ({mainShowCount}/{mainImages.length})
+            </Button>
+          )}
         </div>
 
         <div>
@@ -528,8 +567,18 @@ const ImageCardDetail: React.FC<Props> = ({
             />
           </Space>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {detailImages.map(renderImage)}
+            {detailImages.slice(0, detailShowCount).map(renderImage)}
           </div>
+          {detailImages.length > detailShowCount && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => setDetailShowCount(prev => prev + THUMBNAIL_PAGE_SIZE)}
+              style={{ padding: 0, marginTop: 4 }}
+            >
+              加载更多 ({detailShowCount}/{detailImages.length})
+            </Button>
+          )}
         </div>
       </Card>
 

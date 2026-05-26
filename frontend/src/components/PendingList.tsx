@@ -58,7 +58,7 @@ const PendingList: React.FC<Props> = ({ visible, onClose, onConfirmed }) => {
       </Space>
       <Table rowKey="id" columns={columns} dataSource={items} loading={loading} size="small"
         rowSelection={{ selectedRowKeys, onChange: keys => setSelectedRowKeys(keys) }}
-        pagination={false} scroll={{ y: 400 }} />
+        pagination={{ pageSize: 50, showTotal: (t) => `共 ${t} 条` }} scroll={{ y: 400 }} />
     </Modal>
   );
 };

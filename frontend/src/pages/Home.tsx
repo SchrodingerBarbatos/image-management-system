@@ -58,7 +58,7 @@ const Home: React.FC = () => {
   }, [barcode, page, pageSize, sortField, sortOrder]);
 
   const fetchPendingCount = useCallback(() => {
-    pendingApi.list().then(list => setPendingCount(list.length));
+    pendingApi.count().then(setPendingCount);
   }, []);
 
   useEffect(() => { fetchBarcodes(); fetchPendingCount(); }, [fetchBarcodes, fetchPendingCount]);

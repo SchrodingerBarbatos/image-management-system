@@ -118,6 +118,7 @@ export const barcodeApi = {
 };
 
 export const pendingApi = {
+  count: () => api.get<{ count: number }>('/pending/count').then(r => r.data.count),
   list: () => api.get<ImageRec[]>('/pending').then(r => r.data),
   confirm: (items: { id: number; image_type: string }[]) =>
     api.post('/pending/confirm', items).then(r => r.data),

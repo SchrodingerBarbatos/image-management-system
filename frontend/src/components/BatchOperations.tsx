@@ -17,6 +17,11 @@ const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
   keep_only: { color: 'blue', label: '保留（唯一版本）' },
   keep_disabled: { color: 'default', label: '保留（未启用）' },
 };
+const MAX_AUTO_EXPAND_GROUPS = 20;
+
+function initialExpandedKeys(barcodes: string[]): string[] {
+  return barcodes.length <= MAX_AUTO_EXPAND_GROUPS ? barcodes : [];
+}
 
 function fmtSize(bytes: number): string {
   if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
@@ -87,9 +92,11 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       setDupScanned(true);
       const allKeys = res.groups.map(dupKey);
       setDupSelected(new Set(allKeys));
-      setDupExpanded(Object.keys(
-        res.groups.reduce((acc, g) => ({ ...acc, [g.barcode]: true }), {} as Record<string, boolean>)
-      ));
+      const barcodes = [...new Set(res.groups.map(g => g.barcode))];
+      setDupExpanded(initialExpandedKeys(barcodes));
+      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
+        message.info(`共 ${barcodes.length} 个条码，已默认收起以避免页面卡顿，请按需展开`);
+      }
     } catch {
       message.error('扫描重复文件夹失败');
     } finally {
@@ -112,10 +119,16 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   };
 
   const toggleDupExpandAll = () => {
-    if (dupExpanded.length === Object.keys(dupByBarcode).length) {
+    const barcodes = Object.keys(dupByBarcode);
+    if (dupExpanded.length === barcodes.length) {
       setDupExpanded([]);
     } else {
-      setDupExpanded(Object.keys(dupByBarcode));
+      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
+        setDupExpanded(barcodes.slice(0, MAX_AUTO_EXPAND_GROUPS));
+        message.warning(`结果较多，仅展开前 ${MAX_AUTO_EXPAND_GROUPS} 个条码，请按需单独展开`);
+      } else {
+        setDupExpanded(barcodes);
+      }
     }
   };
 
@@ -138,9 +151,11 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
         .filter(g => g.status_tag === 'will_delete')
         .map(lowKey);
       setLowSelected(new Set(deleteKeys));
-      setLowExpanded(Object.keys(
-        res.groups.reduce((acc, g) => ({ ...acc, [g.barcode]: true }), {} as Record<string, boolean>)
-      ));
+      const barcodes = [...new Set(res.groups.map(g => g.barcode))];
+      setLowExpanded(initialExpandedKeys(barcodes));
+      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
+        message.info(`共 ${barcodes.length} 个条码，已默认收起以避免页面卡顿，请按需展开`);
+      }
     } catch {
       message.error('匹配失败');
     } finally {
@@ -155,10 +170,16 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   };
 
   const toggleLowExpandAll = () => {
-    if (lowExpanded.length === Object.keys(lowByBarcode).length) {
+    const barcodes = Object.keys(lowByBarcode);
+    if (lowExpanded.length === barcodes.length) {
       setLowExpanded([]);
     } else {
-      setLowExpanded(Object.keys(lowByBarcode));
+      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
+        setLowExpanded(barcodes.slice(0, MAX_AUTO_EXPAND_GROUPS));
+        message.warning(`结果较多，仅展开前 ${MAX_AUTO_EXPAND_GROUPS} 个条码，请按需单独展开`);
+      } else {
+        setLowExpanded(barcodes);
+      }
     }
   };
 
