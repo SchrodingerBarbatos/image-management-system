@@ -117,8 +117,10 @@ def list_images():
     q = session.query(Image).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
-    barcode = request.args.get('barcode')
-    if barcode:
+    barcode_exact = request.args.get('barcode_exact')
+    if barcode_exact:
+        q = q.filter(Image.barcode == barcode_exact)
+    elif barcode:
         q = q.filter(Image.barcode.like(f'%{barcode}%'))
     image_type = request.args.get('image_type')
     if image_type:

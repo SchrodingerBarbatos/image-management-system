@@ -42,7 +42,7 @@ export interface Paginated<T> {
 }
 
 export interface ImageListParams {
-  barcode?: string; image_type?: string; scan_root_id?: number;
+  barcode?: string; barcode_exact?: string; image_type?: string; scan_root_id?: number;
   page?: number; page_size?: number; sort?: string; order?: string;
 }
 

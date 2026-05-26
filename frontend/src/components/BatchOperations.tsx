@@ -17,10 +17,10 @@ const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
   keep_only: { color: 'blue', label: '保留（唯一版本）' },
   keep_disabled: { color: 'default', label: '保留（未启用）' },
 };
-const MAX_AUTO_EXPAND_GROUPS = 20;
+const MAX_INITIAL_EXPAND_GROUPS = 20;
 
 function initialExpandedKeys(barcodes: string[]): string[] {
-  return barcodes.length <= MAX_AUTO_EXPAND_GROUPS ? barcodes : [];
+  return barcodes.length <= MAX_INITIAL_EXPAND_GROUPS ? barcodes : [];
 }
 
 function fmtSize(bytes: number): string {
@@ -94,7 +94,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       setDupSelected(new Set(allKeys));
       const barcodes = [...new Set(res.groups.map(g => g.barcode))];
       setDupExpanded(initialExpandedKeys(barcodes));
-      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
+      if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
         message.info(`共 ${barcodes.length} 个条码，已默认收起以避免页面卡顿，请按需展开`);
       }
     } catch {
@@ -122,6 +122,14 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     const barcodes = Object.keys(dupByBarcode);
     if (dupExpanded.length === barcodes.length) {
       setDupExpanded([]);
+    } else if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
+      Modal.confirm({
+        title: '展开全部条码',
+        content: `共 ${barcodes.length} 个条码，展开全部可能导致页面卡顿，是否继续？`,
+        okText: '继续展开',
+        cancelText: '取消',
+        onOk: () => setDupExpanded(barcodes),
+      });
     } else {
       setDupExpanded(barcodes);
     }
@@ -148,7 +156,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       setLowSelected(new Set(deleteKeys));
       const barcodes = [...new Set(res.groups.map(g => g.barcode))];
       setLowExpanded(initialExpandedKeys(barcodes));
-      if (barcodes.length > MAX_AUTO_EXPAND_GROUPS) {
+      if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
         message.info(`共 ${barcodes.length} 个条码，已默认收起以避免页面卡顿，请按需展开`);
       }
     } catch {
@@ -168,6 +176,14 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     const barcodes = Object.keys(lowByBarcode);
     if (lowExpanded.length === barcodes.length) {
       setLowExpanded([]);
+    } else if (barcodes.length > MAX_INITIAL_EXPAND_GROUPS) {
+      Modal.confirm({
+        title: '展开全部条码',
+        content: `共 ${barcodes.length} 个条码，展开全部可能导致页面卡顿，是否继续？`,
+        okText: '继续展开',
+        cancelText: '取消',
+        onOk: () => setLowExpanded(barcodes),
+      });
     } else {
       setLowExpanded(barcodes);
     }

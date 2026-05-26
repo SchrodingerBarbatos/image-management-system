@@ -58,7 +58,8 @@ const ImageCardDetail: React.FC<Props> = ({
   onDeleted,
 }) => {
   const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [mainLoadingMore, setMainLoadingMore] = useState(false);
+  const [detailLoadingMore, setDetailLoadingMore] = useState(false);
   const [images, setImages] = useState<ImageRec[]>([]);
   const [versions, setVersions] = useState<ImageVersion[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<ImageRec | null>(null);
@@ -71,9 +72,11 @@ const ImageCardDetail: React.FC<Props> = ({
   const [detailShowCount, setDetailShowCount] = useState(THUMBNAIL_PAGE_SIZE);
   const [collapsedDupVersions, setCollapsedDupVersions] = useState<Set<number>>(new Set());
 
-  // Server-side pagination
-  const [imagePage, setImagePage] = useState(1);
-  const [imageTotal, setImageTotal] = useState(0);
+  // Per-type server-side pagination
+  const [mainImagePage, setMainImagePage] = useState(1);
+  const [mainImageTotal, setMainImageTotal] = useState(0);
+  const [detailImagePage, setDetailImagePage] = useState(1);
+  const [detailImageTotal, setDetailImageTotal] = useState(0);
 
   // Per-type version selection (stored as folder_ctime)
   const [mainVersion, setMainVersion] = useState<string>("");
@@ -83,50 +86,76 @@ const ImageCardDetail: React.FC<Props> = ({
   const barcodeRef = useRef(barcode);
   barcodeRef.current = barcode;
   const deletingRef = useRef(false);
+  const mainLoadingMoreRef = useRef(false);
+  const detailLoadingMoreRef = useRef(false);
+
+  const loadBarcodeImages = useCallback(async (options?: { resetSelection?: boolean }) => {
+    if (!barcode) return;
+    setLoading(true);
+    try {
+      const [mainRes, detailRes, settings] = await Promise.all([
+        imageApi.list({ barcode_exact: barcode, image_type: "main", page: 1, page_size: IMAGE_PAGE_SIZE }),
+        imageApi.list({ barcode_exact: barcode, image_type: "detail", page: 1, page_size: IMAGE_PAGE_SIZE }),
+        barcodeSettingApi.get(barcode),
+      ]);
+      if (barcodeRef.current !== barcode) return;
+      // Merge and dedup by id
+      const idSet = new Set<number>();
+      const merged: ImageRec[] = [];
+      for (const img of [...mainRes.items, ...detailRes.items]) {
+        if (!idSet.has(img.id)) {
+          idSet.add(img.id);
+          merged.push(img);
+        }
+      }
+      setImages(merged);
+      setMainImageTotal(mainRes.total);
+      setDetailImageTotal(detailRes.total);
+      setMainImagePage(1);
+      setDetailImagePage(1);
+      setDefaultMainVersion(settings.default_main_ctime || "");
+      setDefaultDetailVersion(settings.default_detail_ctime || "");
+      if (merged.length > 0) {
+        // GET /images/:id returns version history for the image's entire barcode, not just the single image
+        const detail = await imageApi.get(merged[0].id);
+        if (barcodeRef.current !== barcode) return;
+        setVersions(detail.versions);
+        const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
+        const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
+        if (options?.resetSelection) {
+          setMainVersion(settings.default_main_ctime || latestMain?.folder_ctime || "");
+          setDetailVersion(settings.default_detail_ctime || latestDetail?.folder_ctime || "");
+        } else {
+          setMainVersion((prev) =>
+            prev === "" ? (settings.default_main_ctime || latestMain?.folder_ctime || "") : prev,
+          );
+          setDetailVersion((prev) =>
+            prev === "" ? (settings.default_detail_ctime || latestDetail?.folder_ctime || "") : prev,
+          );
+        }
+      } else {
+        setVersions([]);
+        setMainVersion("");
+        setDetailVersion("");
+      }
+    } catch {
+      message.error("加载图片失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [barcode]);
 
   useEffect(() => {
     if (!barcode) return;
-    let cancelled = false;
-    setLoading(true);
     setMainShowCount(THUMBNAIL_PAGE_SIZE);
     setDetailShowCount(THUMBNAIL_PAGE_SIZE);
     setCollapsedDupVersions(new Set());
-    setImagePage(1);
-    setImageTotal(0);
-    Promise.all([
-      imageApi.list({ barcode, page: 1, page_size: IMAGE_PAGE_SIZE }),
-      barcodeSettingApi.get(barcode),
-    ])
-      .then(([imgRes, settings]) => {
-        if (cancelled) return;
-        setImages(imgRes.items);
-        setImageTotal(imgRes.total);
-        setDefaultMainVersion(settings.default_main_ctime || "");
-        setDefaultDetailVersion(settings.default_detail_ctime || "");
-        if (imgRes.items.length > 0) {
-          return imageApi.get(imgRes.items[0].id).then((detail) => {
-            if (cancelled) return;
-            setVersions(detail.versions);
-            const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
-            const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
-            const newMainVersion = settings.default_main_ctime || latestMain?.folder_ctime || "";
-            const newDetailVersion = settings.default_detail_ctime || latestDetail?.folder_ctime || "";
-            setMainVersion(newMainVersion);
-            setDetailVersion(newDetailVersion);
-          });
-        } else {
-          setVersions([]);
-          setMainVersion("");
-          setDetailVersion("");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [barcode]);
+    setMainImagePage(1);
+    setMainImageTotal(0);
+    setDetailImagePage(1);
+    setDetailImageTotal(0);
+    loadBarcodeImages({ resetSelection: true });
+  }, [barcode, loadBarcodeImages]);
 
   const mainImages = useMemo(
     () =>
@@ -203,24 +232,54 @@ const ImageCardDetail: React.FC<Props> = ({
     [barcode, mainVersion, detailVersion],
   );
 
-  const hasMoreServer = imagePage * IMAGE_PAGE_SIZE < imageTotal;
+  const mainHasMoreServer = mainImagePage * IMAGE_PAGE_SIZE < mainImageTotal;
+  const detailHasMoreServer = detailImagePage * IMAGE_PAGE_SIZE < detailImageTotal;
 
-  const loadMoreImages = useCallback(async () => {
-    if (!barcode || loadingMore || !hasMoreServer) return;
-    setLoadingMore(true);
+  const loadMoreMainImages = useCallback(async () => {
+    if (!barcode || mainLoadingMoreRef.current || !mainHasMoreServer) return;
+    mainLoadingMoreRef.current = true;
+    setMainLoadingMore(true);
     try {
-      const nextPage = imagePage + 1;
-      const res = await imageApi.list({ barcode, page: nextPage, page_size: IMAGE_PAGE_SIZE });
+      const nextPage = mainImagePage + 1;
+      const res = await imageApi.list({ barcode_exact: barcode, image_type: "main", page: nextPage, page_size: IMAGE_PAGE_SIZE });
       if (barcodeRef.current !== barcode) return;
-      setImages((prev) => [...prev, ...res.items]);
-      setImagePage(nextPage);
-      setImageTotal(res.total);
+      setImages((prev) => {
+        const idSet = new Set(prev.map((i) => i.id));
+        const newItems = res.items.filter((i) => !idSet.has(i.id));
+        return [...prev, ...newItems];
+      });
+      setMainImagePage(nextPage);
+      setMainImageTotal(res.total);
     } catch {
-      message.error("加载更多图片失败");
+      message.error("加载更多主图失败");
     } finally {
-      setLoadingMore(false);
+      mainLoadingMoreRef.current = false;
+      setMainLoadingMore(false);
     }
-  }, [barcode, imagePage, hasMoreServer, loadingMore]);
+  }, [barcode, mainImagePage, mainHasMoreServer]);
+
+  const loadMoreDetailImages = useCallback(async () => {
+    if (!barcode || detailLoadingMoreRef.current || !detailHasMoreServer) return;
+    detailLoadingMoreRef.current = true;
+    setDetailLoadingMore(true);
+    try {
+      const nextPage = detailImagePage + 1;
+      const res = await imageApi.list({ barcode_exact: barcode, image_type: "detail", page: nextPage, page_size: IMAGE_PAGE_SIZE });
+      if (barcodeRef.current !== barcode) return;
+      setImages((prev) => {
+        const idSet = new Set(prev.map((i) => i.id));
+        const newItems = res.items.filter((i) => !idSet.has(i.id));
+        return [...prev, ...newItems];
+      });
+      setDetailImagePage(nextPage);
+      setDetailImageTotal(res.total);
+    } catch {
+      message.error("加载更多详情图失败");
+    } finally {
+      detailLoadingMoreRef.current = false;
+      setDetailLoadingMore(false);
+    }
+  }, [barcode, detailImagePage, detailHasMoreServer]);
 
   const toggleCheck = useCallback(
     (id: number, type: "main" | "detail") => {
@@ -280,42 +339,8 @@ const ImageCardDetail: React.FC<Props> = ({
   };
 
   const reloadImages = useCallback(async () => {
-    if (!barcode) return;
-    setLoading(true);
-    try {
-      const [imgRes, settings] = await Promise.all([
-        imageApi.list({ barcode, page: 1, page_size: IMAGE_PAGE_SIZE }),
-        barcodeSettingApi.get(barcode),
-      ]);
-      if (barcodeRef.current !== barcode) return;
-      setImages(imgRes.items);
-      setImageTotal(imgRes.total);
-      setImagePage(1);
-      setDefaultMainVersion(settings.default_main_ctime || "");
-      setDefaultDetailVersion(settings.default_detail_ctime || "");
-      if (imgRes.items.length > 0) {
-        const detail = await imageApi.get(imgRes.items[0].id);
-        if (barcodeRef.current !== barcode) return;
-        setVersions(detail.versions);
-        const latestMain = detail.versions.find((v) => v.is_latest && v.image_type === "main");
-        const latestDetail = detail.versions.find((v) => v.is_latest && v.image_type === "detail");
-        setMainVersion((prev) =>
-          prev === "" ? (settings.default_main_ctime || latestMain?.folder_ctime || "") : prev,
-        );
-        setDetailVersion((prev) =>
-          prev === "" ? (settings.default_detail_ctime || latestDetail?.folder_ctime || "") : prev,
-        );
-      } else {
-        setVersions([]);
-        setMainVersion("");
-        setDetailVersion("");
-      }
-    } catch {
-      message.error("刷新数据失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [barcode]);
+    await loadBarcodeImages();
+  }, [loadBarcodeImages]);
 
   const handleVersionDelete = async (deleteFile: boolean) => {
     if (!versionDeleteTarget || deletingRef.current) return;
@@ -350,16 +375,24 @@ const ImageCardDetail: React.FC<Props> = ({
 
   const handleDuplicateDelete = async (deleteFile: boolean) => {
     if (!dupDeleteTarget || deletingRef.current) return;
+    const { folderCtime: deletedCtime, imageType: deletedType } = dupDeleteTarget;
     deletingRef.current = true;
     try {
       await barcodeApi.deleteDuplicateImages(
         dupDeleteTarget.barcode,
-        dupDeleteTarget.folderCtime,
-        dupDeleteTarget.imageType,
+        deletedCtime,
+        deletedType,
         deleteFile,
       );
       message.success(deleteFile ? "已删除重复图片和文件" : "已删除重复图片索引");
       setDupDeleteTarget(null);
+      // Reset version selection if we deleted the currently selected version
+      if (deletedType === "main" && mainVersion === deletedCtime) {
+        setMainVersion("");
+      }
+      if (deletedType === "detail" && detailVersion === deletedCtime) {
+        setDetailVersion("");
+      }
       await reloadImages();
       onDeleted();
     } catch {
@@ -567,22 +600,22 @@ const ImageCardDetail: React.FC<Props> = ({
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {mainImages.slice(0, mainShowCount).map(renderImage)}
           </div>
-          {(mainImages.length > mainShowCount || hasMoreServer) && (
+          {(mainImages.length > mainShowCount || mainHasMoreServer) && (
             <Button
               type="link"
               size="small"
-              loading={loadingMore}
+              loading={mainLoadingMore}
               onClick={() => {
-                if (hasMoreServer) {
-                  loadMoreImages();
+                if (mainHasMoreServer) {
+                  loadMoreMainImages();
                 } else {
                   setMainShowCount((prev) => prev + THUMBNAIL_PAGE_SIZE);
                 }
               }}
               style={{ padding: 0, marginTop: 4 }}
             >
-              {hasMoreServer
-                ? `加载更多 (已加载 ${images.length}/${imageTotal})`
+              {mainHasMoreServer
+                ? `加载更多 (已加载 ${images.filter(i => i.image_type === "main").length}/${mainImageTotal})`
                 : `加载更多 (${mainShowCount}/${mainImages.length})`}
             </Button>
           )}
@@ -630,22 +663,22 @@ const ImageCardDetail: React.FC<Props> = ({
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {detailImages.slice(0, detailShowCount).map(renderImage)}
           </div>
-          {(detailImages.length > detailShowCount || hasMoreServer) && (
+          {(detailImages.length > detailShowCount || detailHasMoreServer) && (
             <Button
               type="link"
               size="small"
-              loading={loadingMore}
+              loading={detailLoadingMore}
               onClick={() => {
-                if (hasMoreServer) {
-                  loadMoreImages();
+                if (detailHasMoreServer) {
+                  loadMoreDetailImages();
                 } else {
                   setDetailShowCount((prev) => prev + THUMBNAIL_PAGE_SIZE);
                 }
               }}
               style={{ padding: 0, marginTop: 4 }}
             >
-              {hasMoreServer
-                ? `加载更多 (已加载 ${images.length}/${imageTotal})`
+              {detailHasMoreServer
+                ? `加载更多 (已加载 ${images.filter(i => i.image_type === "detail").length}/${detailImageTotal})`
                 : `加载更多 (${detailShowCount}/${detailImages.length})`}
             </Button>
           )}
