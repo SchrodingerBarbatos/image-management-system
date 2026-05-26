@@ -421,7 +421,7 @@ def download_detail(task_id):
 
 
 def reset_stale_processing():
-    """Called at startup — mark ALL processing export tasks as failed
+    """Startup helper — mark ALL processing export tasks as failed
     so they don't permanently block new exports."""
     with _export_lock:
         stale = session.query(ExportTask).filter(
@@ -433,21 +433,14 @@ def reset_stale_processing():
                 task.error_message = '程序重启或导出进程异常中断'
             session.commit()
             _log.info("Reset %d stale processing export tasks to failed", len(stale))
+
+
+def cleanup_old_exports():
     """Remove export tasks and their files older than ZIP_CLEANUP_HOURS.
-    Also mark stale processing tasks as interrupted to unblock new exports."""
+    Processing tasks are skipped (they should already have been handled by
+    reset_stale_processing)."""
     with _export_lock:
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
-        # Mark stale processing tasks as interrupted
-        stale_processing = session.query(ExportTask).filter(
-            ExportTask.status == 'processing',
-            ExportTask.created_at < cutoff.isoformat(),
-        ).all()
-        for task in stale_processing:
-            task.status = 'failed'
-            task.error_message = '程序重启或导出进程异常中断'
-        if stale_processing:
-            session.commit()
-
         old_tasks = session.query(ExportTask).filter(
             ExportTask.created_at < cutoff.isoformat(),
             ExportTask.status != 'processing',
@@ -459,5 +452,7 @@ def reset_stale_processing():
                 except OSError:
                     pass
             session.delete(task)
-        session.commit()
+        if old_tasks:
+            session.commit()
+            _log.info("Cleaned up %d old export tasks", len(old_tasks))
 

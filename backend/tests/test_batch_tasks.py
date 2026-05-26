@@ -730,3 +730,57 @@ def test_partial_deletion_does_not_leave_partial_index_changes(client, sess):
     # Verify NO images were deleted from DB (no partial index deletion)
     after = sess.query(_Img).filter(_Img.barcode == 'BC_PARTIAL', _Img.status == 'active').count()
     assert after == before, f"Images count changed: {before} -> {after}"
+
+
+# ===================================================================
+# Export import regression test
+# ===================================================================
+
+
+def test_cleanup_old_exports_importable():
+    """Regression: cleanup_old_exports must be importable alongside
+    reset_stale_processing."""
+    from routes.export import cleanup_old_exports, reset_stale_processing
+    assert callable(cleanup_old_exports)
+    assert callable(reset_stale_processing)
+
+
+def test_cleanup_old_exports_deletes_expired_non_processing(client, sess):
+    """cleanup_old_exports() must delete expired non-processing tasks and
+    their zip files."""
+    import routes.export as _export
+    from routes.export import ExportTask as ET, ZIP_CLEANUP_HOURS
+    import datetime as _dt
+    import os as _os, tempfile
+
+    # Create an old done task with a fake zip file
+    old_time = (_dt.datetime.now() - _dt.timedelta(hours=ZIP_CLEANUP_HOURS + 1)).isoformat()
+    with _export._export_lock:
+        task = ET(status='done', created_at=old_time, total_images=5)
+        sess.add(task)
+        sess.commit()
+        tid = task.id
+
+    # Create a fake zip file for the task
+    zip_path = _os.path.join(tempfile.gettempdir(), f'export_{tid}.zip')
+    with _export._export_lock:
+        t = sess.get(ET, tid)
+        t.zip_path = zip_path
+        sess.commit()
+
+    # Create the fake file
+    with open(zip_path, 'w') as f:
+        f.write('fake')
+
+    try:
+        _export.cleanup_old_exports()
+
+        # Task should be deleted
+        t = sess.get(ET, tid)
+        assert t is None, f"Expired task {tid} was not cleaned up"
+
+        # Zip file should be removed
+        assert not _os.path.exists(zip_path), "Zip file was not removed"
+    finally:
+        if _os.path.exists(zip_path):
+            _os.remove(zip_path)
