@@ -301,6 +301,11 @@ def generate_zip():
     # Compute per-barcode match counts (include all barcodes, even unmatched)
     barcode_counts = _compute_barcode_counts(imgs, barcodes)
 
+    # Concurrency guard: reject if a processing task already exists
+    running = session.query(ExportTask).filter(ExportTask.status == 'processing').first()
+    if running:
+        return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
+
     task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
     session.add(task)
     session.commit()
