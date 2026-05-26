@@ -340,11 +340,18 @@ def batch_export():
         imgs = filter_to_single_version(imgs, barcodes_in, session)
     version_filtered = len(ids) - scanroot_excluded - len(imgs)
 
-    from routes.export import _compute_barcode_counts
+    from routes.export import _compute_barcode_counts, _export_lock
     barcode_counts = _compute_barcode_counts(imgs)
-    task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
-    session.add(task)
-    session.commit()
+
+    # Concurrency guard: same lock + running check as /export/zip
+    with _export_lock:
+        running = session.query(ExportTask).filter(ExportTask.status == 'processing').first()
+        if running:
+            return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
+
+        task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
+        session.add(task)
+        session.commit()
 
     from routes.export import _build_zip
     import threading

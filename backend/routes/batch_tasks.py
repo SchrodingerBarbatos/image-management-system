@@ -6,7 +6,7 @@ from models import (
     BatchTask, DuplicateScanResult, LowVersionScanResult,
 )
 from versioning import update_versions_for_barcode
-from task_engine import create_task, finish_task, update_task_progress
+from task_engine import create_task, finish_task, update_task_progress, _get_thread_session
 
 batch_tasks_bp = Blueprint('batch_tasks', __name__)
 _log = logging.getLogger(__name__)
@@ -19,7 +19,9 @@ def _run_duplicate_scan(task_id):
     from task_engine import TASK_HANDLERS  # avoid circular at module level
     _log.info("Starting duplicate_scan task %d", task_id)
 
-    versions = session.query(ImageVersion).filter(
+    sess = _get_thread_session()
+
+    versions = sess.query(ImageVersion).filter(
         ImageVersion.duplicate_mtimes != '',
         ImageVersion.duplicate_mtimes != '[]',
     ).all()
@@ -58,7 +60,7 @@ def _run_duplicate_scan(task_id):
             (Image.folder_ctime == folder_ctime)
             for barcode, image_type, folder_ctime in chunk
         ]
-        rows = session.query(
+        rows = sess.query(
             Image.barcode, Image.image_type, Image.folder_ctime,
             func.count(Image.id).label('cnt'),
             func.sum(Image.file_size).label('total_sz'),
@@ -94,8 +96,8 @@ def _run_duplicate_scan(task_id):
             total_file_size=total_sz,
         ))
 
-    session.add_all(results)
-    session.commit()
+    sess.add_all(results)
+    sess.commit()
     update_task_progress(task_id, progress=total, total=total, result_count=len(results))
     finish_task(task_id, result_count=len(results))
     _log.info("duplicate_scan task %d done: %d results", task_id, len(results))
@@ -107,7 +109,9 @@ def _run_low_version_scan(task_id):
     """Background handler for low_version_scan tasks."""
     _log.info("Starting low_version_scan task %d", task_id)
 
-    task = session.get(BatchTask, task_id)
+    sess = _get_thread_session()
+
+    task = sess.get(BatchTask, task_id)
     if not task:
         finish_task(task_id, error_message='Task not found')
         return
@@ -127,7 +131,7 @@ def _run_low_version_scan(task_id):
     if not detail_enabled:
         detail_threshold = 0
 
-    versions = session.query(ImageVersion).all()
+    versions = sess.query(ImageVersion).all()
     total = len(versions)
     update_task_progress(task_id, progress=0, total=total)
 
@@ -178,8 +182,8 @@ def _run_low_version_scan(task_id):
     # Insert in chunks to avoid memory issues
     chunk_size = 500
     for i in range(0, len(results), chunk_size):
-        session.add_all(results[i:i + chunk_size])
-        session.commit()
+        sess.add_all(results[i:i + chunk_size])
+        sess.commit()
         update_task_progress(task_id, progress=min(i + chunk_size, total), total=total)
 
     update_task_progress(task_id, progress=total, total=total, result_count=len(results))
@@ -398,17 +402,15 @@ def delete_duplicate_scan_results(task_id):
         )
 
         imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
-        result_failed = False
-        for img in imgs:
-            if delete_files:
+
+        # ---- Phase 1: pre-validate every image before touching disk or DB ----
+        validation_msg = None
+        if delete_files and imgs:
+            for img in imgs:
                 root_path = scan_roots.get(img.scan_root_id)
                 if not root_path:
-                    r.delete_status = 'failed'
-                    r.delete_message = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
-                    skipped_count += 1
-                    result_failed = True
+                    validation_msg = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
                     break
-
                 real_file = os.path.realpath(img.file_path)
                 real_root = os.path.realpath(root_path)
                 try:
@@ -416,26 +418,37 @@ def delete_duplicate_scan_results(task_id):
                 except ValueError:
                     safe = False
                 if not safe:
-                    r.delete_status = 'failed'
-                    r.delete_message = '文件路径不在扫描目录下，拒绝删除'
-                    skipped_count += 1
-                    result_failed = True
+                    validation_msg = '文件路径不在扫描目录下，拒绝删除'
+                    break
+                if not os.path.exists(img.file_path):
+                    validation_msg = f'文件不存在: {img.file_path}'
                     break
 
+        if validation_msg:
+            r.delete_status = 'failed'
+            r.delete_message = validation_msg
+            skipped_count += 1
+            continue
+
+        # ---- Phase 2: delete files from disk (best-effort, cannot rollback) ----
+        file_errors = []
+        if delete_files and imgs:
+            for img in imgs:
                 try:
                     os.remove(img.file_path)
                 except OSError as e:
-                    r.delete_status = 'failed'
-                    r.delete_message = f'文件删除失败: {e}'
-                    skipped_count += 1
-                    result_failed = True
-                    break
+                    file_errors.append(f'{img.file_path}: {e}')
 
+        if file_errors:
+            r.delete_status = 'failed'
+            r.delete_message = f'文件删除失败: {"; ".join(file_errors)}'
+            skipped_count += 1
+            continue
+
+        # ---- Phase 3: all safe — delete DB indices ----
+        for img in imgs:
             session.delete(img)
             deleted_image_count += 1
-
-        if result_failed:
-            continue
 
         r.delete_status = 'deleted'
         r.deleted_at = datetime.datetime.now().isoformat()
@@ -655,17 +668,15 @@ def delete_low_version_scan_results(task_id):
         )
 
         imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
-        result_failed = False
-        for img in imgs:
-            if delete_files:
+
+        # ---- Phase 1: pre-validate every image before touching disk or DB ----
+        validation_msg = None
+        if delete_files and imgs:
+            for img in imgs:
                 root_path = scan_roots.get(img.scan_root_id)
                 if not root_path:
-                    r.delete_status = 'failed'
-                    r.delete_message = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
-                    skipped_count += 1
-                    result_failed = True
+                    validation_msg = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
                     break
-
                 real_file = os.path.realpath(img.file_path)
                 real_root = os.path.realpath(root_path)
                 try:
@@ -673,26 +684,37 @@ def delete_low_version_scan_results(task_id):
                 except ValueError:
                     safe = False
                 if not safe:
-                    r.delete_status = 'failed'
-                    r.delete_message = '文件路径不在扫描目录下，拒绝删除'
-                    skipped_count += 1
-                    result_failed = True
+                    validation_msg = '文件路径不在扫描目录下，拒绝删除'
+                    break
+                if not os.path.exists(img.file_path):
+                    validation_msg = f'文件不存在: {img.file_path}'
                     break
 
+        if validation_msg:
+            r.delete_status = 'failed'
+            r.delete_message = validation_msg
+            skipped_count += 1
+            continue
+
+        # ---- Phase 2: delete files from disk (best-effort, cannot rollback) ----
+        file_errors = []
+        if delete_files and imgs:
+            for img in imgs:
                 try:
                     os.remove(img.file_path)
                 except OSError as e:
-                    r.delete_status = 'failed'
-                    r.delete_message = f'文件删除失败: {e}'
-                    skipped_count += 1
-                    result_failed = True
-                    break
+                    file_errors.append(f'{img.file_path}: {e}')
 
+        if file_errors:
+            r.delete_status = 'failed'
+            r.delete_message = f'文件删除失败: {"; ".join(file_errors)}'
+            skipped_count += 1
+            continue
+
+        # ---- Phase 3: all safe — delete DB indices ----
+        for img in imgs:
             session.delete(img)
             deleted_image_count += 1
-
-        if result_failed:
-            continue
 
         r.delete_status = 'deleted'
         r.deleted_at = datetime.datetime.now().isoformat()

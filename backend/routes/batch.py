@@ -4,6 +4,7 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import func, or_, select
 from models import session, Image, ImageVersion, ScanRoot
 from versioning import update_versions_for_barcode
+from task_engine import _get_thread_session
 
 _log = logging.getLogger(__name__)
 
@@ -64,7 +65,8 @@ def _check_disabled_scan_roots(items):
 def _build_image_stats_query():
     """Return a base GROUP BY query for (barcode, image_type, folder_ctime) stats,
     filtered to active+confirmed images in enabled scan roots."""
-    return session.query(
+    sess = _get_thread_session()
+    return sess.query(
         Image.barcode, Image.image_type, Image.folder_ctime,
         func.count(Image.id).label('cnt'),
         func.sum(Image.file_size).label('total_sz'),

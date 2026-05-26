@@ -420,7 +420,19 @@ def download_detail(task_id):
     )
 
 
-def cleanup_old_exports():
+def reset_stale_processing():
+    """Called at startup — mark ALL processing export tasks as failed
+    so they don't permanently block new exports."""
+    with _export_lock:
+        stale = session.query(ExportTask).filter(
+            ExportTask.status == 'processing',
+        ).all()
+        if stale:
+            for task in stale:
+                task.status = 'failed'
+                task.error_message = '程序重启或导出进程异常中断'
+            session.commit()
+            _log.info("Reset %d stale processing export tasks to failed", len(stale))
     """Remove export tasks and their files older than ZIP_CLEANUP_HOURS.
     Also mark stale processing tasks as interrupted to unblock new exports."""
     with _export_lock:

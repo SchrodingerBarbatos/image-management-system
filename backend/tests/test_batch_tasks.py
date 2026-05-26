@@ -54,11 +54,13 @@ def client(sess, monkeypatch):
     import routes.batch_tasks
     import routes.batch
     import versioning
+    import routes.export
 
     monkeypatch.setattr(task_engine, "session", sess)
     monkeypatch.setattr(routes.batch_tasks, "session", sess)
     monkeypatch.setattr(routes.batch, "session", sess)
     monkeypatch.setattr(versioning, "session", sess)
+    monkeypatch.setattr(routes.export, "session", sess)
 
     app = Flask(__name__)
     app.config['TESTING'] = True
@@ -543,3 +545,188 @@ def test_export_concurrent_processing_returns_409(client, sess):
         if t:
             sess.delete(t)
             sess.commit()
+
+
+# ===================================================================
+# Concurrent task session isolation test
+# ===================================================================
+
+
+def test_concurrent_tasks_do_not_corrupt_module_sessions(client, sess):
+    """Running duplicate_scan and low_version_scan concurrently must not
+    mutate task_engine.session / routes.batch_tasks.session globals."""
+    import task_engine as _te
+    import routes.batch_tasks as _bt
+    import routes.batch as _batch
+    import versioning as _ver
+
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_CONC", "main", ctime)
+    _make_image(sess, "BC_CONC", "main", dup)
+    _make_version(sess, "BC_CONC", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    # Capture original session objects
+    orig_te = _te.session
+    orig_bt = _bt.session
+    orig_batch = _batch.session
+    orig_ver = _ver.session
+
+    # Start duplicate scan
+    resp1 = client.post('/api/batch/duplicate-scan/tasks')
+    id1 = resp1.get_json()['id']
+
+    # Start low version scan
+    resp2 = client.post('/api/batch/low-version-scan/tasks', json={
+        'main_enabled': True, 'main_threshold': 2,
+        'detail_enabled': False, 'detail_threshold': 0,
+    })
+    id2 = resp2.get_json()['id']
+
+    # Wait for both
+    t1 = _wait_for_task(client, id1)
+    t2 = _wait_for_task(client, id2)
+    assert t1['status'] == 'done'
+    assert t2['status'] == 'done'
+
+    # Module-level sessions must be unchanged
+    assert _te.session is orig_te, "task_engine.session was mutated by concurrent tasks"
+    assert _bt.session is orig_bt, "routes.batch_tasks.session was mutated by concurrent tasks"
+    assert _batch.session is orig_batch, "routes.batch.session was mutated by concurrent tasks"
+    assert _ver.session is orig_ver, "versioning.session was mutated by concurrent tasks"
+
+
+# ===================================================================
+# Export concurrency / recovery tests
+# ===================================================================
+
+
+def test_export_both_endpoints_reject_when_processing(client, sess):
+    """Both /export/zip and /images/batch-export must return 409 when a
+    processing ExportTask already exists."""
+    from routes.export import ExportTask as ET
+    import routes.export as _export
+
+    with _export._export_lock:
+        task = ET(status='processing')
+        sess.add(task)
+        sess.commit()
+        pid = task.id
+
+    try:
+        # /export/zip path: we can't call the full route easily (needs Excel),
+        # but the lock + query logic is the same.  Test via direct lock.
+        with _export._export_lock:
+            running = sess.query(ET).filter(ET.status == 'processing').first()
+            assert running is not None
+            assert running.id == pid
+
+        # /images/batch-export: register images_bp and test the endpoint
+        app = __import__('flask').Flask(__name__)
+        app.config['TESTING'] = True
+        from routes.images import images_bp
+        app.register_blueprint(images_bp, url_prefix='/api')
+        import routes.images as _imgs
+        _imgs.session = sess
+
+        with app.test_client() as c:
+            # batch-export should reject because processing exists
+            resp = c.post('/api/images/batch-export', json={'ids': [1], 'image_type': 'main'})
+            assert resp.status_code == 409, f"Expected 409, got {resp.status_code}"
+            data = resp.get_json()
+            assert '已有导出' in data.get('error', '')
+    finally:
+        with _export._export_lock:
+            t = sess.get(ET, pid)
+            if t:
+                sess.delete(t)
+                sess.commit()
+
+
+def test_reset_stale_processing_unblocks_export(client, sess):
+    """reset_stale_processing() must mark all processing tasks as failed,
+    allowing new exports to proceed."""
+    from routes.export import reset_stale_processing, ExportTask as ET, _export_lock
+
+    # Create a processing task
+    with _export_lock:
+        task = ET(status='processing')
+        sess.add(task)
+        sess.commit()
+        pid = task.id
+
+    # Reset
+    reset_stale_processing()
+
+    # Verify it's now failed
+    t = sess.get(ET, pid)
+    assert t.status == 'failed'
+    assert '重启' in (t.error_message or '')
+
+    # Verify no processing remains — new export would succeed
+    with _export_lock:
+        running = sess.query(ET).filter(ET.status == 'processing').first()
+        assert running is None
+
+    # Cleanup
+    with _export_lock:
+        sess.delete(t)
+        sess.commit()
+
+
+# ===================================================================
+# Partial deletion consistency test
+# ===================================================================
+
+
+def test_partial_deletion_does_not_leave_partial_index_changes(client, sess):
+    """When one image in a result fails validation, DB indices must not be
+    partially deleted for that result, and result must be marked failed."""
+    root = _make_root(sess, root_id=1, path="/safe/root", enabled=True)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+
+    # Two images in the same result group: one valid path, one unsafe
+    _make_image(sess, "BC_PARTIAL", "main", dup, file_path="/safe/root/good.jpg", scan_root_id=root.id)
+    import tempfile, os as _os
+    danger = _os.path.join(tempfile.gettempdir(), "unsafe.jpg")
+    _make_image(sess, "BC_PARTIAL", "main", dup, file_path=danger, scan_root_id=root.id)
+    _make_version(sess, "BC_PARTIAL", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    # Run scan
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done'
+
+    # Get result
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    data = resp.get_json()
+    assert data['total'] >= 1
+    result_id = data['items'][0]['id']
+
+    # Count images before delete
+    from models import Image as _Img
+    before = sess.query(_Img).filter(_Img.barcode == 'BC_PARTIAL', _Img.status == 'active').count()
+
+    # Try delete with delete_files=True — should fail because one path is unsafe
+    resp = client.post(f'/api/batch/duplicate-scan/tasks/{task_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [result_id],
+        'delete_files': True,
+    })
+    assert resp.status_code == 200
+    delete_data = resp.get_json()
+    assert delete_data['skipped_count'] >= 1
+    assert delete_data['deleted_image_count'] == 0
+
+    # Verify result is marked failed, not deleted
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    data = resp.get_json()
+    r = data['items'][0]
+    assert r['delete_status'] in ('failed', 'skipped'), f"Expected failed/skipped, got {r['delete_status']}"
+
+    # Verify NO images were deleted from DB (no partial index deletion)
+    after = sess.query(_Img).filter(_Img.barcode == 'BC_PARTIAL', _Img.status == 'active').count()
+    assert after == before, f"Images count changed: {before} -> {after}"

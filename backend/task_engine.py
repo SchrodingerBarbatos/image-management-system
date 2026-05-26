@@ -4,10 +4,22 @@ from models import session, BatchTask
 _log = logging.getLogger(__name__)
 
 _task_lock = threading.Lock()
+_thread_local = threading.local()
 
 TASK_HANDLERS = {}
 
 VALID_TASK_TYPES = {'duplicate_scan', 'low_version_scan'}
+
+
+def _get_thread_session():
+    """Return the thread-local scoped_session if one was installed by
+    _start_task_thread, otherwise fall back to the module-level session.
+
+    This lets background threads operate on their own session without
+    mutating module globals, while request-thread code keeps using the
+    unmodified module-level scoped_session.
+    """
+    return getattr(_thread_local, 'session', None) or session
 
 
 def register_handler(task_type, handler):
@@ -73,32 +85,17 @@ def _start_task_thread(task):
     task_id = task.id
     task_type = task.task_type
 
-    # Grab the engine bind from the current session so the thread can
-    # create its own scoped_session.  This is essential in tests where
-    # the module-level `session` is monkeypatched per-function and may be
-    # removed before the background thread finishes.
+    # Grab the engine bind so the thread can create its own scoped_session.
     bind = session.get_bind()
 
     def _run():
         from sqlalchemy.orm import scoped_session as _ss, sessionmaker as _sm
 
-        # Thread-dedicated scoped_session — completely independent of the
-        # module-level `session` that callers / tests may replace or remove.
+        # Thread-dedicated scoped_session — installed via thread-local so
+        # handlers, update_task_progress, finish_task, and _on_task_done
+        # all see it without mutating any module-level globals.
         thread_sess = _ss(_sm(bind=bind))
-
-        # Install it where handlers, update_task_progress, finish_task,
-        # and _on_task_done expect to find `session`.
-        import routes.batch_tasks as _bt
-        import routes.batch as _batch
-        import task_engine as _te
-        import versioning as _ver
-
-        _saved = (_bt.session, _batch.session, _te.session, _ver.session)
-        _bt.session = thread_sess
-        _batch.session = thread_sess
-        _te.session = thread_sess
-        _ver.session = thread_sess
-
+        _thread_local.session = thread_sess
         try:
             handler(task_id)
         except Exception as e:
@@ -114,7 +111,7 @@ def _start_task_thread(task):
                 thread_sess.rollback()
         finally:
             thread_sess.remove()
-            (_bt.session, _batch.session, _te.session, _ver.session) = _saved
+            del _thread_local.session
             try:
                 _on_task_done(task_type)
             except Exception:
@@ -126,15 +123,16 @@ def _start_task_thread(task):
 
 def _on_task_done(task_type):
     """After a task finishes, start the next queued task of same type if any."""
+    sess = _get_thread_session()
     with _task_lock:
-        next_task = session.query(BatchTask).filter(
+        next_task = sess.query(BatchTask).filter(
             BatchTask.task_type == task_type,
             BatchTask.status == 'queued',
         ).order_by(BatchTask.created_at).first()
         if next_task:
             next_task.status = 'running'
             next_task.started_at = datetime.datetime.now().isoformat()
-            session.commit()
+            sess.commit()
             _start_task_thread(next_task)
 
 
@@ -200,8 +198,9 @@ def delete_task(task_id):
 
 def update_task_progress(task_id, progress=None, total=None, result_count=None):
     """Update task progress fields. Called by handler."""
+    sess = _get_thread_session()
     with _task_lock:
-        task = session.get(BatchTask, task_id)
+        task = sess.get(BatchTask, task_id)
         if not task:
             return
         if progress is not None:
@@ -210,13 +209,14 @@ def update_task_progress(task_id, progress=None, total=None, result_count=None):
             task.total = total
         if result_count is not None:
             task.result_count = result_count
-        session.commit()
+        sess.commit()
 
 
 def finish_task(task_id, result_count=0, error_message=''):
     """Mark a task as done or error. Called by handler in finally block."""
+    sess = _get_thread_session()
     with _task_lock:
-        task = session.get(BatchTask, task_id)
+        task = sess.get(BatchTask, task_id)
         if not task:
             return
         if error_message:
@@ -226,7 +226,7 @@ def finish_task(task_id, result_count=0, error_message=''):
             task.status = 'done'
             task.result_count = result_count
         task.finished_at = datetime.datetime.now().isoformat()
-        session.commit()
+        sess.commit()
 
 
 def _task_to_dict(task):

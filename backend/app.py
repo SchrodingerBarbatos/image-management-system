@@ -344,7 +344,8 @@ def start_tray(port, open_browser_on_start=True):
     logger = logging.getLogger(__name__)
 
     # Cleanup old export tasks on startup
-    from routes.export import cleanup_old_exports
+    from routes.export import cleanup_old_exports, reset_stale_processing
+    reset_stale_processing()
     cleanup_old_exports()
 
     # Check port availability with fallback
