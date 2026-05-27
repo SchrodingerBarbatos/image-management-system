@@ -423,6 +423,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
               onDeleteTask={handleDeleteDupTask}
               selectedTaskId={dupTaskId}
               typeLabel="重复扫描"
+              onRefresh={refreshDupTasks}
             />
           </div>
 
@@ -538,6 +539,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
               onDeleteTask={handleDeleteLowTask}
               selectedTaskId={lowTaskId}
               typeLabel="低版本扫描"
+              onRefresh={refreshLowTasks}
             />
           </div>
 

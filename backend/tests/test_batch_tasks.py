@@ -854,3 +854,170 @@ def test_cleanup_exports_on_startup_calls_both_in_order(sess, monkeypatch):
     assert calls == ['reset', 'cleanup'], (
         f"Expected reset then cleanup, got {calls}"
     )
+
+
+# ===================================================================
+# ID consistency validation tests
+# ===================================================================
+
+
+def test_duplicate_delete_rejects_foreign_result_id(client, sess):
+    """Submitting a result ID from another task (or non-existent) must return 400
+    and the valid result must NOT be marked deleted or skipped."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_DUP_ID", "main", ctime)
+    _make_image(sess, "BC_DUP_ID", "main", dup)
+    _make_version(sess, "BC_DUP_ID", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    # Run duplicate scan to produce a valid result
+    resp = client.post('/api/batch/duplicate-scan/tasks')
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done'
+
+    # Fetch results
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    data = resp.get_json()
+    assert data['total'] >= 1
+    valid_id = data['items'][0]['id']
+
+    # Submit [valid_id, 999999] — 999999 does not exist
+    resp = client.post(f'/api/batch/duplicate-scan/tasks/{task_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [valid_id, 999999],
+        'delete_files': False,
+    })
+    assert resp.status_code == 400
+    err = resp.get_json()
+    assert 'missing_ids' in err
+    assert 999999 in err['missing_ids']
+
+    # Verify the valid result was NOT marked deleted or skipped
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results')
+    data = resp.get_json()
+    r = next(item for item in data['items'] if item['id'] == valid_id)
+    assert r['delete_status'] in (None, 'pending'), f"Valid result should be untouched, got delete_status={r['delete_status']}"
+
+
+def test_duplicate_delete_rejects_cross_task_result_id(client, sess):
+    """Submitting a result ID that belongs to a different task must return 400."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    dup = "2024-05-01T00:00:00"
+    _make_image(sess, "BC_CROSS1", "main", ctime)
+    _make_image(sess, "BC_CROSS1", "main", dup)
+    _make_version(sess, "BC_CROSS1", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    _make_image(sess, "BC_CROSS2", "main", ctime)
+    _make_image(sess, "BC_CROSS2", "main", dup)
+    _make_version(sess, "BC_CROSS2", "main", ctime, duplicate_mtimes=json.dumps([dup]))
+
+    # Run two separate scans
+    resp1 = client.post('/api/batch/duplicate-scan/tasks')
+    task1_id = resp1.get_json()['id']
+    _wait_for_task(client, task1_id)
+
+    resp2 = client.post('/api/batch/duplicate-scan/tasks')
+    task2_id = resp2.get_json()['id']
+    _wait_for_task(client, task2_id)
+
+    # Get task2's results
+    resp = client.get(f'/api/batch/duplicate-scan/tasks/{task2_id}/results')
+    data = resp.get_json()
+    assert data['total'] >= 1
+    task2_result_id = data['items'][0]['id']
+
+    # Try to delete task2's result via task1's endpoint
+    resp = client.post(f'/api/batch/duplicate-scan/tasks/{task1_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [task2_result_id],
+        'delete_files': False,
+    })
+    assert resp.status_code == 400
+    err = resp.get_json()
+    assert 'missing_ids' in err
+    assert task2_result_id in err['missing_ids']
+
+
+def test_low_version_delete_rejects_foreign_result_id(client, sess):
+    """Submitting a result ID from another task (or non-existent) must return 400
+    and the valid result must NOT be marked deleted or skipped."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    _make_image(sess, "BC_LV_ID", "main", ctime)
+    _make_version(sess, "BC_LV_ID", "main", ctime, version_label="v2", is_latest=False)
+    _make_version(sess, "BC_LV_ID", "main", "2024-07-01T00:00:00", version_label="v1", is_latest=True)
+
+    # Run low version scan
+    resp = client.post('/api/batch/low-version-scan/tasks', json={
+        'main_enabled': True, 'main_threshold': 3,
+        'detail_enabled': False, 'detail_threshold': 0,
+    })
+    task_id = resp.get_json()['id']
+    task = _wait_for_task(client, task_id)
+    assert task['status'] == 'done'
+
+    # Fetch results
+    resp = client.get(f'/api/batch/low-version-scan/tasks/{task_id}/results')
+    data = resp.get_json()
+    assert data['total'] >= 1
+    valid_id = data['items'][0]['id']
+
+    # Submit [valid_id, 999999] — 999999 does not exist
+    resp = client.post(f'/api/batch/low-version-scan/tasks/{task_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [valid_id, 999999],
+        'delete_files': False,
+    })
+    assert resp.status_code == 400
+    err = resp.get_json()
+    assert 'missing_ids' in err
+    assert 999999 in err['missing_ids']
+
+    # Verify the valid result was NOT marked deleted or skipped
+    resp = client.get(f'/api/batch/low-version-scan/tasks/{task_id}/results')
+    data = resp.get_json()
+    r = next(item for item in data['items'] if item['id'] == valid_id)
+    assert r['delete_status'] in (None, 'pending'), f"Valid result should be untouched, got delete_status={r['delete_status']}"
+
+
+def test_low_version_delete_rejects_cross_task_result_id(client, sess):
+    """Submitting a result ID that belongs to a different task must return 400."""
+    _make_root(sess)
+    ctime = "2024-06-01T00:00:00"
+    _make_image(sess, "BC_LV_CROSS1", "main", ctime)
+    _make_version(sess, "BC_LV_CROSS1", "main", ctime, version_label="v2", is_latest=False)
+    _make_version(sess, "BC_LV_CROSS1", "main", "2024-07-01T00:00:00", version_label="v1", is_latest=True)
+
+    _make_image(sess, "BC_LV_CROSS2", "main", ctime)
+    _make_version(sess, "BC_LV_CROSS2", "main", ctime, version_label="v2", is_latest=False)
+    _make_version(sess, "BC_LV_CROSS2", "main", "2024-07-01T00:00:00", version_label="v1", is_latest=True)
+
+    scan_params = {'main_enabled': True, 'main_threshold': 3, 'detail_enabled': False, 'detail_threshold': 0}
+
+    resp1 = client.post('/api/batch/low-version-scan/tasks', json=scan_params)
+    task1_id = resp1.get_json()['id']
+    _wait_for_task(client, task1_id)
+
+    resp2 = client.post('/api/batch/low-version-scan/tasks', json=scan_params)
+    task2_id = resp2.get_json()['id']
+    _wait_for_task(client, task2_id)
+
+    # Get task2's results
+    resp = client.get(f'/api/batch/low-version-scan/tasks/{task2_id}/results')
+    data = resp.get_json()
+    assert data['total'] >= 1
+    task2_result_id = data['items'][0]['id']
+
+    # Try to delete task2's result via task1's endpoint
+    resp = client.post(f'/api/batch/low-version-scan/tasks/{task1_id}/delete', json={
+        'mode': 'selected',
+        'result_ids': [task2_result_id],
+        'delete_files': False,
+    })
+    assert resp.status_code == 400
+    err = resp.get_json()
+    assert 'missing_ids' in err
+    assert task2_result_id in err['missing_ids']

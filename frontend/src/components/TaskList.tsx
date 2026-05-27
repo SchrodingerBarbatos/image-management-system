@@ -37,9 +37,10 @@ export interface TaskListProps {
   onDeleteTask: (taskId: number) => void;
   selectedTaskId?: number | null;
   typeLabel: string;
+  onRefresh?: () => void;
 }
 
-export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDeleteTask, selectedTaskId, typeLabel }) => {
+export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDeleteTask, selectedTaskId, typeLabel, onRefresh }) => {
   if (tasks.length === 0) {
     return <Text type="secondary">暂无{typeLabel}任务</Text>;
   }
@@ -49,6 +50,7 @@ export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDelet
     try {
       await taskApi.cancelTask(taskId);
       message.success('任务已取消');
+      onRefresh?.();
     } catch (err: any) {
       message.error(err?.response?.data?.error || '取消失败');
     }
