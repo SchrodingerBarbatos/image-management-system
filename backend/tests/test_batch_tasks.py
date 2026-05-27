@@ -430,6 +430,38 @@ def test_task_delete_rejects_non_list_result_ids(client, task_type, endpoint):
     assert "result_ids" in resp.get_json()["error"]
 
 
+@pytest.mark.parametrize(
+    ("task_type", "endpoint"),
+    [
+        ("duplicate_scan", "/api/batch/duplicate-scan/tasks/{task_id}/delete"),
+        ("low_version_scan", "/api/batch/low-version-scan/tasks/{task_id}/delete"),
+    ],
+)
+@pytest.mark.parametrize("bad_ids", [
+    [["x"]],           # list containing a list
+    [1, ["x"]],        # mixed int and list
+    [1, "2"],          # mixed int and string
+    [True],            # bool is subclass of int, must reject
+    [0],               # zero is not positive
+    [-1],              # negative
+    pytest.param([], id="empty-list"),
+])
+def test_task_delete_rejects_invalid_result_id_elements(client, task_type, endpoint, bad_ids):
+    """Deletion endpoints must reject result_ids with non-int or non-positive elements."""
+    from task_engine import create_task
+
+    task, _ = create_task(task_type, params={}, auto_start=False)
+
+    resp = client.post(endpoint.format(task_id=task["id"]), json={
+        "mode": "selected",
+        "result_ids": bad_ids,
+        "delete_files": False,
+    })
+
+    assert resp.status_code == 400, f"Expected 400 for {bad_ids}, got {resp.status_code}"
+    assert "result_ids" in resp.get_json()["error"]
+
+
 def test_skipped_count_increments_on_validation_failure(client, sess):
     """skipped_count must increment when a result fails re-validation."""
     _make_root(sess)

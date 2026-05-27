@@ -317,6 +317,19 @@ def delete_duplicate_scan_task(task_id):
 _ISO_RE = __import__('re').compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 
 
+def _validate_result_ids(result_ids):
+    """Validate that result_ids is a non-empty list of positive integers.
+    Returns (None, error_response) on failure, or (list, None) on success."""
+    if not isinstance(result_ids, list):
+        return None, (jsonify({'error': 'result_ids must be a non-empty list of positive integers'}), 400)
+    if not result_ids:
+        return None, (jsonify({'error': 'result_ids must be a non-empty list of positive integers'}), 400)
+    for rid in result_ids:
+        if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+            return None, (jsonify({'error': 'result_ids must be a non-empty list of positive integers'}), 400)
+    return result_ids, None
+
+
 def _check_result_id_consistency(requested_ids, result_model, task_id):
     """Query results by task_id + requested_ids, return (results, error_response).
     error_response is None if all IDs are valid, otherwise a (jsonify, 400) tuple."""
@@ -346,8 +359,12 @@ def delete_duplicate_scan_results(task_id):
     result_ids = data.get('result_ids', [])
     delete_files = data.get('delete_files', False)
 
-    if mode != 'selected' or not result_ids:
-        return jsonify({'error': 'mode must be "selected" and result_ids must be non-empty'}), 400
+    if mode != 'selected':
+        return jsonify({'error': 'mode must be "selected"'}), 400
+
+    result_ids, err = _validate_result_ids(result_ids)
+    if err:
+        return err
 
     results, err = _check_result_id_consistency(result_ids, DuplicateScanResult, task_id)
     if err:
@@ -602,8 +619,12 @@ def delete_low_version_scan_results(task_id):
     result_ids = data.get('result_ids', [])
     delete_files = data.get('delete_files', False)
 
-    if mode != 'selected' or not result_ids:
-        return jsonify({'error': 'mode must be "selected" and result_ids must be non-empty'}), 400
+    if mode != 'selected':
+        return jsonify({'error': 'mode must be "selected"'}), 400
+
+    result_ids, err = _validate_result_ids(result_ids)
+    if err:
+        return err
 
     results, err = _check_result_id_consistency(result_ids, LowVersionScanResult, task_id)
     if err:
