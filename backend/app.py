@@ -1,4 +1,4 @@
-import os, sys
+import os, sys, datetime
 import ctypes
 import threading
 import socket
@@ -43,18 +43,47 @@ def _request_admin():
         )
 
 
+def _migrate_export_task_schema(conn):
+    """Idempotent migration: add columns to export_task if the table exists."""
+    tables = {
+        row[0]
+        for row in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ))
+    }
+    if 'export_task' not in tables:
+        return
+
+    columns = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info('export_task')"))
+    }
+    if 'barcode_data' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN barcode_data TEXT DEFAULT ''"
+        ))
+    if 'progress' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN progress INTEGER DEFAULT 0"
+        ))
+    if 'total_images' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN total_images INTEGER DEFAULT 0"
+        ))
+    if 'error_message' not in columns:
+        conn.execute(text(
+            "ALTER TABLE export_task ADD COLUMN error_message TEXT DEFAULT ''"
+        ))
+    conn.commit()
+
 app = Flask(__name__, static_folder=None)
 
 Base.metadata.create_all(bind=engine)
 
-# Migration: add barcode_data column if missing
+# Migration: add missing export_task columns (idempotent)
 from sqlalchemy import text
 with engine.connect() as conn:
-    result = conn.execute(text("PRAGMA table_info('export_task')"))
-    columns = [row[1] for row in result.fetchall()]
-    if 'barcode_data' not in columns:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN barcode_data TEXT DEFAULT ''"))
-        conn.commit()
+    _migrate_export_task_schema(conn)
 
 @app.teardown_appcontext
 def shutdown_session(exception=None):
@@ -136,32 +165,106 @@ with engine.connect() as conn:
     if 'content_md5' not in img_cols:
         conn.execute(text("ALTER TABLE image ADD COLUMN content_md5 TEXT DEFAULT ''"))
         conn.commit()
-    # Migration: add progress and total_images to export_task
-    task_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('export_task')"))}
-    if 'progress' not in task_cols:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN progress INTEGER DEFAULT 0"))
-    if 'total_images' not in task_cols:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN total_images INTEGER DEFAULT 0"))
-    if 'error_message' not in task_cols:
-        conn.execute(text("ALTER TABLE export_task ADD COLUMN error_message TEXT DEFAULT ''"))
-    conn.commit()
+    # export_task schema already migrated above via _migrate_export_task_schema
 
 # Rebuild versions if we just added the image_type column
 if need_rebuild:
     from versioning import update_all_versions
     threading.Thread(target=update_all_versions, daemon=True).start()
 
+# Migration: create batch_task and related tables if not exist
+with engine.connect() as conn:
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS batch_task (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            progress INTEGER DEFAULT 0,
+            total INTEGER DEFAULT 0,
+            result_count INTEGER DEFAULT 0,
+            error_message TEXT DEFAULT '',
+            params_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now')),
+            started_at TEXT DEFAULT '',
+            finished_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_task_type_status ON batch_task (task_type, status, created_at)'))
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS duplicate_scan_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES batch_task(id),
+            barcode TEXT NOT NULL,
+            image_type TEXT NOT NULL,
+            version_label TEXT,
+            version_folder_ctime TEXT,
+            folder_ctime TEXT NOT NULL,
+            image_count INTEGER DEFAULT 0,
+            total_file_size INTEGER DEFAULT 0,
+            delete_status TEXT DEFAULT 'pending',
+            delete_message TEXT DEFAULT '',
+            deleted_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dup_task_id ON duplicate_scan_result (task_id)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dup_task_barcode ON duplicate_scan_result (task_id, barcode)'))
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS low_version_scan_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES batch_task(id),
+            barcode TEXT NOT NULL,
+            image_type TEXT NOT NULL,
+            version_label TEXT,
+            folder_ctime TEXT NOT NULL,
+            image_count INTEGER DEFAULT 0,
+            total_file_size INTEGER DEFAULT 0,
+            is_latest INTEGER DEFAULT 0,
+            is_only_version INTEGER DEFAULT 0,
+            meets_threshold INTEGER DEFAULT 0,
+            main_threshold INTEGER DEFAULT 0,
+            detail_threshold INTEGER DEFAULT 0,
+            status_tag TEXT DEFAULT 'will_delete',
+            delete_status TEXT DEFAULT 'pending',
+            delete_message TEXT DEFAULT '',
+            deleted_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_lv_task_id ON low_version_scan_result (task_id)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_lv_task_barcode ON low_version_scan_result (task_id, barcode)'))
+    conn.commit()
+
+    # Mark stale running and queued tasks as interrupted on startup
+    now_iso = datetime.datetime.now().isoformat()
+    _running = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'running'")).fetchone()[0]
+    _queued = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'queued'")).fetchone()[0]
+    if _running:
+        conn.execute(text(
+            "UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务中断', finished_at = :now WHERE status = 'running'"
+        ), {'now': now_iso})
+    if _queued:
+        conn.execute(text(
+            "UPDATE batch_task SET status = 'interrupted', error_message = '程序重启，任务未执行', finished_at = :now WHERE status = 'queued'"
+        ), {'now': now_iso})
+    if _running or _queued:
+        conn.commit()
+        import logging
+        logging.getLogger(__name__).info(
+            "Marked %d running and %d queued batch tasks as interrupted on startup", _running, _queued
+        )
+
 from routes.scan import scan_bp
 from routes.images import images_bp
 from routes.export import export_bp
 from routes.pending import pending_bp
 from routes.batch import batch_bp
+from routes.batch_tasks import batch_tasks_bp
 
 app.register_blueprint(scan_bp, url_prefix='/api')
 app.register_blueprint(images_bp, url_prefix='/api')
 app.register_blueprint(export_bp, url_prefix='/api')
 app.register_blueprint(pending_bp, url_prefix='/api')
 app.register_blueprint(batch_bp, url_prefix='/api')
+app.register_blueprint(batch_tasks_bp, url_prefix='/api')
 
 
 def _get_icon_path():
@@ -246,6 +349,14 @@ def _configure_cors(app, port):
     CORS(app, origins=origins)
 
 
+def _cleanup_exports_on_startup():
+    """Shared startup cleanup — reset stale processing first, then remove old
+    export records.  Called by both tray and non-tray startup paths."""
+    from routes.export import cleanup_old_exports, reset_stale_processing
+    reset_stale_processing()
+    cleanup_old_exports()
+
+
 def start_tray(port, open_browser_on_start=True):
     import pystray
     from PIL import Image as PILImage
@@ -262,8 +373,7 @@ def start_tray(port, open_browser_on_start=True):
     logger = logging.getLogger(__name__)
 
     # Cleanup old export tasks on startup
-    from routes.export import cleanup_old_exports
-    cleanup_old_exports()
+    _cleanup_exports_on_startup()
 
     # Check port availability with fallback
     resolved = _resolve_port('127.0.0.1', port)
@@ -352,8 +462,7 @@ if __name__ == '__main__':
             if resolved != port:
                 print(f"Port {port} in use, using {resolved} instead")
             port = resolved
-            from routes.export import cleanup_old_exports
-            cleanup_old_exports()
+            _cleanup_exports_on_startup()
             _ensure_firewall_rule(port)
             _configure_cors(app, port)
             if args.open_browser:

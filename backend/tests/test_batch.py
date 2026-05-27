@@ -51,8 +51,10 @@ def client(sess, monkeypatch):
     """Flask test client with batch blueprint and test session."""
     import routes.batch
     import versioning
+    import task_engine
     monkeypatch.setattr(routes.batch, "session", sess)
     monkeypatch.setattr(versioning, "session", sess)
+    monkeypatch.setattr(task_engine, "session", sess)
 
     app = Flask(__name__)
     app.register_blueprint(routes.batch.batch_bp, url_prefix='/api')

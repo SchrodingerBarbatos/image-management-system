@@ -7,6 +7,8 @@ from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS
 export_bp = Blueprint('export', __name__)
 _log = logging.getLogger(__name__)
 
+_export_lock = threading.Lock()
+
 
 def filter_to_single_version(imgs, barcodes, session):
     """Return subset of imgs containing only one version per (barcode, image_type).
@@ -301,9 +303,15 @@ def generate_zip():
     # Compute per-barcode match counts (include all barcodes, even unmatched)
     barcode_counts = _compute_barcode_counts(imgs, barcodes)
 
-    task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
-    session.add(task)
-    session.commit()
+    # Concurrency guard: check + create + commit must be atomic
+    with _export_lock:
+        running = session.query(ExportTask).filter(ExportTask.status == 'processing').first()
+        if running:
+            return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
+
+        task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
+        session.add(task)
+        session.commit()
 
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
     threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
@@ -412,19 +420,39 @@ def download_detail(task_id):
     )
 
 
+def reset_stale_processing():
+    """Startup helper — mark ALL processing export tasks as failed
+    so they don't permanently block new exports."""
+    with _export_lock:
+        stale = session.query(ExportTask).filter(
+            ExportTask.status == 'processing',
+        ).all()
+        if stale:
+            for task in stale:
+                task.status = 'failed'
+                task.error_message = '程序重启或导出进程异常中断'
+            session.commit()
+            _log.info("Reset %d stale processing export tasks to failed", len(stale))
+
+
 def cleanup_old_exports():
-    """Remove export tasks and their files older than ZIP_CLEANUP_HOURS."""
-    cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
-    old_tasks = session.query(ExportTask).filter(
-        ExportTask.created_at < cutoff.isoformat(),
-        ExportTask.status != 'processing',
-    ).all()
-    for task in old_tasks:
-        if task.zip_path and os.path.exists(task.zip_path):
-            try:
-                os.remove(task.zip_path)
-            except OSError:
-                pass
-        session.delete(task)
-    session.commit()
+    """Remove export tasks and their files older than ZIP_CLEANUP_HOURS.
+    Processing tasks are skipped (they should already have been handled by
+    reset_stale_processing)."""
+    with _export_lock:
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
+        old_tasks = session.query(ExportTask).filter(
+            ExportTask.created_at < cutoff.isoformat(),
+            ExportTask.status != 'processing',
+        ).all()
+        for task in old_tasks:
+            if task.zip_path and os.path.exists(task.zip_path):
+                try:
+                    os.remove(task.zip_path)
+                except OSError:
+                    pass
+            session.delete(task)
+        if old_tasks:
+            session.commit()
+            _log.info("Cleaned up %d old export tasks", len(old_tasks))
 
