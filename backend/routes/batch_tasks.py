@@ -317,6 +317,14 @@ def delete_duplicate_scan_task(task_id):
 _ISO_RE = __import__('re').compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 
 
+def _validate_result_ids(result_ids):
+    if not isinstance(result_ids, list) or not result_ids:
+        return 'result_ids must be a non-empty list'
+    if not all(isinstance(result_id, int) and not isinstance(result_id, bool) for result_id in result_ids):
+        return 'result_ids must contain only integer ids'
+    return None
+
+
 @batch_tasks_bp.route('/batch/duplicate-scan/tasks/<int:task_id>/delete', methods=['POST'])
 def delete_duplicate_scan_results(task_id):
     """Delete images based on duplicate scan results. Re-validate before deletion."""
@@ -329,8 +337,11 @@ def delete_duplicate_scan_results(task_id):
     result_ids = data.get('result_ids', [])
     delete_files = data.get('delete_files', False)
 
-    if mode != 'selected' or not result_ids:
+    if mode != 'selected':
         return jsonify({'error': 'mode must be "selected" and result_ids must be non-empty'}), 400
+    validation_error = _validate_result_ids(result_ids)
+    if validation_error:
+        return jsonify({'error': validation_error}), 400
 
     # Load selected results
     results = session.query(DuplicateScanResult).filter(
@@ -589,8 +600,11 @@ def delete_low_version_scan_results(task_id):
     result_ids = data.get('result_ids', [])
     delete_files = data.get('delete_files', False)
 
-    if mode != 'selected' or not result_ids:
+    if mode != 'selected':
         return jsonify({'error': 'mode must be "selected" and result_ids must be non-empty'}), 400
+    validation_error = _validate_result_ids(result_ids)
+    if validation_error:
+        return jsonify({'error': validation_error}), 400
 
     results = session.query(LowVersionScanResult).filter(
         LowVersionScanResult.task_id == task_id,

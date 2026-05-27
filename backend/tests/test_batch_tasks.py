@@ -407,6 +407,29 @@ def test_path_outside_root_not_deleted(client, sess):
     assert '路径' in (r.get('delete_message') or '')
 
 
+@pytest.mark.parametrize(
+    ("task_type", "endpoint"),
+    [
+        ("duplicate_scan", "/api/batch/duplicate-scan/tasks/{task_id}/delete"),
+        ("low_version_scan", "/api/batch/low-version-scan/tasks/{task_id}/delete"),
+    ],
+)
+def test_task_delete_rejects_non_list_result_ids(client, task_type, endpoint):
+    """Deletion endpoints must reject malformed result_ids before querying."""
+    from task_engine import create_task
+
+    task, _ = create_task(task_type, params={}, auto_start=False)
+
+    resp = client.post(endpoint.format(task_id=task["id"]), json={
+        "mode": "selected",
+        "result_ids": "abc",
+        "delete_files": False,
+    })
+
+    assert resp.status_code == 400
+    assert "result_ids" in resp.get_json()["error"]
+
+
 def test_skipped_count_increments_on_validation_failure(client, sess):
     """skipped_count must increment when a result fails re-validation."""
     _make_root(sess)
