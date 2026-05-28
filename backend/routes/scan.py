@@ -29,6 +29,7 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             'total_roots': len(root_ids),
             'current_file': '',
             'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'broken_new': 0,
+            'rejected': 0,
             'thumbnail_total': 0, 'thumbnail_current': 0,
             'error': None,
             'started_at': datetime.datetime.now().isoformat(),
@@ -49,7 +50,7 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
         json.dumps({'job_id': job_id, 'root_ids': root_ids}))
 
     try:
-        total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0}
+        total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'rejected': 0}
         all_affected = set()
         roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
 
@@ -72,7 +73,7 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
                 progress('versioning', versioning_total=len(all_affected), versioning_current=idx + 1)
 
         _add_log('scan', 'success',
-            f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}",
+            f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}, 拒绝 {total['rejected']}",
             json.dumps(total))
 
         with _scan_lock:

@@ -82,6 +82,7 @@ export interface ScanJobStatus {
   skipped: number;
   broken_cleaned: number;
   broken_new: number;
+  rejected: number;
   thumbnail_total: number;
   thumbnail_current: number;
   error?: string;
