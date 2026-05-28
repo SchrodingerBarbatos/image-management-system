@@ -4,6 +4,7 @@ import os
 from flask import Blueprint, request, jsonify
 from sqlalchemy import func
 from models import session, RejectedBarcode, ScanRoot
+from sqlalchemy.orm import aliased
 
 rejected_bp = Blueprint('rejected', __name__)
 
@@ -18,10 +19,13 @@ def list_rejected():
     start_date = request.args.get('start_date', type=str)
     end_date = request.args.get('end_date', type=str)
 
-    query = session.query(RejectedBarcode)
+    sr = aliased(ScanRoot)
+    query = session.query(RejectedBarcode, sr.path).outerjoin(
+        sr, RejectedBarcode.scan_root_id == sr.id
+    )
 
     if barcode:
-        query = query.filter(RejectedBarcode.barcode == barcode)
+        query = query.filter(RejectedBarcode.barcode.like(f'%{barcode}%'))
     if scan_root_id:
         query = query.filter(RejectedBarcode.scan_root_id == scan_root_id)
     if start_date:
@@ -42,9 +46,9 @@ def list_rejected():
             'filename': r.filename,
             'reason': r.reason,
             'scan_root_id': r.scan_root_id,
-            'scan_root_path': session.get(ScanRoot, r.scan_root_id).path if session.get(ScanRoot, r.scan_root_id) else '',
+            'scan_root_path': root_path or '',
             'created_at': r.created_at,
-        } for r in items],
+        } for r, root_path in items],
         'total': total,
         'page': page,
         'page_size': page_size,
@@ -122,7 +126,7 @@ def delete_all():
     query = session.query(RejectedBarcode)
 
     if 'barcode' in data and data['barcode']:
-        query = query.filter(RejectedBarcode.barcode == data['barcode'])
+        query = query.filter(RejectedBarcode.barcode.like(f"%{data['barcode']}%"))
     if 'scan_root_id' in data and data['scan_root_id']:
         query = query.filter(RejectedBarcode.scan_root_id == data['scan_root_id'])
     if 'start_date' in data and data['start_date']:
@@ -130,21 +134,19 @@ def delete_all():
     if 'end_date' in data and data['end_date']:
         query = query.filter(RejectedBarcode.created_at <= data['end_date'] + 'T23:59:59')
 
-    items = query.all()
+    # 先取文件路径用于删除文件
+    file_paths = [fp for (fp,) in query.with_entities(RejectedBarcode.file_path).all()]
     failed_files = []
-    deleted_count = 0
 
-    for rejected in items:
-        # 尝试删除文件
+    for fp in file_paths:
         try:
-            if os.path.exists(rejected.file_path):
-                os.remove(rejected.file_path)
+            if os.path.exists(fp):
+                os.remove(fp)
         except OSError:
-            failed_files.append(rejected.file_path)
+            failed_files.append(fp)
 
-        session.delete(rejected)
-        deleted_count += 1
-
+    # 批量删除数据库记录
+    deleted_count = query.delete()
     session.commit()
 
     return jsonify({
@@ -167,12 +169,12 @@ def get_stats():
 
     by_reason = {}
     for reason, count in reason_stats:
-        # 简化原因描述
-        if "长度" in reason:
+        # 按原因前缀归类（去掉变量部分）
+        if reason.startswith("长度"):
             key = "长度不符合GTIN要求"
         elif "非数字字符" in reason:
             key = "包含非数字字符"
-        elif "校验位" in reason:
+        elif reason.startswith("校验位"):
             key = "校验位错误"
         else:
             key = reason

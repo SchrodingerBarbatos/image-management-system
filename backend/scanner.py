@@ -198,7 +198,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                 continue
             full_path = os.path.normpath(os.path.join(dirpath, fname))
 
-            _report('scanning', current_file=fname, added=added, skipped=skipped)
+            _report('scanning', current_file=fname, added=added, skipped=skipped, rejected=rejected_count)
 
             existing = indexed_map.pop(full_path, None)
             if existing is not None:
@@ -218,6 +218,20 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                     continue
                 reparsed = parse_filename(fname, fuzzy_type)
                 if reparsed:
+                    # GTIN validation for re-parsed barcodes
+                    is_valid, reason = validate_gtin(reparsed['barcode'])
+                    if not is_valid:
+                        rejected = RejectedBarcode(
+                            barcode=reparsed['barcode'],
+                            file_path=full_path,
+                            filename=fname,
+                            reason=reason,
+                            scan_root_id=root_id,
+                        )
+                        session.add(rejected)
+                        session.delete(existing)
+                        rejected_count += 1
+                        continue
                     existing.barcode = reparsed['barcode']
                     existing.image_type = reparsed['image_type']
                     existing.sequence = reparsed['sequence']
@@ -312,7 +326,8 @@ def _do_scan(root, root_id, full_scan, progress_callback):
         session.commit()
 
     _report('root_done', added=added, skipped=skipped,
-            broken_cleaned=broken_cleaned, broken_new=leftover_count)
+            broken_cleaned=broken_cleaned, broken_new=leftover_count,
+            rejected=rejected_count)
 
     return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count,
             'rejected': rejected_count, 'affected_barcodes': list(affected_barcodes)}

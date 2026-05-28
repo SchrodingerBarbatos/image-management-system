@@ -168,7 +168,7 @@ class LowVersionScanResult(Base):
 class RejectedBarcode(Base):
     __tablename__ = 'rejected_barcode'
     id = Column(Integer, primary_key=True)
-    barcode = Column(Text, nullable=False, index=True)
+    barcode = Column(Text, nullable=False)
     file_path = Column(Text, nullable=False)
     filename = Column(Text, nullable=False)
     reason = Column(Text, nullable=False)

@@ -298,7 +298,7 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
                 <div style={{ fontSize: 12, color: '#888' }}>当前文件: {scanProgress.current_file}</div>
               )}
               <div style={{ fontSize: 12 }}>
-                新增 {scanProgress.added} | 跳过 {scanProgress.skipped} | 清理 {scanProgress.broken_cleaned}
+                新增 {scanProgress.added} | 跳过 {scanProgress.skipped} | 清理 {scanProgress.broken_cleaned} | 拒绝 {scanProgress.rejected}
               </div>
               {scanProgress.phase === 'thumbnails' && scanProgress.thumbnail_total > 0 && (
                 <Progress

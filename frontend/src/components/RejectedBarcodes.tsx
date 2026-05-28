@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Modal, Table, Button, Input, Space, Popconfirm, message, Card, Row, Col, Statistic } from 'antd';
 import { DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import { rejectedBarcodeApi, RejectedBarcode, RejectedBarcodeStats, RejectedBarcodeParams } from '../services/api';
@@ -15,10 +15,23 @@ const RejectedBarcodes: React.FC<Props> = ({ visible, onClose }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [filters, setFilters] = useState<RejectedBarcodeParams>({});
+  const [barcodeInput, setBarcodeInput] = useState('');
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [stats, setStats] = useState<RejectedBarcodeStats | null>(null);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const fetchData = async () => {
+  // Debounce barcode input → filters
+  useEffect(() => {
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      setFilters(prev => ({ ...prev, barcode: barcodeInput || undefined }));
+    }, 300);
+    return () => {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    };
+  }, [barcodeInput]);
+
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const result = await rejectedBarcodeApi.list({
@@ -33,23 +46,23 @@ const RejectedBarcodes: React.FC<Props> = ({ visible, onClose }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, pageSize, filters]);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const result = await rejectedBarcodeApi.getStats();
       setStats(result);
     } catch (error) {
       console.error('获取统计信息失败', error);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (visible) {
       fetchData();
       fetchStats();
     }
-  }, [visible, page, pageSize, filters]);
+  }, [visible, fetchData, fetchStats]);
 
   const handleDelete = async (id: number) => {
     try {
@@ -87,6 +100,11 @@ const RejectedBarcodes: React.FC<Props> = ({ visible, onClose }) => {
     } catch (error) {
       message.error('全选删除失败');
     }
+  };
+
+  const handleResetFilters = () => {
+    setBarcodeInput('');
+    setFilters({});
   };
 
   const columns = [
@@ -185,11 +203,11 @@ const RejectedBarcodes: React.FC<Props> = ({ visible, onClose }) => {
       <Space style={{ marginBottom: 16 }}>
         <Input
           placeholder="按条码筛选"
-          value={filters.barcode}
-          onChange={e => setFilters({ ...filters, barcode: e.target.value })}
+          value={barcodeInput}
+          onChange={e => setBarcodeInput(e.target.value)}
           allowClear
         />
-        <Button icon={<ReloadOutlined />} onClick={() => setFilters({})}>
+        <Button icon={<ReloadOutlined />} onClick={handleResetFilters}>
           重置筛选
         </Button>
         <Button
