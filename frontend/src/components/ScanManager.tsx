@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Table, Button, Input, Switch, Select, Space, Popconfirm, message, Tag, Radio, Progress } from 'antd';
-import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined, LoadingOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined, LoadingOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import { ScanRoot, ScanLog, ScanJobStatus, scanRootApi, scanApi, scanLogApi } from '../services/api';
+import RejectedBarcodes from './RejectedBarcodes';
 
 interface Props {
   visible: boolean;
@@ -31,6 +32,9 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
   const [logVisible, setLogVisible] = useState(false);
   const [logs, setLogs] = useState<ScanLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+
+  // Rejected barcodes viewer
+  const [rejectedVisible, setRejectedVisible] = useState(false);
 
   const fetchRoots = () => {
     setLoading(true);
@@ -251,6 +255,7 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
           </Radio.Group>
           <Button icon={<ScanOutlined />} loading={scanning} onClick={handleScan}>执行扫描</Button>
           <Button icon={<FileTextOutlined />} onClick={fetchLogs}>日志</Button>
+          <Button icon={<ExclamationCircleOutlined />} onClick={() => setRejectedVisible(true)}>非标品记录</Button>
         </Space>
         {showAdd && (
           <Space style={{ marginBottom: 12 }}>
@@ -331,6 +336,11 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
           }}
           scroll={{ y: 400 }} />
       </Modal>
+
+      <RejectedBarcodes
+        visible={rejectedVisible}
+        onClose={() => setRejectedVisible(false)}
+      />
     </>
   );
 };
