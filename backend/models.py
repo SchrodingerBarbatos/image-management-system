@@ -163,3 +163,20 @@ class LowVersionScanResult(Base):
         Index('idx_lv_task_id', 'task_id'),
         Index('idx_lv_task_barcode', 'task_id', 'barcode'),
     )
+
+
+class RejectedBarcode(Base):
+    __tablename__ = 'rejected_barcode'
+    id = Column(Integer, primary_key=True)
+    barcode = Column(Text, nullable=False, index=True)
+    file_path = Column(Text, nullable=False)
+    filename = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    scan_root_id = Column(Integer, ForeignKey('scan_root.id'), nullable=False)
+    created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
+
+    __table_args__ = (
+        Index('idx_rejected_barcode', 'barcode'),
+        Index('idx_rejected_scan_root', 'scan_root_id'),
+        Index('idx_rejected_created', 'created_at'),
+    )
