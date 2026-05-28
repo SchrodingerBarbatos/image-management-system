@@ -2,6 +2,59 @@ import re, os, hashlib, datetime
 from models import session, Image, ScanRoot
 from thumbnail import generate_thumbnail
 
+
+def calculate_gtin_check_digit(payload: str) -> int:
+    """计算 GTIN 校验位。"""
+    total = 0
+    reversed_payload = [int(x) for x in payload[::-1]]
+
+    for idx, num in enumerate(reversed_payload):
+        if idx % 2 == 0:
+            total += num * 3
+        else:
+            total += num
+
+    return (10 - (total % 10)) % 10
+
+
+def validate_gtin(barcode: str):
+    """
+    验证 GTIN-8 / GTIN-12 / GTIN-13 / GTIN-14
+
+    Returns:
+        (is_valid, reason)
+        is_valid: bool
+        reason: str
+    """
+    # 去除首尾空格
+    barcode = barcode.strip()
+
+    # 1. 长度校验
+    if len(barcode) not in (8, 12, 13, 14):
+        return False, (
+            f"长度 {len(barcode)} 不符合 GTIN 要求"
+            "（需要 8、12、13 或 14 位）"
+        )
+
+    # 2. 数字校验
+    if not barcode.isdigit():
+        return False, "包含非数字字符"
+
+    digits = [int(x) for x in barcode]
+
+    check_digit = digits[-1]
+    payload = digits[:-1]
+
+    # 3. GTIN Modulo-10 校验
+    expected_check = calculate_gtin_check_digit(barcode[:-1])
+
+    if check_digit != expected_check:
+        return False, (
+            f"校验位错误（期望 {expected_check}，实际 {check_digit}）"
+        )
+
+    return True, ""
+
 # NAMED_RE: barcode_主图/详情图_sequence.ext — type from filename
 NAMED_RE = re.compile(
     r'^(\d+)_(主图|详情图)_(\d+)\.(jpg|jpeg|png|gif|webp)$', re.IGNORECASE
