@@ -314,3 +314,48 @@ export const taskApi = {
     }).then(r => r.data),
 };
 
+// ---------- Rejected Barcodes ----------
+
+export interface RejectedBarcode {
+  id: number;
+  barcode: string;
+  file_path: string;
+  filename: string;
+  reason: string;
+  scan_root_id: number;
+  scan_root_path: string;
+  created_at: string;
+}
+
+export interface RejectedBarcodeStats {
+  total: number;
+  by_reason: Record<string, number>;
+  by_scan_root: Record<string, number>;
+}
+
+export interface RejectedBarcodeParams {
+  page?: number;
+  page_size?: number;
+  barcode?: string;
+  scan_root_id?: number;
+  start_date?: string;
+  end_date?: string;
+}
+
+export const rejectedBarcodeApi = {
+  list: (params?: RejectedBarcodeParams) =>
+    api.get<Paginated<RejectedBarcode>>('/rejected-barcodes', { params }).then(r => r.data),
+
+  delete: (id: number) =>
+    api.delete<{ message: string; deleted_file: boolean }>(`/rejected-barcodes/${id}`).then(r => r.data),
+
+  deleteBatch: (ids: number[]) =>
+    api.post<{ message: string; deleted_count: number; failed_files: string[] }>('/rejected-barcodes/delete-batch', { ids }).then(r => r.data),
+
+  deleteAll: (params?: RejectedBarcodeParams) =>
+    api.post<{ message: string; deleted_count: number; failed_files: string[] }>('/rejected-barcodes/delete-all', params).then(r => r.data),
+
+  getStats: () =>
+    api.get<RejectedBarcodeStats>('/rejected-barcodes/stats').then(r => r.data),
+};
+
