@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from models import Base, Image, ScanRoot
+from models import Base, Image, ScanRoot, RejectedBarcode
 
 
 # ---------------------------------------------------------------------------
@@ -131,3 +131,81 @@ def test_full_scan_cleans_leftovers(sess, monkeypatch):
         Image.scan_root_id == sr.id
     ).count()
     assert remaining == 0
+
+
+# ---------------------------------------------------------------------------
+# GTIN validation during scan
+# ---------------------------------------------------------------------------
+
+
+def test_scan_rejects_invalid_gtin(sess, monkeypatch):
+    """扫描时拒绝非 GTIN 格式的条码。"""
+    import scanner
+
+    monkeypatch.setattr(scanner, "session", sess)
+    monkeypatch.setattr(
+        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5")
+    )
+
+    sr = ScanRoot(path="fake", enabled=True, recursive=False)
+    sess.add(sr)
+    sess.commit()
+
+    # Mock: 磁盘上有两个文件，一个有效 GTIN，一个无效
+    def fake_walk(path):
+        yield (path, [], ["4006381333931_主图_1.jpg", "12345_主图_1.jpg"])
+
+    monkeypatch.setattr(scanner, "_walk_nonrecursive", fake_walk)
+    monkeypatch.setattr(scanner, "file_fingerprint", lambda p: "100_123")
+    monkeypatch.setattr(os.path, "getsize", lambda p: 100)
+
+    result = scanner.scan_root(sr.id, full_scan=True)
+
+    # 有效 GTIN 应该被添加
+    assert result["added"] == 1
+
+    # 无效 GTIN 应该被拒绝
+    assert result["rejected"] == 1
+
+    # 验证拒绝记录已创建
+    rejected = sess.query(RejectedBarcode).all()
+    assert len(rejected) == 1
+    assert rejected[0].barcode == "12345"
+    assert "长度" in rejected[0].reason
+
+    # 验证无效 GTIN 没有创建 Image 记录
+    images = sess.query(Image).all()
+    assert len(images) == 1
+    assert images[0].barcode == "4006381333931"
+
+
+def test_scan_rejects_gtin_with_invalid_check_digit(sess, monkeypatch):
+    """扫描时拒绝校验位错误的 GTIN。"""
+    import scanner
+
+    monkeypatch.setattr(scanner, "session", sess)
+    monkeypatch.setattr(
+        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5")
+    )
+
+    sr = ScanRoot(path="fake", enabled=True, recursive=False)
+    sess.add(sr)
+    sess.commit()
+
+    # Mock: 磁盘上有一个校验位错误的 GTIN
+    def fake_walk(path):
+        yield (path, [], ["4006381333932_主图_1.jpg"])
+
+    monkeypatch.setattr(scanner, "_walk_nonrecursive", fake_walk)
+    monkeypatch.setattr(scanner, "file_fingerprint", lambda p: "100_123")
+    monkeypatch.setattr(os.path, "getsize", lambda p: 100)
+
+    result = scanner.scan_root(sr.id, full_scan=True)
+
+    assert result["added"] == 0
+    assert result["rejected"] == 1
+
+    rejected = sess.query(RejectedBarcode).all()
+    assert len(rejected) == 1
+    assert rejected[0].barcode == "4006381333932"
+    assert "校验位错误" in rejected[0].reason

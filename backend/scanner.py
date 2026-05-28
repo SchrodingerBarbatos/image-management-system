@@ -1,5 +1,5 @@
 import re, os, hashlib, datetime
-from models import session, Image, ScanRoot
+from models import session, Image, ScanRoot, RejectedBarcode
 from thumbnail import generate_thumbnail
 
 
@@ -163,6 +163,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     added = 0
     skipped = 0
     broken_cleaned = 0  # in full_scan mode this counts all deleted records, not just broken
+    rejected_count = 0
     thumb_jobs = []
     affected_barcodes = set()
 
@@ -234,6 +235,21 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             parsed = parse_filename(fname, fuzzy_type)
             if not parsed:
                 continue
+
+            # GTIN validation: reject non-GTIN barcodes
+            is_valid, reason = validate_gtin(parsed['barcode'])
+            if not is_valid:
+                rejected = RejectedBarcode(
+                    barcode=parsed['barcode'],
+                    file_path=full_path,
+                    filename=fname,
+                    reason=reason,
+                    scan_root_id=root_id,
+                )
+                session.add(rejected)
+                rejected_count += 1
+                continue
+
             try:
                 fsize = os.path.getsize(full_path)
                 fp = file_fingerprint(full_path)
@@ -299,4 +315,4 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             broken_cleaned=broken_cleaned, broken_new=leftover_count)
 
     return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count,
-            'affected_barcodes': list(affected_barcodes)}
+            'rejected': rejected_count, 'affected_barcodes': list(affected_barcodes)}
