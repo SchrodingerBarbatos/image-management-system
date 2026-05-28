@@ -40,26 +40,99 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
 
 
 def _check_disabled_scan_roots(items):
-    """检查是否有图片属于禁用的扫描目录，返回禁用目录中的图片数量。"""
+    """检查是否有图片属于禁用的扫描目录，返回禁用目录中的图片数量。
+    使用 thread-safe session 以支持后台任务调用。"""
     if not items:
         return 0
+    sess = _get_thread_session()
     # Build OR conditions for (barcode, image_type, folder_ctime)
-    conditions = []
-    for item in items:
-        conditions.append(
-            (Image.barcode == item['barcode']) &
-            (Image.image_type == item['image_type']) &
-            (Image.folder_ctime == item['folder_ctime'])
-        )
-    if not conditions:
-        return 0
-    disabled_count = session.query(Image.id).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id
-    ).filter(
-        ScanRoot.enabled == False,
-        or_(*conditions),
-    ).count()
+    # Chunked to stay under SQLite expression depth limit of ~1000
+    disabled_count = 0
+    chunk_size = 500
+    for chunk_start in range(0, len(items), chunk_size):
+        chunk = items[chunk_start:chunk_start + chunk_size]
+        conditions = []
+        for item in chunk:
+            conditions.append(
+                (Image.barcode == item['barcode']) &
+                (Image.image_type == item['image_type']) &
+                (Image.folder_ctime == item['folder_ctime'])
+            )
+        if conditions:
+            disabled_count += sess.query(Image.id).join(
+                ScanRoot, Image.scan_root_id == ScanRoot.id
+            ).filter(
+                ScanRoot.enabled == False,
+                or_(*conditions),
+            ).count()
     return disabled_count
+
+
+def validate_image_paths(imgs, scan_roots):
+    """验证图片路径是否安全（在扫描目录下）。
+    返回 (is_valid, error_message) 元组。"""
+    for img in imgs:
+        root_path = scan_roots.get(img.scan_root_id)
+        if not root_path:
+            return False, f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
+        real_file = os.path.realpath(img.file_path)
+        real_root = os.path.realpath(root_path)
+        try:
+            safe = os.path.commonpath([real_file, real_root]) == real_root
+        except ValueError:
+            safe = False
+        if not safe:
+            return False, '文件路径不在扫描目录下，拒绝删除'
+        if not os.path.exists(img.file_path):
+            return False, f'文件不存在: {img.file_path}'
+    return True, None
+
+
+def delete_images_with_validation(barcode, image_type, folder_ctime, delete_files):
+    """删除图片，包含路径安全验证。
+    返回 (deleted_count, error_message) 元组。
+    注意：文件删除是 best-effort，无法回滚。"""
+    sess = _get_thread_session()
+
+    # 获取匹配的图片
+    match_ids = select(Image.id).where(
+        Image.barcode == barcode,
+        Image.image_type == image_type,
+        Image.folder_ctime == folder_ctime,
+        Image.status == 'active',
+        Image.confirmed == True,
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).where(
+        ScanRoot.enabled == True,
+    )
+    imgs = sess.query(Image).filter(Image.id.in_(match_ids)).all()
+
+    if not imgs:
+        return 0, '已无有效图片'
+
+    # Phase 1: 验证路径安全
+    if delete_files:
+        scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
+        is_valid, error_msg = validate_image_paths(imgs, scan_roots)
+        if not is_valid:
+            return 0, error_msg
+
+    # Phase 2: 删除文件（best-effort，无法回滚）
+    file_errors = []
+    if delete_files:
+        for img in imgs:
+            try:
+                os.remove(img.file_path)
+            except OSError as e:
+                file_errors.append(f'{img.file_path}: {e}')
+
+    if file_errors:
+        return 0, f'文件删除失败: {"; ".join(file_errors)}'
+
+    # Phase 3: 删除索引
+    for img in imgs:
+        sess.delete(img)
+
+    return len(imgs), None
 
 
 def _build_image_stats_query():

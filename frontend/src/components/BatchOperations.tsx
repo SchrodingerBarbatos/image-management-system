@@ -102,7 +102,16 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     }).catch(() => {});
   };
 
+  const cancelDupPolling = () => {
+    if (dupPollTimerRef.current) {
+      clearTimeout(dupPollTimerRef.current);
+      dupPollTimerRef.current = null;
+    }
+    setDupPolling(false);
+  };
+
   const pollDupTask = (taskId: number) => {
+    cancelDupPolling();
     setDupPolling(true);
     taskApi.getTask(taskId).then(task => {
       setDupTaskStatus(task.status);
@@ -133,7 +142,16 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     }).catch(() => {});
   };
 
+  const cancelLowPolling = () => {
+    if (lowPollTimerRef.current) {
+      clearTimeout(lowPollTimerRef.current);
+      lowPollTimerRef.current = null;
+    }
+    setLowPolling(false);
+  };
+
   const pollLowTask = (taskId: number) => {
+    cancelLowPolling();
     setLowPolling(true);
     taskApi.getTask(taskId).then(task => {
       setLowTaskStatus(task.status);
@@ -154,6 +172,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
 
   // ===== Tab 1: Scan duplicates =====
   const handleScanDuplicates = async () => {
+    cancelDupPolling();
     setDupLoading(true);
     try {
       const task = await taskApi.createDuplicateScan();
@@ -181,6 +200,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       message.warning('至少启用一项阈值');
       return;
     }
+    cancelLowPolling();
     setLowLoading(true);
     try {
       const task = await taskApi.createLowVersionScan({
@@ -208,7 +228,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   };
 
   // ===== Duplicate selection helpers =====
-  const toggleDupAll = () => {
+  const toggleDupPage = () => {
     if (!dupResults || dupResults.items.length === 0) return;
     const pageIds = dupResults.items.map(r => r.id);
     const allPageSelected = pageIds.every(id => dupResultSelectedIds.has(id));
@@ -221,6 +241,17 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     setDupResultSelectedIds(next);
   };
 
+  const selectAllDup = async () => {
+    if (!dupTaskId || !dupResults) return;
+    try {
+      const allData = await taskApi.getDuplicateScanResults(dupTaskId, 1, dupResults.total);
+      const allIds = new Set(allData.items.map(r => r.id));
+      setDupResultSelectedIds(allIds);
+    } catch {
+      message.error('获取全部结果失败');
+    }
+  };
+
   const toggleDupOne = (id: number) => {
     const next = new Set(dupResultSelectedIds);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -228,7 +259,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   };
 
   // ===== Low version selection helpers =====
-  const toggleLowAll = () => {
+  const toggleLowPage = () => {
     if (!lowResults || lowResults.items.length === 0) return;
     const selectable = lowResults.items.filter(r => r.status_tag === 'will_delete');
     if (selectable.length === 0) return;
@@ -241,6 +272,17 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       selectableIds.forEach(id => next.add(id));
     }
     setLowResultSelectedIds(next);
+  };
+
+  const selectAllLow = async () => {
+    if (!lowTaskId || !lowResults) return;
+    try {
+      const allData = await taskApi.getLowVersionScanResults(lowTaskId, 1, lowResults.total);
+      const allSelectableIds = new Set(allData.items.filter(r => r.status_tag === 'will_delete').map(r => r.id));
+      setLowResultSelectedIds(allSelectableIds);
+    } catch {
+      message.error('获取全部结果失败');
+    }
   };
 
   const toggleLowOne = (id: number) => {
@@ -434,9 +476,10 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
           {dupResults && dupResults.items.length > 0 && (
             <>
               <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
-                <Checkbox checked={dupAllChecked} indeterminate={dupIndeterminate} onChange={toggleDupAll}>
-                  全选
+                <Checkbox checked={dupAllChecked} indeterminate={dupIndeterminate} onChange={toggleDupPage}>
+                  全选当前页
                 </Checkbox>
+                <Button size="small" onClick={selectAllDup}>全选全部 ({dupResults.total})</Button>
                 <Text type="secondary">共 {dupResults.total} 条结果</Text>
               </div>
 
@@ -496,18 +539,23 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       label: '删除低版本',
       children: (
         <div>
+          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>
+            删除图片数量少于阈值的版本（每个条码至少保留一个版本）
+          </div>
           <Space direction="vertical" style={{ marginBottom: 16 }}>
             <Space>
               <Checkbox checked={mainEnabled} onChange={e => setMainEnabled(e.target.checked)}>
-                启用主图 &gt;=
+                主图删除图片数 &lt;
               </Checkbox>
               <InputNumber min={1} value={mainThreshold} onChange={v => setMainThreshold(v || 3)} disabled={!mainEnabled} style={{ width: 70 }} />
+              <span style={{ color: '#666' }}>张的版本</span>
             </Space>
             <Space>
               <Checkbox checked={detailEnabled} onChange={e => setDetailEnabled(e.target.checked)}>
-                启用详情图 &gt;=
+                详情图删除图片数 &lt;
               </Checkbox>
               <InputNumber min={1} value={detailThreshold} onChange={v => setDetailThreshold(v || 5)} disabled={!detailEnabled} style={{ width: 70 }} />
+              <span style={{ color: '#666' }}>张的版本</span>
             </Space>
           </Space>
 
@@ -550,9 +598,10 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
           {lowResults && lowResults.items.length > 0 && (
             <>
               <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
-                <Checkbox checked={lowAllChecked} indeterminate={lowIndeterminate} onChange={toggleLowAll}>
-                  全选（仅将删除项）
+                <Checkbox checked={lowAllChecked} indeterminate={lowIndeterminate} onChange={toggleLowPage}>
+                  全选当前页（仅将删除项）
                 </Checkbox>
+                <Button size="small" onClick={selectAllLow}>全选全部待删除项</Button>
                 <Text type="secondary">共 {lowResults.total} 条结果</Text>
               </div>
 

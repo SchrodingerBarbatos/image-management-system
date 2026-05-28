@@ -1,12 +1,13 @@
-import json, logging, os, datetime
+import json, logging, datetime
 from flask import Blueprint, request, jsonify
-from sqlalchemy import or_, select, func
+from sqlalchemy import or_, func
 from models import (
     session, Image, ImageVersion, ScanRoot,
     BatchTask, DuplicateScanResult, LowVersionScanResult,
 )
 from versioning import update_versions_for_barcode
-from task_engine import create_task, finish_task, update_task_progress, _get_thread_session
+from task_engine import finish_task, update_task_progress, _get_thread_session
+from routes.batch import _check_disabled_scan_roots, delete_images_with_validation
 
 batch_tasks_bp = Blueprint('batch_tasks', __name__)
 _log = logging.getLogger(__name__)
@@ -16,7 +17,6 @@ _log = logging.getLogger(__name__)
 
 def _run_duplicate_scan(task_id):
     """Background handler for duplicate_scan tasks."""
-    from task_engine import TASK_HANDLERS  # avoid circular at module level
     _log.info("Starting duplicate_scan task %d", task_id)
 
     sess = _get_thread_session()
@@ -314,9 +314,6 @@ def delete_duplicate_scan_task(task_id):
     return jsonify(result)
 
 
-_ISO_RE = __import__('re').compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
-
-
 def _validate_result_ids(result_ids):
     """Validate that result_ids is a non-empty list of positive integers.
     Returns (None, error_response) on failure, or (list, None) on success."""
@@ -384,37 +381,15 @@ def delete_duplicate_scan_results(task_id):
         for dup_ctime in dup_ctimes:
             valid_duplicates.add((v.barcode, v.image_type, dup_ctime))
 
-    # Check disabled scan roots for all items (chunked to stay under
-    # SQLite expression depth limit of ~1000)
+    # Check disabled scan roots using shared helper
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-    disabled_count = 0
-    _chunk_size = 500
-    for _chunk_start in range(0, len(items), _chunk_size):
-        _chunk = items[_chunk_start:_chunk_start + _chunk_size]
-        _conds = []
-        for item in _chunk:
-            _conds.append(
-                (Image.barcode == item['barcode']) &
-                (Image.image_type == item['image_type']) &
-                (Image.folder_ctime == item['folder_ctime'])
-            )
-        if _conds:
-            disabled_count += session.query(Image.id).join(
-                ScanRoot, Image.scan_root_id == ScanRoot.id,
-            ).filter(
-                ScanRoot.enabled == False,
-                or_(*_conds),
-            ).count()
-
+    disabled_count = _check_disabled_scan_roots(items)
     if disabled_count > 0:
         return jsonify({'error': '部分图片属于已禁用的扫描目录，无法删除', 'disabled_count': disabled_count}), 403
 
     affected_barcodes = set()
     deleted_image_count = 0
     skipped_count = 0
-
-    # Pre-load scan roots for path validation
-    scan_roots = {sr.id: sr.path for sr in session.query(ScanRoot).all()}
 
     for r in results:
         key = (r.barcode, r.image_type, r.folder_ctime)
@@ -424,69 +399,20 @@ def delete_duplicate_scan_results(task_id):
             skipped_count += 1
             continue
 
-        # Delete images matching this key
-        match_ids = select(Image.id).where(
-            Image.barcode == r.barcode,
-            Image.image_type == r.image_type,
-            Image.folder_ctime == r.folder_ctime,
-            Image.status == 'active',
-            Image.confirmed == True,
-        ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).where(
-            ScanRoot.enabled == True,
+        # Use shared helper for deletion with validation
+        deleted, error_msg = delete_images_with_validation(
+            r.barcode, r.image_type, r.folder_ctime, delete_files
         )
 
-        imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
-
-        # ---- Phase 1: pre-validate every image before touching disk or DB ----
-        validation_msg = None
-        if delete_files and imgs:
-            for img in imgs:
-                root_path = scan_roots.get(img.scan_root_id)
-                if not root_path:
-                    validation_msg = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
-                    break
-                real_file = os.path.realpath(img.file_path)
-                real_root = os.path.realpath(root_path)
-                try:
-                    safe = os.path.commonpath([real_file, real_root]) == real_root
-                except ValueError:
-                    safe = False
-                if not safe:
-                    validation_msg = '文件路径不在扫描目录下，拒绝删除'
-                    break
-                if not os.path.exists(img.file_path):
-                    validation_msg = f'文件不存在: {img.file_path}'
-                    break
-
-        if validation_msg:
+        if error_msg:
             r.delete_status = 'failed'
-            r.delete_message = validation_msg
+            r.delete_message = error_msg
             skipped_count += 1
-            continue
-
-        # ---- Phase 2: delete files from disk (best-effort, cannot rollback) ----
-        file_errors = []
-        if delete_files and imgs:
-            for img in imgs:
-                try:
-                    os.remove(img.file_path)
-                except OSError as e:
-                    file_errors.append(f'{img.file_path}: {e}')
-
-        if file_errors:
-            r.delete_status = 'failed'
-            r.delete_message = f'文件删除失败: {"; ".join(file_errors)}'
-            skipped_count += 1
-            continue
-
-        # ---- Phase 3: all safe — delete DB indices ----
-        for img in imgs:
-            session.delete(img)
-            deleted_image_count += 1
-
-        r.delete_status = 'deleted'
-        r.deleted_at = datetime.datetime.now().isoformat()
-        affected_barcodes.add(r.barcode)
+        else:
+            r.delete_status = 'deleted'
+            r.deleted_at = datetime.datetime.now().isoformat()
+            deleted_image_count += deleted
+            affected_barcodes.add(r.barcode)
 
     session.commit()
 
@@ -647,37 +573,15 @@ def delete_low_version_scan_results(task_id):
     for v in versions:
         by_barcode_type[(v.barcode, v.image_type)].append(v)
 
-    # Check disabled scan roots for all items (chunked to stay under
-    # SQLite expression depth limit of ~1000)
+    # Check disabled scan roots using shared helper
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-    disabled_count = 0
-    _chunk_size = 500
-    for _chunk_start in range(0, len(items), _chunk_size):
-        _chunk = items[_chunk_start:_chunk_start + _chunk_size]
-        _conds = []
-        for i in _chunk:
-            _conds.append(
-                (Image.barcode == i['barcode']) &
-                (Image.image_type == i['image_type']) &
-                (Image.folder_ctime == i['folder_ctime'])
-            )
-        if _conds:
-            disabled_count += session.query(Image.id).join(
-                ScanRoot, Image.scan_root_id == ScanRoot.id,
-            ).filter(
-                ScanRoot.enabled == False,
-                or_(*_conds),
-            ).count()
-
+    disabled_count = _check_disabled_scan_roots(items)
     if disabled_count > 0:
         return jsonify({'error': '部分图片属于已禁用的扫描目录，无法删除', 'disabled_count': disabled_count}), 403
 
     affected_barcodes = set()
     deleted_image_count = 0
     skipped_count = 0
-
-    # Pre-load scan roots for path validation
-    scan_roots = {sr.id: sr.path for sr in session.query(ScanRoot).all()}
 
     for r in results:
         barcode, image_type, folder_ctime = r.barcode, r.image_type, r.folder_ctime
@@ -698,69 +602,18 @@ def delete_low_version_scan_results(task_id):
             skipped_count += 1
             continue
 
-        # Delete images
-        match_ids = select(Image.id).where(
-            Image.barcode == barcode,
-            Image.image_type == image_type,
-            Image.folder_ctime == folder_ctime,
-            Image.status == 'active',
-            Image.confirmed == True,
-        ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).where(
-            ScanRoot.enabled == True,
-        )
+        # Use shared helper for deletion with validation
+        deleted, error_msg = delete_images_with_validation(barcode, image_type, folder_ctime, delete_files)
 
-        imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
-
-        # ---- Phase 1: pre-validate every image before touching disk or DB ----
-        validation_msg = None
-        if delete_files and imgs:
-            for img in imgs:
-                root_path = scan_roots.get(img.scan_root_id)
-                if not root_path:
-                    validation_msg = f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
-                    break
-                real_file = os.path.realpath(img.file_path)
-                real_root = os.path.realpath(root_path)
-                try:
-                    safe = os.path.commonpath([real_file, real_root]) == real_root
-                except ValueError:
-                    safe = False
-                if not safe:
-                    validation_msg = '文件路径不在扫描目录下，拒绝删除'
-                    break
-                if not os.path.exists(img.file_path):
-                    validation_msg = f'文件不存在: {img.file_path}'
-                    break
-
-        if validation_msg:
+        if error_msg:
             r.delete_status = 'failed'
-            r.delete_message = validation_msg
+            r.delete_message = error_msg
             skipped_count += 1
-            continue
-
-        # ---- Phase 2: delete files from disk (best-effort, cannot rollback) ----
-        file_errors = []
-        if delete_files and imgs:
-            for img in imgs:
-                try:
-                    os.remove(img.file_path)
-                except OSError as e:
-                    file_errors.append(f'{img.file_path}: {e}')
-
-        if file_errors:
-            r.delete_status = 'failed'
-            r.delete_message = f'文件删除失败: {"; ".join(file_errors)}'
-            skipped_count += 1
-            continue
-
-        # ---- Phase 3: all safe — delete DB indices ----
-        for img in imgs:
-            session.delete(img)
-            deleted_image_count += 1
-
-        r.delete_status = 'deleted'
-        r.deleted_at = datetime.datetime.now().isoformat()
-        affected_barcodes.add(barcode)
+        else:
+            r.delete_status = 'deleted'
+            r.deleted_at = datetime.datetime.now().isoformat()
+            deleted_image_count += deleted
+            affected_barcodes.add(barcode)
 
     session.commit()
 

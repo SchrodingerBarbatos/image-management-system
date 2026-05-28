@@ -169,7 +169,7 @@ const Home: React.FC = () => {
       </Header>
       <Content style={{ padding: 16 }}>
         <SearchBar
-          onSearch={setBarcode}
+          onSearch={(value) => { setBarcode(value); setPage(1); }}
           onOpenScanManager={() => setScanVisible(true)}
           onExportExcel={() => setExportVisible(true)}
           onOpenBatch={() => setBatchVisible(true)}
