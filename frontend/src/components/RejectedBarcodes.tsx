@@ -95,6 +95,7 @@ const RejectedBarcodes: React.FC<Props> = ({ visible, onClose }) => {
       dataIndex: 'barcode',
       key: 'barcode',
       width: 150,
+      sorter: (a: RejectedBarcode, b: RejectedBarcode) => a.barcode.localeCompare(b.barcode),
     },
     {
       title: '文件名',
@@ -119,6 +120,7 @@ const RejectedBarcodes: React.FC<Props> = ({ visible, onClose }) => {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 180,
+      sorter: (a: RejectedBarcode, b: RejectedBarcode) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
     },
     {
       title: '操作',
