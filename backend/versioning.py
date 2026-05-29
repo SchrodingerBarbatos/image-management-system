@@ -22,6 +22,19 @@ def compute_content_hash(images):
     return hashlib.md5(payload.encode()).hexdigest()
 
 
+def _group_signature(images):
+    """Fast signature for a group of images, used for O(1) dedup before
+    falling back to full groups_are_identical comparison.
+    Returns a tuple that is equal for groups with identical (filename, size, md5)
+    triples, regardless of order. This avoids the O(n²) pairwise comparison
+    in the common case where groups differ in content."""
+    triples = sorted(
+        (img.filename, img.file_size, img.content_md5 or img.md5_hash)
+        for img in images
+    )
+    return tuple(triples)
+
+
 def groups_are_identical(imgs1, imgs2):
     """Funnel comparison: count → filename+size → MD5.
     Returns True only when all three layers match."""
@@ -61,8 +74,8 @@ def _is_sqlite_locked(exc):
 
 def update_versions_for_barcode(barcode):
     """Rebuild version records for a single barcode, per image_type.
-    Groups images by (folder_ctime, image_type), then uses funnel
-    comparison to merge identical groups before creating versions."""
+    Groups images by (folder_ctime, image_type), then uses signature-based
+    dedup + funnel comparison to merge identical groups before creating versions."""
     for attempt in range(1, _SQLITE_RETRY_ATTEMPTS + 1):
         try:
             _do_update_versions_for_barcode(barcode)
@@ -97,7 +110,7 @@ def _do_update_versions_for_barcode(barcode):
         key = (img.folder_ctime, img.image_type)
         by_key[key].append(img)
 
-    # Per image_type: sort by ctime desc, funnel-merge duplicates
+    # Per image_type: sort by ctime desc, signature-dedup + funnel-merge duplicates
     versions_by_type = {}  # {img_type: [(ctime, imgs, duplicate_ctimes)]}
 
     for img_type in ('main', 'detail'):
@@ -106,19 +119,28 @@ def _do_update_versions_for_barcode(barcode):
             key=lambda k: k[0], reverse=True,
         )
         accepted = []  # [(ctime, imgs)]
+        accepted_sigs = []  # parallel list of signatures for fast dedup
         dup_map = defaultdict(list)  # {ctime: [duplicate_ctime, ...]}
 
         for ctime, _ in type_keys:
             imgs = by_key[(ctime, img_type)]
+            sig = _group_signature(imgs)
+
+            # Fast path: check signature against accepted groups first
             duplicate_of = None
-            for acc_ctime, acc_imgs in accepted:
-                if groups_are_identical(imgs, acc_imgs):
-                    duplicate_of = acc_ctime
-                    break
+            for acc_idx, acc_sig in enumerate(accepted_sigs):
+                if sig == acc_sig:
+                    # Signatures match — confirm with full comparison
+                    # (handles rare MD5 fallback differences)
+                    if groups_are_identical(imgs, accepted[acc_idx][1]):
+                        duplicate_of = accepted[acc_idx][0]
+                        break
+
             if duplicate_of:
                 dup_map[duplicate_of].append(ctime)
             else:
                 accepted.append((ctime, imgs))
+                accepted_sigs.append(sig)
 
         versions_by_type[img_type] = [
             (ctime, imgs, json.dumps(dup_map.get(ctime, [])))

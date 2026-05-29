@@ -1,6 +1,6 @@
 import os, json, uuid, threading, datetime, traceback
 from flask import Blueprint, request, jsonify
-from models import session, ScanRoot, Image, ScanLog
+from models import session, ScanRoot, Image, ScanLog, ImageVersion
 from scanner import scan_root
 from versioning import update_versions_for_barcode, update_all_versions
 
@@ -72,6 +72,9 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             if (idx + 1) % 50 == 0:
                 progress('versioning', versioning_total=len(all_affected), versioning_current=idx + 1)
 
+        # Final progress update — mark all barcodes as processed
+        progress('versioning', versioning_total=len(all_affected), versioning_current=len(all_affected))
+
         _add_log('scan', 'success',
             f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}, 拒绝 {total['rejected']}",
             json.dumps(total))
@@ -110,6 +113,8 @@ def _cleanup_old_jobs():
         ]
         for jid in stale:
             del _scan_jobs[jid]
+
+_IN_CHUNK_SIZE = 500
 
 
 @scan_bp.route('/scan-roots', methods=['GET'])
@@ -177,9 +182,20 @@ def delete_scan_root(root_id):
     root = session.get(ScanRoot, root_id)
     if not root:
         return jsonify({'error': 'not found'}), 404
+
+    # Collect affected barcodes BEFORE deleting images so we can rebuild versions
+    affected_barcodes = {r[0] for r in session.query(Image.barcode).filter(
+        Image.scan_root_id == root_id
+    ).distinct().all()}
+
     session.query(Image).filter(Image.scan_root_id == root_id).delete()
     session.delete(root)
     session.commit()
+
+    # Rebuild versions for affected barcodes to clean up orphan ImageVersion records
+    for bc in affected_barcodes:
+        update_versions_for_barcode(bc)
+
     _add_log('delete_root', 'info', f'已删除扫描目录: {root.path}')
     return jsonify({'message': 'deleted'})
 

@@ -1,4 +1,4 @@
-﻿import os, sys, uuid, zipfile, datetime, threading, logging, traceback, re, json, io
+import os, sys, uuid, zipfile, datetime, threading, logging, traceback, re, json, io
 from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook, Workbook
 from models import session, Image, ExportTask, ScanRoot, BarcodeSetting, ImageVersion
@@ -8,6 +8,23 @@ export_bp = Blueprint('export', __name__)
 _log = logging.getLogger(__name__)
 
 _export_lock = threading.Lock()
+
+# Maximum number of parameters per IN clause — keeps SQLite happy
+_IN_CHUNK_SIZE = 500
+
+
+def _chunked_in_query(column, values, session_obj, query_base, chunk_size=_IN_CHUNK_SIZE):
+    """Execute a query with a potentially large IN clause by splitting into chunks.
+    Returns the concatenated results of all chunks."""
+    if not values:
+        return []
+    all_rows = []
+    value_list = list(values)
+    for i in range(0, len(value_list), chunk_size):
+        chunk = value_list[i:i + chunk_size]
+        rows = query_base.filter(column.in_(chunk)).all()
+        all_rows.extend(rows)
+    return all_rows
 
 
 def filter_to_single_version(imgs, barcodes, session):
@@ -21,17 +38,20 @@ def filter_to_single_version(imgs, barcodes, session):
     Relies on ImageVersion and BarcodeSetting tables for version resolution.
     When a barcode has neither, images are kept as-is (fallback to "all images").
     """
-    settings = session.query(
-        BarcodeSetting.barcode, BarcodeSetting.default_main_ctime, BarcodeSetting.default_detail_ctime
-    ).filter(
-        BarcodeSetting.barcode.in_(barcodes)
-    ).all()
-    latest_versions = session.query(
-        ImageVersion.barcode, ImageVersion.image_type, ImageVersion.folder_ctime
-    ).filter(
-        ImageVersion.barcode.in_(barcodes),
-        ImageVersion.is_latest == True,
-    ).all()
+    # Chunked query for BarcodeSetting
+    settings = _chunked_in_query(
+        BarcodeSetting.barcode, barcodes, session,
+        session.query(
+            BarcodeSetting.barcode, BarcodeSetting.default_main_ctime, BarcodeSetting.default_detail_ctime
+        ),
+    )
+    # Chunked query for ImageVersion
+    latest_versions = _chunked_in_query(
+        ImageVersion.barcode, barcodes, session,
+        session.query(
+            ImageVersion.barcode, ImageVersion.image_type, ImageVersion.folder_ctime
+        ).filter(ImageVersion.is_latest == True),
+    )
     allowed = {}  # {barcode: {image_type: folder_ctime}}
     for v in latest_versions:
         allowed.setdefault(v.barcode, {})[v.image_type] = v.folder_ctime
@@ -272,28 +292,36 @@ def generate_zip():
         wb.close()
         return jsonify({'error': f'列索引 {col_letter}({col_idx}) 超出表头范围(共 {len(header_row)} 列)'}), 400
 
-    barcodes = []
+    barcodes_raw = []
     for row in ws.iter_rows(min_row=2):
         if col_idx >= len(row):
             continue
         val = str(row[col_idx].value).strip() if row[col_idx].value else ''
         if val:
-            barcodes.append(val)
+            barcodes_raw.append(val)
     wb.close()
 
     if selected:
-        barcodes = [b for b in barcodes if b in selected]
+        barcodes_raw = [b for b in barcodes_raw if b in selected]
 
-    if not barcodes:
+    if not barcodes_raw:
         return jsonify({'error': 'Excel 中未找到任何条码数据'}), 400
 
-    # Find matching images
-    q = session.query(Image).filter(Image.barcode.in_(barcodes), Image.confirmed == True).join(
+    # Deduplicate barcodes while preserving order (for consistent match semantics)
+    barcodes = list(dict.fromkeys(barcodes_raw))
+
+    # Find matching images — chunked IN query to avoid oversized SQL
+    q_base = session.query(Image).filter(Image.confirmed == True).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
     if image_type and image_type != 'all':
-        q = q.filter(Image.image_type == image_type)
-    imgs = q.all()
+        q_base = q_base.filter(Image.image_type == image_type)
+
+    imgs = []
+    for i in range(0, len(barcodes), _IN_CHUNK_SIZE):
+        chunk = barcodes[i:i + _IN_CHUNK_SIZE]
+        rows = q_base.filter(Image.barcode.in_(chunk)).all()
+        imgs.extend(rows)
 
     # Filter to single version: user-chosen default, or latest version as fallback
     imgs = filter_to_single_version(imgs, barcodes, session)
@@ -470,4 +498,3 @@ def cleanup_old_exports():
         if old_tasks:
             session.commit()
             _log.info("Cleaned up %d old export tasks", len(old_tasks))
-

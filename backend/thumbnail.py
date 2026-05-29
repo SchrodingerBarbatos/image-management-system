@@ -1,8 +1,10 @@
-import os, hashlib, io, logging
+import os, hashlib, logging
 from PIL import Image as PILImage
 from config import THUMBNAIL_DIR, THUMBNAIL_SIZE, THUMBNAIL_QUALITY
 
 logger = logging.getLogger(__name__)
+
+_MD5_CHUNK_SIZE = 8192
 
 
 def get_thumbnail_path(image_id):
@@ -13,29 +15,37 @@ def thumbnail_exists(image_id):
     return os.path.exists(get_thumbnail_path(image_id))
 
 
+def _stream_md5(filepath):
+    """Compute MD5 hash of a file by reading in chunks.
+    Returns hex digest string, or '' if the file cannot be read."""
+    try:
+        h = hashlib.md5()
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(_MD5_CHUNK_SIZE), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ''
+
+
 def generate_thumbnail(image_id, source_path):
-    """Generate a 200x200 thumbnail and compute MD5 from the same file read.
+    """Generate a 200x200 thumbnail and compute MD5 from the same file.
     Returns (success: bool, md5: str). md5 is '' if the file cannot be read."""
     thumb_path = get_thumbnail_path(image_id)
     os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
 
-    try:
-        with open(source_path, 'rb') as f:
-            data = f.read()
-    except OSError:
-        return False, ''
-
-    md5_hash = hashlib.md5(data).hexdigest()
+    # Stream MD5 without loading the entire file into memory
+    md5_hash = _stream_md5(source_path)
 
     try:
-        img = PILImage.open(io.BytesIO(data))
+        # Open directly from path — Pillow uses memory-mapped / lazy decoding
+        img = PILImage.open(source_path)
+        img.load()  # force full decode while we still need orig_mode / info
         orig_mode = img.mode
         img_info = dict(img.info) if img.info else {}
 
         # thumbnail() before convert() so JPEG draft mode can decode at reduced resolution
         img.thumbnail(THUMBNAIL_SIZE, PILImage.LANCZOS)
-
-        del data
 
         # detect transparency from original mode after thumbnail is already small
         has_transparency = orig_mode in ('RGBA', 'LA', 'PA') or (

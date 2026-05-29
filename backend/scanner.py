@@ -169,6 +169,27 @@ def _walk_nonrecursive(path):
     except OSError:
         return
 
+# Lightweight tuple for indexed_map entries to avoid loading full ORM objects.
+# Fields: (image_id, barcode, md5_hash, status)
+_IDX_ID = 0
+_IDX_BARCODE = 1
+_IDX_MD5 = 2
+_IDX_STATUS = 3
+
+def _load_indexed_map(root_id):
+    """Load a lightweight index of images for a scan root.
+    Returns {file_path: (image_id, barcode, md5_hash, status)}.
+    Only queries the columns needed for scan logic — avoids loading full
+    ORM objects into the identity map, keeping memory usage flat for large dirs."""
+    rows = session.query(
+        Image.id, Image.file_path, Image.barcode, Image.md5_hash, Image.status
+    ).filter(Image.scan_root_id == root_id).all()
+    return {
+        row.file_path: (row.id, row.barcode, row.md5_hash, row.status)
+        for row in rows
+    }
+
+
 def scan_root(root_id, full_scan=False, progress_callback=None):
     """Scan a single scan root. If the root's allow_fuzzy toggle is on,
     image_type is taken from the root's fuzzy_image_type setting;
@@ -185,6 +206,9 @@ def scan_root(root_id, full_scan=False, progress_callback=None):
     except Exception:
         session.rollback()
         raise
+
+
+_LEFTOVER_BATCH_SIZE = 500
 
 
 def _do_scan(root, root_id, full_scan, progress_callback):
@@ -218,11 +242,8 @@ def _do_scan(root, root_id, full_scan, progress_callback):
         session.commit()
 
     # Build indexed_map AFTER broken cleanup so stale broken records aren't included
-    indexed_map = {
-        img.file_path: img for img in session.query(Image).filter(
-            Image.scan_root_id == root_id
-        ).all()
-    }
+    # Uses lightweight tuples instead of full ORM objects
+    indexed_map = _load_indexed_map(root_id)
 
     walk = os.walk if root.recursive else _walk_nonrecursive
 
@@ -236,14 +257,18 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
             _report('scanning', current_file=fname, added=added, skipped=skipped, rejected=rejected_count)
 
-            existing = indexed_map.pop(full_path, None)
-            if existing is not None:
+            entry = indexed_map.pop(full_path, None)
+            if entry is not None:
+                img_id, img_barcode, img_md5, img_status = entry
                 fp = file_fingerprint(full_path)
                 if not fp:
-                    existing.status = 'broken'
-                    affected_barcodes.add(existing.barcode)
+                    # File inaccessible — load ORM object and mark broken
+                    img = session.get(Image, img_id)
+                    if img:
+                        img.status = 'broken'
+                        affected_barcodes.add(img.barcode)
                     continue
-                if fp == existing.md5_hash:
+                if fp == img_md5:
                     # fingerprint 未变（文件大小 + mtime 均未变），跳过
                     skipped += 1
                     continue
@@ -270,24 +295,35 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                             )
                             session.add(rejected)
                         session.query(ImageVersion).filter(
-                            ImageVersion.barcode == existing.barcode,
-                            ImageVersion.image_type == existing.image_type,
+                            ImageVersion.barcode == img_barcode,
+                            ImageVersion.image_type == reparsed['image_type'],
                         ).delete()
-                        session.delete(existing)
+                        img = session.get(Image, img_id)
+                        if img:
+                            session.delete(img)
                         rejected_count += 1
                         continue
-                    existing.barcode = reparsed['barcode']
-                    existing.image_type = reparsed['image_type']
-                    existing.sequence = reparsed['sequence']
-                    existing.ext = reparsed['ext']
-                    existing.confirmed = reparsed['confirmed']
-                existing.md5_hash = fp
-                existing.file_size = new_size
-                existing.folder_ctime = folder_ctime
-                existing.status = 'active'
-                affected_barcodes.add(existing.barcode)
+                    # Load ORM object for update
+                    img = session.get(Image, img_id)
+                    if not img:
+                        continue
+                    img.barcode = reparsed['barcode']
+                    img.image_type = reparsed['image_type']
+                    img.sequence = reparsed['sequence']
+                    img.ext = reparsed['ext']
+                    img.confirmed = reparsed['confirmed']
+                    affected_barcodes.add(reparsed['barcode'])
+                else:
+                    img = session.get(Image, img_id)
+                    if not img:
+                        continue
+                    affected_barcodes.add(img.barcode)
+                img.md5_hash = fp
+                img.file_size = new_size
+                img.folder_ctime = folder_ctime
+                img.status = 'active'
                 added += 1
-                thumb_jobs.append((existing.id, full_path))
+                thumb_jobs.append((img.id, full_path))
                 continue
 
             parsed = parse_filename(fname, fuzzy_type)
@@ -341,15 +377,23 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
     # Handle leftover records not found on disk
     leftover_count = len(indexed_map)
-    for img in indexed_map.values():
-        affected_barcodes.add(img.barcode)
+    for entry in indexed_map.values():
+        affected_barcodes.add(entry[_IDX_BARCODE])
     if full_scan:
-        for img in indexed_map.values():
-            session.delete(img)
+        # Batch-delete leftover records to avoid identity map bloat
+        leftover_ids = [entry[_IDX_ID] for entry in indexed_map.values()]
+        for chunk_start in range(0, len(leftover_ids), _LEFTOVER_BATCH_SIZE):
+            chunk = leftover_ids[chunk_start:chunk_start + _LEFTOVER_BATCH_SIZE]
+            session.query(Image).filter(Image.id.in_(chunk)).delete(synchronize_session='fetch')
         broken_cleaned += leftover_count
     else:
-        for img in indexed_map.values():
-            img.status = 'broken'
+        # Batch-mark as broken
+        leftover_ids = [entry[_IDX_ID] for entry in indexed_map.values()]
+        for chunk_start in range(0, len(leftover_ids), _LEFTOVER_BATCH_SIZE):
+            chunk = leftover_ids[chunk_start:chunk_start + _LEFTOVER_BATCH_SIZE]
+            session.query(Image).filter(Image.id.in_(chunk)).update(
+                {Image.status: 'broken'}, synchronize_session='fetch'
+            )
 
     session.commit()
 

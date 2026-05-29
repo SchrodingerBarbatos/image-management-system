@@ -15,6 +15,11 @@ _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
 
 _BARCODE_SORT_WHITELIST = {'barcode', 'main_count', 'detail_count', 'main_versions', 'detail_versions'}
 
+_MAX_PAGE_SIZE = 500
+
+_IN_CHUNK_SIZE = 500
+
+
 @images_bp.route('/barcodes', methods=['GET'])
 def list_barcodes():
     """Aggregate images by barcode. Returns one row per barcode with counts."""
@@ -67,9 +72,9 @@ def list_barcodes():
     # Must stay in sync with label names in the SELECT clause above.
     q = q.order_by(desc(sort_col) if reverse else asc(sort_col))
 
-    # Paginate
+    # Paginate — cap page_size to prevent accidental large queries
     page = int(request.args.get('page', 1))
-    page_size = int(request.args.get('page_size', 50))
+    page_size = min(int(request.args.get('page_size', 50)), _MAX_PAGE_SIZE)
     rows = q.offset((page - 1) * page_size).limit(page_size).all()
 
     return jsonify({
@@ -92,22 +97,24 @@ def batch_barcode_image_ids():
     if not barcodes:
         return jsonify({'image_ids': [], 'barcode_counts': {}})
 
-    rows = session.query(
-        Image.barcode,
-        Image.id,
-    ).filter(
-        Image.barcode.in_(barcodes),
-        Image.status == 'active',
-        Image.confirmed == True,
-    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-        ScanRoot.enabled == True,
-    ).all()
-
+    # Chunked IN query to avoid oversized SQL
     image_ids = []
     barcode_counts = {}
-    for barcode, img_id in rows:
-        image_ids.append(img_id)
-        barcode_counts[barcode] = barcode_counts.get(barcode, 0) + 1
+    for i in range(0, len(barcodes), _IN_CHUNK_SIZE):
+        chunk = barcodes[i:i + _IN_CHUNK_SIZE]
+        rows = session.query(
+            Image.barcode,
+            Image.id,
+        ).filter(
+            Image.barcode.in_(chunk),
+            Image.status == 'active',
+            Image.confirmed == True,
+        ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+            ScanRoot.enabled == True,
+        ).all()
+        for barcode, img_id in rows:
+            image_ids.append(img_id)
+            barcode_counts[barcode] = barcode_counts.get(barcode, 0) + 1
 
     return jsonify({'image_ids': image_ids, 'barcode_counts': barcode_counts})
 
@@ -139,7 +146,8 @@ def list_images():
     order = col.desc() if request.args.get('order') == 'desc' else col.asc()
     q = q.order_by(order)
     page = int(request.args.get('page', 1))
-    page_size = int(request.args.get('page_size', 50))
+    # Cap page_size to prevent accidental large queries
+    page_size = min(int(request.args.get('page_size', 50)), _MAX_PAGE_SIZE)
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
     return jsonify({
@@ -181,14 +189,29 @@ def update_image(img_id):
     if not root.enabled:
         return jsonify({'error': 'scan root is disabled'}), 403
     data = request.json
+
+    # Track whether version-relevant fields changed
+    version_dirty = False
+    old_image_type = img.image_type
+    old_confirmed = img.confirmed
+
     if 'image_type' in data:
         if data['image_type'] not in ('main', 'detail'):
             return jsonify({'error': 'image_type must be "main" or "detail"'}), 400
-        img.image_type = data['image_type']
+        if data['image_type'] != old_image_type:
+            img.image_type = data['image_type']
+            version_dirty = True
     if 'confirmed' in data:
-        img.confirmed = data['confirmed']
+        if data['confirmed'] != old_confirmed:
+            img.confirmed = data['confirmed']
+            version_dirty = True
     img.updated_at = datetime.now().isoformat()
     session.commit()
+
+    # Rebuild versions if version-relevant fields changed
+    if version_dirty:
+        update_versions_for_barcode(img.barcode)
+
     return jsonify(_image_to_dict(img))
 
 @images_bp.route('/images/<int:img_id>', methods=['DELETE'])
