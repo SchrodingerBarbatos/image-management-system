@@ -8,6 +8,9 @@ _log = logging.getLogger(__name__)
 _SQLITE_RETRY_ATTEMPTS = 5
 _SQLITE_RETRY_DELAY = 0.5  # seconds
 
+# Batch size for session cleanup during bulk version updates
+_VERSION_BATCH_SIZE = 200
+
 
 def compute_content_hash(images):
     """Deterministic hash from sorted (filename, file_size, content_md5) triples.
@@ -170,12 +173,45 @@ def _do_update_versions_for_barcode(barcode):
     session.commit()
 
 
-def update_all_versions():
-    """Run version update for all barcodes in the database."""
+def _expunge_versions_and_images():
+    """Expunge only Image and ImageVersion objects from the session.
+    Leaves ScanRoot and other ORM objects untouched to avoid DetachedInstanceError
+    for callers that hold references to them."""
+    to_expunge = [
+        obj for obj in session.identity_map.values()
+        if isinstance(obj, (Image, ImageVersion))
+    ]
+    for obj in to_expunge:
+        try:
+            session.expunge(obj)
+        except Exception:
+            pass  # already detached or deleted
+
+
+def update_all_versions(progress_callback=None):
+    """Run version update for all barcodes in the database.
+    Includes progress logging and periodic session cleanup for memory control."""
     barcodes = session.query(Image.barcode).filter(
         Image.confirmed == True, Image.status == 'active'
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
         ScanRoot.enabled == True
     ).distinct().all()
-    for (bc,) in barcodes:
+
+    total = len(barcodes)
+    _log.info("update_all_versions: starting version rebuild for %d barcodes", total)
+
+    for i, (bc,) in enumerate(barcodes):
         update_versions_for_barcode(bc)
+
+        # Progress logging every _VERSION_BATCH_SIZE barcodes
+        if (i + 1) % _VERSION_BATCH_SIZE == 0:
+            _log.info("update_all_versions: processed %d/%d barcodes", i + 1, total)
+            # Periodic session cleanup to control memory — only expunge
+            # Image/ImageVersion, not ScanRoot (caller may hold a reference)
+            _expunge_versions_and_images()
+
+        # Optional progress callback for async reporting
+        if progress_callback:
+            progress_callback(current=i + 1, total=total)
+
+    _log.info("update_all_versions: completed version rebuild for %d barcodes", total)

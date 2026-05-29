@@ -1,4 +1,5 @@
 import re, os, hashlib, datetime
+from sqlalchemy import select
 from models import session, Image, ImageVersion, ScanRoot, RejectedBarcode
 from thumbnail import generate_thumbnail
 
@@ -176,22 +177,47 @@ _IDX_BARCODE = 1
 _IDX_MD5 = 2
 _IDX_IMAGE_TYPE = 3
 
-_INDEXED_MAP_BATCH = 2000
+# Batch sizes for memory control during scan
+_SCAN_COMMIT_BATCH = 500  # commit + expunge every N new/updated images
+_THUMB_WRITE_BATCH = 500  # batch-write content_md5 every N thumbnails
 
 
 def _load_indexed_map(root_id):
     """Load a lightweight index of images for a scan root.
     Returns {file_path: (image_id, barcode, md5_hash, image_type)}.
-    Only queries the columns needed for scan logic — avoids loading full
-    ORM objects into the identity map, keeping memory usage flat for large dirs.
-    Uses yield_per() to batch-load rows and limit peak memory."""
+    Uses Core expression to bypass ORM identity map entirely, keeping memory flat."""
     result = {}
-    q = session.query(
+    stmt = select(
         Image.id, Image.file_path, Image.barcode, Image.md5_hash, Image.image_type
-    ).filter(Image.scan_root_id == root_id).yield_per(_INDEXED_MAP_BATCH)
-    for row in q:
+    ).where(Image.scan_root_id == root_id)
+    rows = session.execute(stmt)
+    for row in rows:
         result[row.file_path] = (row.id, row.barcode, row.md5_hash, row.image_type)
     return result
+
+
+def _preload_rejected_set(root_id):
+    """Preload (barcode, file_path) pairs for already-rejected barcodes in this root.
+    Returns a set for O(1) dedup lookup during scan."""
+    rejected_set = set()
+    stmt = select(RejectedBarcode.barcode, RejectedBarcode.file_path).where(
+        RejectedBarcode.scan_root_id == root_id
+    )
+    rows = session.execute(stmt)
+    for row in rows:
+        rejected_set.add((row.barcode, row.file_path))
+    return rejected_set
+
+
+def _expunge_image_list(image_list):
+    """Expunge specific Image objects from the session.
+    Leaves ScanRoot and other ORM objects untouched to avoid DetachedInstanceError
+    for callers that hold references to them."""
+    for img in image_list:
+        try:
+            session.expunge(img)
+        except Exception:
+            pass  # already detached or deleted
 
 
 def scan_root(root_id, full_scan=False, progress_callback=None):
@@ -221,6 +247,9 @@ def _do_scan(root, root_id, full_scan, progress_callback):
         if progress_callback:
             progress_callback(phase, **kw)
 
+    # Save root attributes to local variables to avoid issues if they get expired
+    root_path = root.path
+    root_recursive = root.recursive
     use_custom_type = root.allow_fuzzy
     fuzzy_type = root.fuzzy_image_type if use_custom_type else 'main'
 
@@ -231,7 +260,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     thumb_jobs = []
     affected_barcodes = set()
 
-    _report('scan_start', current_root_path=root.path)
+    _report('scan_start', current_root_path=root_path)
 
     if not full_scan:
         # Incremental: clean up broken records BEFORE building indexed_map
@@ -249,9 +278,16 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     # Uses lightweight tuples instead of full ORM objects
     indexed_map = _load_indexed_map(root_id)
 
-    walk = os.walk if root.recursive else _walk_nonrecursive
+    # Preload rejected barcodes for O(1) dedup instead of per-file queries
+    rejected_set = _preload_rejected_set(root_id)
 
-    for dirpath, _, filenames in walk(root.path):
+    # Track pending additions for batch commit + expunge
+    pending_count = 0
+    pending_images = []
+
+    walk = os.walk if root_recursive else _walk_nonrecursive
+
+    for dirpath, _, filenames in walk(root_path):
         folder_ctime = get_folder_ctime(dirpath)
         for fname in filenames:
             ext = os.path.splitext(fname)[1].lower()
@@ -286,10 +322,8 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                     # GTIN validation for re-parsed barcodes
                     is_valid, reason = validate_gtin(reparsed['barcode'])
                     if not is_valid:
-                        already_rejected = session.query(RejectedBarcode).filter_by(
-                            barcode=reparsed['barcode'], file_path=full_path
-                        ).first()
-                        if not already_rejected:
+                        # Use preloaded set for O(1) dedup
+                        if (reparsed['barcode'], full_path) not in rejected_set:
                             rejected = RejectedBarcode(
                                 barcode=reparsed['barcode'],
                                 file_path=full_path,
@@ -298,6 +332,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                                 scan_root_id=root_id,
                             )
                             session.add(rejected)
+                            rejected_set.add((reparsed['barcode'], full_path))
                         # Use stored image_type (not reparsed) for ImageVersion cleanup
                         session.query(ImageVersion).filter(
                             ImageVersion.barcode == img_barcode,
@@ -332,7 +367,16 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                 img.folder_ctime = folder_ctime
                 img.status = 'active'
                 added += 1
-                thumb_jobs.append((img.id, full_path))
+                thumb_jobs.append((img_id, full_path))
+                pending_images.append(img)
+                pending_count += 1
+
+                # Batch commit + targeted Image expunge to control identity map size
+                if pending_count >= _SCAN_COMMIT_BATCH:
+                    session.commit()
+                    _expunge_image_list(pending_images)
+                    pending_images.clear()
+                    pending_count = 0
                 continue
 
             parsed = parse_filename(fname, fuzzy_type)
@@ -342,10 +386,8 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             # GTIN validation: reject non-GTIN barcodes
             is_valid, reason = validate_gtin(parsed['barcode'])
             if not is_valid:
-                already_rejected = session.query(RejectedBarcode).filter_by(
-                    barcode=parsed['barcode'], file_path=full_path
-                ).first()
-                if not already_rejected:
+                # Use preloaded set for O(1) dedup
+                if (parsed['barcode'], full_path) not in rejected_set:
                     rejected = RejectedBarcode(
                         barcode=parsed['barcode'],
                         file_path=full_path,
@@ -354,6 +396,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                         scan_root_id=root_id,
                     )
                     session.add(rejected)
+                    rejected_set.add((parsed['barcode'], full_path))
                 rejected_count += 1
                 continue
 
@@ -383,6 +426,21 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             thumb_jobs.append((img.id, full_path))
             affected_barcodes.add(parsed['barcode'])
             added += 1
+            pending_images.append(img)
+            pending_count += 1
+
+            # Batch commit + targeted Image expunge to control identity map size
+            if pending_count >= _SCAN_COMMIT_BATCH:
+                session.commit()
+                _expunge_image_list(pending_images)
+                pending_images.clear()
+                pending_count = 0
+
+    # Final commit for any remaining pending changes
+    if pending_count > 0:
+        session.commit()
+        _expunge_image_list(pending_images)
+        pending_images.clear()
 
     # Handle leftover records not found on disk
     leftover_count = len(indexed_map)
@@ -406,7 +464,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
     session.commit()
 
-    # 预生成缩略图（新图片和内容变更的图片），同时回写 content_md5
+    # 预生成缩略图（新图片和内容变更的图片），同时批量回写 content_md5
     _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0,
             added=added, skipped=skipped)
     md5_updates = {}
@@ -414,17 +472,19 @@ def _do_scan(root, root_id, full_scan, progress_callback):
         _, md5 = generate_thumbnail(img_id, full_path)
         if md5:
             md5_updates[img_id] = md5
+
+        # Batch write content_md5 every _THUMB_WRITE_BATCH thumbnails
+        if len(md5_updates) >= _THUMB_WRITE_BATCH:
+            _flush_md5_updates(md5_updates)
+            md5_updates.clear()
+
         if (i + 1) % 10 == 0:
             _report('thumbnails', thumbnail_current=i + 1,
                     thumbnail_total=len(thumb_jobs))
+
+    # Flush remaining md5 updates
     if md5_updates:
-        ids = list(md5_updates.keys())
-        for chunk_start in range(0, len(ids), 500):
-            chunk = ids[chunk_start:chunk_start + 500]
-            imgs = session.query(Image).filter(Image.id.in_(chunk)).all()
-            for img in imgs:
-                img.content_md5 = md5_updates[img.id]
-        session.commit()
+        _flush_md5_updates(md5_updates)
 
     _report('root_done', added=added, skipped=skipped,
             broken_cleaned=broken_cleaned, broken_new=leftover_count,
@@ -432,3 +492,16 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
     return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count,
             'rejected': rejected_count, 'affected_barcodes': list(affected_barcodes)}
+
+
+def _flush_md5_updates(md5_updates):
+    """Batch-write content_md5 updates to database."""
+    if not md5_updates:
+        return
+    ids = list(md5_updates.keys())
+    for chunk_start in range(0, len(ids), 500):
+        chunk = ids[chunk_start:chunk_start + 500]
+        imgs = session.query(Image).filter(Image.id.in_(chunk)).all()
+        for img in imgs:
+            img.content_md5 = md5_updates[img.id]
+    session.commit()
