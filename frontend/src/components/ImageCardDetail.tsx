@@ -96,8 +96,8 @@ const ImageCardDetail: React.FC<Props> = ({
     setLoading(true);
     try {
       const [mainRes, detailRes, settings] = await Promise.all([
-        imageApi.list({ barcode_exact: barcode, image_type: "main", page: 1, page_size: IMAGE_PAGE_SIZE }),
-        imageApi.list({ barcode_exact: barcode, image_type: "detail", page: 1, page_size: IMAGE_PAGE_SIZE }),
+        imageApi.list({ barcode_exact: barcode, image_type: "main", page: 1, page_size: IMAGE_PAGE_SIZE, sort: 'sequence', order: 'asc' }),
+        imageApi.list({ barcode_exact: barcode, image_type: "detail", page: 1, page_size: IMAGE_PAGE_SIZE, sort: 'sequence', order: 'asc' }),
         barcodeSettingApi.get(barcode),
       ]);
       if (barcodeRef.current !== barcode) return;
@@ -254,7 +254,7 @@ const ImageCardDetail: React.FC<Props> = ({
     setMainLoadingMore(true);
     try {
       const nextPage = mainImagePage + 1;
-      const res = await imageApi.list({ barcode_exact: barcode, image_type: "main", page: nextPage, page_size: IMAGE_PAGE_SIZE });
+      const res = await imageApi.list({ barcode_exact: barcode, image_type: "main", page: nextPage, page_size: IMAGE_PAGE_SIZE, sort: 'sequence', order: 'asc' });
       if (barcodeRef.current !== barcode) return;
       setImages((prev) => {
         const idSet = new Set(prev.map((i) => i.id));
@@ -281,7 +281,7 @@ const ImageCardDetail: React.FC<Props> = ({
     setDetailLoadingMore(true);
     try {
       const nextPage = detailImagePage + 1;
-      const res = await imageApi.list({ barcode_exact: barcode, image_type: "detail", page: nextPage, page_size: IMAGE_PAGE_SIZE });
+      const res = await imageApi.list({ barcode_exact: barcode, image_type: "detail", page: nextPage, page_size: IMAGE_PAGE_SIZE, sort: 'sequence', order: 'asc' });
       if (barcodeRef.current !== barcode) return;
       setImages((prev) => {
         const idSet = new Set(prev.map((i) => i.id));
@@ -651,9 +651,11 @@ const ImageCardDetail: React.FC<Props> = ({
               }}
             />
           </Space>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {mainImages.slice(0, mainShowCount).map(renderImage)}
-          </div>
+          <Image.PreviewGroup>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {mainImages.slice(0, mainShowCount).map(renderImage)}
+            </div>
+          </Image.PreviewGroup>
           {(mainImages.length > mainShowCount || mainHasMoreServer) && (
             <Button
               type="link"
@@ -714,9 +716,11 @@ const ImageCardDetail: React.FC<Props> = ({
               }}
             />
           </Space>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {detailImages.slice(0, detailShowCount).map(renderImage)}
-          </div>
+          <Image.PreviewGroup>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {detailImages.slice(0, detailShowCount).map(renderImage)}
+            </div>
+          </Image.PreviewGroup>
           {(detailImages.length > detailShowCount || detailHasMoreServer) && (
             <Button
               type="link"
