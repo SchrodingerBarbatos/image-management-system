@@ -67,7 +67,7 @@ def test_scan_creates_rejected_for_non_gtin(sess, scan_dir):
         scanner.session = original_session
         models.session = original_session
 
-    # Should have 2 rejected (12345678 and ABCDEFGH)
+    # Should have 2 rejected (12345678 and 12345678901)
     assert result['rejected'] == 2, f"Expected 2 rejected, got {result['rejected']}"
 
     # Should have 1 added (valid GTIN-13)

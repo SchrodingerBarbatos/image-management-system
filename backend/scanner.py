@@ -1,5 +1,5 @@
 import re, os, hashlib, datetime
-from models import session, Image, ScanRoot, RejectedBarcode
+from models import session, Image, ImageVersion, ScanRoot, RejectedBarcode
 from thumbnail import generate_thumbnail
 
 
@@ -229,6 +229,10 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                             scan_root_id=root_id,
                         )
                         session.add(rejected)
+                        session.query(ImageVersion).filter(
+                            ImageVersion.barcode == existing.barcode,
+                            ImageVersion.image_type == existing.image_type,
+                        ).delete()
                         session.delete(existing)
                         rejected_count += 1
                         continue

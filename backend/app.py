@@ -252,34 +252,57 @@ with engine.connect() as conn:
             "Marked %d running and %d queued batch tasks as interrupted on startup", _running, _queued
         )
 
-# Migration: move non-GTIN barcodes from image to rejected_barcode
+# Migration: move non-GTIN barcodes from image to rejected_barcode (once only)
 try:
-    from scanner import validate_gtin
     with engine.connect() as conn:
-        rows = conn.execute(text("SELECT id, barcode, file_path, filename, scan_root_id FROM image")).fetchall()
-        migrated = 0
-        for row in rows:
-            img_id, barcode, file_path, filename, scan_root_id = row
-            is_valid, reason = validate_gtin(barcode)
-            if not is_valid:
-                conn.execute(text(
-                    "INSERT INTO rejected_barcode (barcode, file_path, filename, reason, scan_root_id, created_at) "
-                    "VALUES (:barcode, :file_path, :filename, :reason, :scan_root_id, :created_at)"
-                ), {
-                    'barcode': barcode,
-                    'file_path': file_path,
-                    'filename': filename,
-                    'reason': reason,
-                    'scan_root_id': scan_root_id,
-                    'created_at': datetime.datetime.now().isoformat(),
-                })
-                conn.execute(text("DELETE FROM image WHERE id = :id"), {'id': img_id})
-                conn.execute(text("DELETE FROM image_version WHERE barcode = :barcode"), {'barcode': barcode})
-                migrated += 1
-        if migrated:
+        already_migrated = conn.execute(text(
+            "SELECT COUNT(*) FROM scan_log WHERE action = 'gtin_migration'"
+        )).fetchone()[0]
+        if not already_migrated:
+            from scanner import validate_gtin
+            rows = conn.execute(text(
+                "SELECT id, barcode, image_type, file_path, filename, scan_root_id FROM image"
+            )).fetchall()
+            migrated = 0
+            for row in rows:
+                img_id, barcode, image_type, file_path, filename, scan_root_id = row
+                is_valid, reason = validate_gtin(barcode)
+                if not is_valid:
+                    conn.execute(text(
+                        "INSERT INTO rejected_barcode (barcode, file_path, filename, reason, scan_root_id, created_at) "
+                        "VALUES (:barcode, :file_path, :filename, :reason, :scan_root_id, :created_at)"
+                    ), {
+                        'barcode': barcode,
+                        'file_path': file_path,
+                        'filename': filename,
+                        'reason': reason,
+                        'scan_root_id': scan_root_id,
+                        'created_at': datetime.datetime.now().isoformat(),
+                    })
+                    conn.execute(text("DELETE FROM image WHERE id = :id"), {'id': img_id})
+                    other_count = conn.execute(text(
+                        "SELECT COUNT(*) FROM image WHERE barcode = :barcode"
+                    ), {'barcode': barcode}).fetchone()[0]
+                    if other_count == 0:
+                        conn.execute(text(
+                            "DELETE FROM image_version WHERE barcode = :barcode"
+                        ), {'barcode': barcode})
+                    else:
+                        conn.execute(text(
+                            "DELETE FROM image_version WHERE barcode = :barcode AND image_type = :image_type"
+                        ), {'barcode': barcode, 'image_type': image_type})
+                    migrated += 1
+            conn.execute(text(
+                "INSERT INTO scan_log (action, status, message, created_at) "
+                "VALUES ('gtin_migration', 'done', :msg, :now)"
+            ), {
+                'msg': f'迁移完成: 移动 {migrated} 条非标品记录',
+                'now': datetime.datetime.now().isoformat(),
+            })
             conn.commit()
-            import logging
-            logging.getLogger(__name__).info("GTIN 迁移完成: 移动 %d 条非标品记录到 rejected_barcode", migrated)
+            if migrated:
+                import logging
+                logging.getLogger(__name__).info("GTIN 迁移完成: 移动 %d 条非标品记录到 rejected_barcode", migrated)
 except Exception as e:
     import logging
     logging.getLogger(__name__).warning("GTIN 迁移跳过: %s", e)

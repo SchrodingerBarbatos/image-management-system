@@ -25,7 +25,7 @@ def list_rejected():
     )
 
     if barcode:
-        query = query.filter(RejectedBarcode.barcode.like(f'%{barcode}%'))
+        query = query.filter(RejectedBarcode.barcode == barcode)
     if scan_root_id:
         query = query.filter(RejectedBarcode.scan_root_id == scan_root_id)
     if start_date:
@@ -126,7 +126,7 @@ def delete_all():
     query = session.query(RejectedBarcode)
 
     if 'barcode' in data and data['barcode']:
-        query = query.filter(RejectedBarcode.barcode.like(f"%{data['barcode']}%"))
+        query = query.filter(RejectedBarcode.barcode == data['barcode'])
     if 'scan_root_id' in data and data['scan_root_id']:
         query = query.filter(RejectedBarcode.scan_root_id == data['scan_root_id'])
     if 'start_date' in data and data['start_date']:
@@ -134,20 +134,18 @@ def delete_all():
     if 'end_date' in data and data['end_date']:
         query = query.filter(RejectedBarcode.created_at <= data['end_date'] + 'T23:59:59')
 
-    # 先取文件路径用于删除文件
+    # 先取文件路径，再删数据库记录，最后删文件（保证数据库一致性）
     file_paths = [fp for (fp,) in query.with_entities(RejectedBarcode.file_path).all()]
-    failed_files = []
+    deleted_count = query.delete(synchronize_session='fetch')
+    session.commit()
 
+    failed_files = []
     for fp in file_paths:
         try:
             if os.path.exists(fp):
                 os.remove(fp)
         except OSError:
             failed_files.append(fp)
-
-    # 批量删除数据库记录
-    deleted_count = query.delete()
-    session.commit()
 
     return jsonify({
         'message': f'已删除 {deleted_count} 条记录',
