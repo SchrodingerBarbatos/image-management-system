@@ -252,6 +252,38 @@ with engine.connect() as conn:
             "Marked %d running and %d queued batch tasks as interrupted on startup", _running, _queued
         )
 
+# Migration: move non-GTIN barcodes from image to rejected_barcode
+try:
+    from scanner import validate_gtin
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, barcode, file_path, filename, scan_root_id FROM image")).fetchall()
+        migrated = 0
+        for row in rows:
+            img_id, barcode, file_path, filename, scan_root_id = row
+            is_valid, reason = validate_gtin(barcode)
+            if not is_valid:
+                conn.execute(text(
+                    "INSERT INTO rejected_barcode (barcode, file_path, filename, reason, scan_root_id, created_at) "
+                    "VALUES (:barcode, :file_path, :filename, :reason, :scan_root_id, :created_at)"
+                ), {
+                    'barcode': barcode,
+                    'file_path': file_path,
+                    'filename': filename,
+                    'reason': reason,
+                    'scan_root_id': scan_root_id,
+                    'created_at': datetime.datetime.now().isoformat(),
+                })
+                conn.execute(text("DELETE FROM image WHERE id = :id"), {'id': img_id})
+                conn.execute(text("DELETE FROM image_version WHERE barcode = :barcode"), {'barcode': barcode})
+                migrated += 1
+        if migrated:
+            conn.commit()
+            import logging
+            logging.getLogger(__name__).info("GTIN 迁移完成: 移动 %d 条非标品记录到 rejected_barcode", migrated)
+except Exception as e:
+    import logging
+    logging.getLogger(__name__).warning("GTIN 迁移跳过: %s", e)
+
 from routes.scan import scan_bp
 from routes.images import images_bp
 from routes.export import export_bp
