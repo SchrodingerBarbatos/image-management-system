@@ -257,14 +257,18 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                     # GTIN validation for re-parsed barcodes
                     is_valid, reason = validate_gtin(reparsed['barcode'])
                     if not is_valid:
-                        rejected = RejectedBarcode(
-                            barcode=reparsed['barcode'],
-                            file_path=full_path,
-                            filename=fname,
-                            reason=reason,
-                            scan_root_id=root_id,
-                        )
-                        session.add(rejected)
+                        already_rejected = session.query(RejectedBarcode).filter_by(
+                            barcode=reparsed['barcode'], file_path=full_path
+                        ).first()
+                        if not already_rejected:
+                            rejected = RejectedBarcode(
+                                barcode=reparsed['barcode'],
+                                file_path=full_path,
+                                filename=fname,
+                                reason=reason,
+                                scan_root_id=root_id,
+                            )
+                            session.add(rejected)
                         session.query(ImageVersion).filter(
                             ImageVersion.barcode == existing.barcode,
                             ImageVersion.image_type == existing.image_type,
@@ -293,14 +297,18 @@ def _do_scan(root, root_id, full_scan, progress_callback):
             # GTIN validation: reject non-GTIN barcodes
             is_valid, reason = validate_gtin(parsed['barcode'])
             if not is_valid:
-                rejected = RejectedBarcode(
-                    barcode=parsed['barcode'],
-                    file_path=full_path,
-                    filename=fname,
-                    reason=reason,
-                    scan_root_id=root_id,
-                )
-                session.add(rejected)
+                already_rejected = session.query(RejectedBarcode).filter_by(
+                    barcode=parsed['barcode'], file_path=full_path
+                ).first()
+                if not already_rejected:
+                    rejected = RejectedBarcode(
+                        barcode=parsed['barcode'],
+                        file_path=full_path,
+                        filename=fname,
+                        reason=reason,
+                        scan_root_id=root_id,
+                    )
+                    session.add(rejected)
                 rejected_count += 1
                 continue
 
