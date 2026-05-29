@@ -137,6 +137,10 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
 
   const loadLowResults = (taskId: number, page: number) => {
     taskApi.getLowVersionScanResults(taskId, page, lowResultsPageSize).then(data => {
+      // 翻页时保留 summary（summary 只在第 1 页无筛选时返回）
+      if (!data.summary && lowResults?.summary) {
+        data.summary = lowResults.summary;
+      }
       setLowResults(data);
       setLowResultsPage(page);
     }).catch(() => {});
@@ -241,14 +245,27 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     setDupResultSelectedIds(next);
   };
 
+  const BATCH_SIZE = 500; // 后端 page_size 上限
+  const [selectAllLoading, setSelectAllLoading] = useState(false);
+
   const selectAllDup = async () => {
-    if (!dupTaskId || !dupResults) return;
+    if (!dupTaskId || !dupResults || selectAllLoading) return;
+    setSelectAllLoading(true);
+    const loadingKey = 'selectAll';
     try {
-      const allData = await taskApi.getDuplicateScanResults(dupTaskId, 1, dupResults.total);
-      const allIds = new Set(allData.items.map(r => r.id));
+      message.loading({ content: '正在获取全部数据...', key: loadingKey, duration: 0 });
+      const allIds = new Set<number>();
+      const totalPages = Math.ceil(dupResults.total / BATCH_SIZE);
+      for (let page = 1; page <= totalPages; page++) {
+        const data = await taskApi.getDuplicateScanResults(dupTaskId, page, BATCH_SIZE);
+        data.items.forEach(r => allIds.add(r.id));
+      }
       setDupResultSelectedIds(allIds);
+      message.success({ content: `已选中 ${allIds.size} 条`, key: loadingKey });
     } catch {
-      message.error('获取全部结果失败');
+      message.error({ content: '获取全部结果失败', key: loadingKey });
+    } finally {
+      setSelectAllLoading(false);
     }
   };
 
@@ -275,13 +292,23 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   };
 
   const selectAllLow = async () => {
-    if (!lowTaskId || !lowResults) return;
+    if (!lowTaskId || !lowResults || selectAllLoading) return;
+    setSelectAllLoading(true);
+    const loadingKey = 'selectAll';
     try {
-      const allData = await taskApi.getLowVersionScanResults(lowTaskId, 1, lowResults.total);
-      const allSelectableIds = new Set(allData.items.filter(r => r.status_tag === 'will_delete').map(r => r.id));
+      message.loading({ content: '正在获取全部数据...', key: loadingKey, duration: 0 });
+      const allSelectableIds = new Set<number>();
+      const totalPages = Math.ceil(lowResults.total / BATCH_SIZE);
+      for (let page = 1; page <= totalPages; page++) {
+        const data = await taskApi.getLowVersionScanResults(lowTaskId, page, BATCH_SIZE);
+        data.items.filter(r => r.status_tag === 'will_delete').forEach(r => allSelectableIds.add(r.id));
+      }
       setLowResultSelectedIds(allSelectableIds);
+      message.success({ content: `已选中 ${allSelectableIds.size} 条待删除项`, key: loadingKey });
     } catch {
-      message.error('获取全部结果失败');
+      message.error({ content: '获取全部结果失败', key: loadingKey });
+    } finally {
+      setSelectAllLoading(false);
     }
   };
 
@@ -601,7 +628,9 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                 <Checkbox checked={lowAllChecked} indeterminate={lowIndeterminate} onChange={toggleLowPage}>
                   全选当前页（仅将删除项）
                 </Checkbox>
-                <Button size="small" onClick={selectAllLow}>全选全部待删除项</Button>
+                <Button size="small" onClick={selectAllLow}>
+                  全选全部待删除项{lowResults.summary?.will_delete != null ? ` (${lowResults.summary.will_delete})` : ''}
+                </Button>
                 <Text type="secondary">共 {lowResults.total} 条结果</Text>
               </div>
 

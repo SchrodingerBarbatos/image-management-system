@@ -497,6 +497,18 @@ def get_low_version_scan_results(task_id):
     total = q.count()
     results = q.order_by(LowVersionScanResult.id).offset((page - 1) * page_size).limit(page_size).all()
 
+    # 计算各状态的数量（仅在无筛选时返回 summary）
+    summary = None
+    if not status_tag and not delete_status:
+        from sqlalchemy import func
+        status_counts = session.query(
+            LowVersionScanResult.status_tag,
+            func.count(LowVersionScanResult.id)
+        ).filter(
+            LowVersionScanResult.task_id == task_id,
+        ).group_by(LowVersionScanResult.status_tag).all()
+        summary = {tag: count for tag, count in status_counts}
+
     return jsonify({
         'items': [{
             'id': r.id,
@@ -519,6 +531,7 @@ def get_low_version_scan_results(task_id):
         'total': total,
         'page': page,
         'page_size': page_size,
+        'summary': summary,
     })
 
 

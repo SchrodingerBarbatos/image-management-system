@@ -259,6 +259,7 @@ export interface PaginatedResults<T> {
   total: number;
   page: number;
   page_size: number;
+  summary?: Record<string, number>;
 }
 
 export interface TaskBatchDeleteResult {
