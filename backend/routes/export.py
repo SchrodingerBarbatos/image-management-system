@@ -13,7 +13,7 @@ _export_lock = threading.Lock()
 _IN_CHUNK_SIZE = 500
 
 
-def _chunked_in_query(column, values, session_obj, query_base, chunk_size=_IN_CHUNK_SIZE):
+def _chunked_in_query(column, values, query_base, chunk_size=_IN_CHUNK_SIZE):
     """Execute a query with a potentially large IN clause by splitting into chunks.
     Returns the concatenated results of all chunks."""
     if not values:
@@ -40,14 +40,14 @@ def filter_to_single_version(imgs, barcodes, session):
     """
     # Chunked query for BarcodeSetting
     settings = _chunked_in_query(
-        BarcodeSetting.barcode, barcodes, session,
+        BarcodeSetting.barcode, barcodes,
         session.query(
             BarcodeSetting.barcode, BarcodeSetting.default_main_ctime, BarcodeSetting.default_detail_ctime
         ),
     )
     # Chunked query for ImageVersion
     latest_versions = _chunked_in_query(
-        ImageVersion.barcode, barcodes, session,
+        ImageVersion.barcode, barcodes,
         session.query(
             ImageVersion.barcode, ImageVersion.image_type, ImageVersion.folder_ctime
         ).filter(ImageVersion.is_latest == True),
@@ -302,7 +302,8 @@ def generate_zip():
     wb.close()
 
     if selected:
-        barcodes_raw = [b for b in barcodes_raw if b in selected]
+        selected_set = set(selected)
+        barcodes_raw = [b for b in barcodes_raw if b in selected_set]
 
     if not barcodes_raw:
         return jsonify({'error': 'Excel 中未找到任何条码数据'}), 400

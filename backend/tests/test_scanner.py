@@ -209,3 +209,61 @@ def test_scan_rejects_gtin_with_invalid_check_digit(sess, monkeypatch):
     assert len(rejected) == 1
     assert rejected[0].barcode == "4006381333932"
     assert "校验位错误" in rejected[0].reason
+
+
+# ---------------------------------------------------------------------------
+# delete_scan_root: version cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_delete_scan_root_cleans_orphan_versions(sess, monkeypatch):
+    """删除扫描目录后，受影响 barcode 的 ImageVersion 应被清理。"""
+    import routes.scan
+    import versioning
+    from models import ImageVersion
+
+    monkeypatch.setattr(routes.scan, "session", sess)
+    monkeypatch.setattr(versioning, "session", sess)
+
+    sr = ScanRoot(path="fake", enabled=True, recursive=False)
+    sess.add(sr)
+    sess.commit()
+
+    # Create images and versions for two barcodes
+    for bc in ("BC1", "BC2"):
+        img = Image(
+            barcode=bc, image_type="main", sequence=1,
+            filename=f"{bc}.jpg", ext="jpg",
+            file_path=f"fake/{bc}.jpg",
+            file_size=100, md5_hash="abc",
+            scan_root_id=sr.id, status="active", confirmed=True,
+        )
+        sess.add(img)
+    sess.commit()
+
+    # Create version records
+    for bc in ("BC1", "BC2"):
+        v = ImageVersion(
+            barcode=bc, image_type="main", version_label="v1",
+            folder_ctime="2024-01-01T00:00:00", content_hash="hash1", is_latest=True,
+        )
+        sess.add(v)
+    sess.commit()
+
+    # Verify versions exist
+    assert sess.query(ImageVersion).count() == 2
+
+    # Delete the scan root
+    from flask import Flask
+    app = Flask(__name__)
+    app.register_blueprint(routes.scan.scan_bp, url_prefix='/api')
+    with app.test_client() as client:
+        resp = client.delete(f'/api/scan-roots/{sr.id}')
+        assert resp.status_code == 200
+
+    # Images should be deleted
+    assert sess.query(Image).count() == 0
+
+    # Versions should also be cleaned up (orphan versions removed)
+    remaining_versions = sess.query(ImageVersion).count()
+    assert remaining_versions == 0, f"Expected 0 orphan versions, got {remaining_versions}"

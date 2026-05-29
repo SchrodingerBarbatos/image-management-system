@@ -170,22 +170,22 @@ def _walk_nonrecursive(path):
         return
 
 # Lightweight tuple for indexed_map entries to avoid loading full ORM objects.
-# Fields: (image_id, barcode, md5_hash, status)
+# Fields: (image_id, barcode, md5_hash, image_type)
 _IDX_ID = 0
 _IDX_BARCODE = 1
 _IDX_MD5 = 2
-_IDX_STATUS = 3
+_IDX_IMAGE_TYPE = 3
 
 def _load_indexed_map(root_id):
     """Load a lightweight index of images for a scan root.
-    Returns {file_path: (image_id, barcode, md5_hash, status)}.
+    Returns {file_path: (image_id, barcode, md5_hash, image_type)}.
     Only queries the columns needed for scan logic — avoids loading full
     ORM objects into the identity map, keeping memory usage flat for large dirs."""
     rows = session.query(
-        Image.id, Image.file_path, Image.barcode, Image.md5_hash, Image.status
+        Image.id, Image.file_path, Image.barcode, Image.md5_hash, Image.image_type
     ).filter(Image.scan_root_id == root_id).all()
     return {
-        row.file_path: (row.id, row.barcode, row.md5_hash, row.status)
+        row.file_path: (row.id, row.barcode, row.md5_hash, row.image_type)
         for row in rows
     }
 
@@ -259,7 +259,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
             entry = indexed_map.pop(full_path, None)
             if entry is not None:
-                img_id, img_barcode, img_md5, img_status = entry
+                img_id, img_barcode, img_md5, img_type = entry
                 fp = file_fingerprint(full_path)
                 if not fp:
                     # File inaccessible — load ORM object and mark broken
@@ -294,9 +294,10 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                                 scan_root_id=root_id,
                             )
                             session.add(rejected)
+                        # Use stored image_type (not reparsed) for ImageVersion cleanup
                         session.query(ImageVersion).filter(
                             ImageVersion.barcode == img_barcode,
-                            ImageVersion.image_type == reparsed['image_type'],
+                            ImageVersion.image_type == img_type,
                         ).delete()
                         img = session.get(Image, img_id)
                         if img:

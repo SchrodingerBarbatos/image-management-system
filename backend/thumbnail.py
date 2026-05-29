@@ -36,6 +36,8 @@ def generate_thumbnail(image_id, source_path):
 
     # Stream MD5 without loading the entire file into memory
     md5_hash = _stream_md5(source_path)
+    if not md5_hash:
+        return False, ''
 
     try:
         # Open directly from path — Pillow uses memory-mapped / lazy decoding

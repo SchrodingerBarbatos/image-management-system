@@ -68,7 +68,7 @@ def test_chunked_in_query_returns_all_matching(sess):
 
     barcodes = [f"BC{i:03d}" for i in range(10)]
     results = _chunked_in_query(
-        Image.barcode, barcodes, sess,
+        Image.barcode, barcodes,
         sess.query(Image.barcode, Image.id),
         chunk_size=3,  # Force multiple chunks
     )
@@ -80,7 +80,7 @@ def test_chunked_in_query_empty_values(sess):
     from routes.export import _chunked_in_query
 
     results = _chunked_in_query(
-        Image.barcode, [], sess,
+        Image.barcode, [],
         sess.query(Image.barcode, Image.id),
     )
     assert results == []
@@ -97,7 +97,7 @@ def test_chunked_in_query_no_matches(sess):
     sess.commit()
 
     results = _chunked_in_query(
-        Image.barcode, ["NONEXISTENT"], sess,
+        Image.barcode, ["NONEXISTENT"],
         sess.query(Image.barcode, Image.id),
     )
     assert len(results) == 0
@@ -116,7 +116,7 @@ def test_chunked_in_query_single_chunk(sess):
     sess.commit()
 
     results = _chunked_in_query(
-        Image.barcode, ["BC001", "BC002"], sess,
+        Image.barcode, ["BC001", "BC002"],
         sess.query(Image.barcode, Image.id),
         chunk_size=500,
     )
