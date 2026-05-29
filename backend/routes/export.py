@@ -389,24 +389,37 @@ def download_detail(task_id):
         return jsonify({'error': 'barcode data is corrupted'}), 500
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = '导出详情'
-    ws.append(['条码', '匹配主图数量', '匹配详情图数量'])
 
+    # Sheet 1: 导出详情（保留原有）
+    ws_all = wb.active
+    ws_all.title = '导出详情'
+    ws_all.append(['条码', '匹配主图数量', '匹配详情图数量'])
     for barcode, counts in barcode_counts.items():
-        ws.append([barcode, counts.get('main', 0), counts.get('detail', 0)])
+        ws_all.append([barcode, counts.get('main', 0), counts.get('detail', 0)])
 
-    # Auto-fit column widths
-    for col_idx, _ in enumerate(ws[1], start=1):
-        max_width = 0
-        for row in ws.iter_rows(min_col=col_idx, max_col=col_idx):
-            for cell in row:
-                if cell.value:
-                    # Estimate width: CJK chars ~2, ASCII ~1
-                    val = str(cell.value)
-                    width = sum(2 if ord(c) > 127 else 1 for c in val)
-                    max_width = max(max_width, width)
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_width + 4, 60)
+    # Sheet 2: 主图匹配（新增）
+    ws_main = wb.create_sheet('主图匹配')
+    ws_main.append(['条码', '主图数量'])
+    for barcode, counts in barcode_counts.items():
+        ws_main.append([barcode, counts.get('main', 0)])
+
+    # Sheet 3: 详情图匹配（新增）
+    ws_detail = wb.create_sheet('详情图匹配')
+    ws_detail.append(['条码', '详情图数量'])
+    for barcode, counts in barcode_counts.items():
+        ws_detail.append([barcode, counts.get('detail', 0)])
+
+    # Auto-fit column widths for all sheets
+    for ws in [ws_all, ws_main, ws_detail]:
+        for col_idx, _ in enumerate(ws[1], start=1):
+            max_width = 0
+            for row in ws.iter_rows(min_col=col_idx, max_col=col_idx):
+                for cell in row:
+                    if cell.value:
+                        val = str(cell.value)
+                        width = sum(2 if ord(c) > 127 else 1 for c in val)
+                        max_width = max(max_width, width)
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_width + 4, 60)
 
     output = io.BytesIO()
     wb.save(output)
