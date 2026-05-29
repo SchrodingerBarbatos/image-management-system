@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Tabs, Button, Checkbox, Table, Space, InputNumber, Tag, Divider, message, Typography } from 'antd';
 import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults } from '../services/api';
 import { TaskList, TaskProgress } from './TaskList';
+import { useTaskPolling } from '../hooks/useTaskPolling';
 
 const { Text } = Typography;
 
@@ -71,6 +72,14 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
 
   // ===== Deleting state =====
   const [deleting, setDeleting] = useState(false);
+
+  // Delete task polling
+  const deletePolling = useTaskPolling({
+    onComplete: () => {
+      onCompleted();
+      onClose();
+    },
+  });
 
   // Poll timer refs for cleanup on unmount
   const dupPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -382,9 +391,8 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     setDeleting(true);
     try {
       await confirmAction();
-      message.success('删除完成');
-      onCompleted();
-      onClose();
+      // For async delete tasks, we don't show success here - it will be shown when the task completes
+      // For sync operations, we still show success
     } catch (err: any) {
       message.error(err?.response?.data?.error || '删除失败');
     } finally {
@@ -394,15 +402,27 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
 
   // ===== Delete action builders =====
   const buildDupDeleteAction = (deleteFiles: boolean) => async () => {
-    if (!dupTaskId) return;
-    const ids = Array.from(dupResultSelectedIds);
-    await taskApi.deleteDuplicateScanResults(dupTaskId, ids, deleteFiles);
+    if (!dupTaskId || !dupResults) return;
+    const idSet = new Set(dupResultSelectedIds);
+    // Get the items for the selected IDs
+    const selectedItems = dupResults.items
+      .filter(r => idSet.has(r.id))
+      .map(r => ({ barcode: r.barcode, image_type: r.image_type, folder_ctime: r.folder_ctime }));
+    if (selectedItems.length === 0) return;
+    const task = await taskApi.createBatchDeleteDuplicatesTask(selectedItems, deleteFiles);
+    deletePolling.startPolling(task.id);
   };
 
   const buildLowDeleteAction = (deleteFiles: boolean) => async () => {
-    if (!lowTaskId) return;
-    const ids = Array.from(lowResultSelectedIds);
-    await taskApi.deleteLowVersionScanResults(lowTaskId, ids, deleteFiles);
+    if (!lowTaskId || !lowResults) return;
+    const idSet = new Set(lowResultSelectedIds);
+    // Get the items for the selected IDs
+    const selectedItems = lowResults.items
+      .filter(r => idSet.has(r.id))
+      .map(r => ({ barcode: r.barcode, image_type: r.image_type, folder_ctime: r.folder_ctime }));
+    if (selectedItems.length === 0) return;
+    const task = await taskApi.createBatchDeleteLowVersionsTask(selectedItems, deleteFiles, mainThreshold, detailThreshold);
+    deletePolling.startPolling(task.id);
   };
 
   // ===== Table columns =====
@@ -697,6 +717,12 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
         footer={null}
         destroyOnClose
       >
+        {deletePolling.polling && deletePolling.currentTask && (
+          <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 6 }}>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>正在删除...</div>
+            <TaskProgress task={deletePolling.currentTask} />
+          </div>
+        )}
         <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} />
       </Modal>
 

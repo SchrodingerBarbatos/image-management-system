@@ -15,7 +15,9 @@ _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 
 def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     """删除指定条码+类型+文件夹下 active+confirmed+enabled 的图片，返回删除数量。
-    过滤条件与扫描端点一致，确保预览和实际操作匹配。"""
+    过滤条件与扫描端点一致，确保预览和实际操作匹配。
+    使用 thread-local session 以支持后台任务调用。"""
+    sess = _get_thread_session()
     # Subquery to get matching image IDs (join with ScanRoot for enabled check)
     match_ids = select(Image.id).where(
         Image.barcode == barcode,
@@ -27,16 +29,16 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
         ScanRoot.enabled == True,
     )
     if delete_files:
-        imgs = session.query(Image).filter(Image.id.in_(match_ids)).all()
+        imgs = sess.query(Image).filter(Image.id.in_(match_ids)).all()
         for img in imgs:
             try:
                 os.remove(img.file_path)
             except OSError:
                 _log.warning("Failed to delete file: %s", img.file_path)
-            session.delete(img)
+            sess.delete(img)
         return len(imgs)
     else:
-        return session.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
+        return sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
 
 
 def _check_disabled_scan_roots(items):

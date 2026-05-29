@@ -207,10 +207,13 @@ export const batchApi = {
 
 // ---------- Batch Task Framework ----------
 
+export type BatchTaskType = 'duplicate_scan' | 'low_version_scan' | 'batch_delete_duplicates' | 'batch_delete_low_versions' | 'delete_version' | 'batch_delete_images';
+export type BatchTaskStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+
 export interface BatchTaskInfo {
   id: number;
-  task_type: 'duplicate_scan' | 'low_version_scan';
-  status: 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  task_type: BatchTaskType;
+  status: BatchTaskStatus;
   progress: number;
   total: number;
   result_count: number;
@@ -314,6 +317,16 @@ export const taskApi = {
     api.post<TaskBatchDeleteResult>(`/batch/low-version-scan/tasks/${taskId}/delete`, {
       mode: 'selected', result_ids: resultIds, delete_files: deleteFiles,
     }).then(r => r.data),
+
+  // Async delete tasks
+  createBatchDeleteDuplicatesTask: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean) =>
+    api.post<BatchTaskInfo>('/batch/delete-duplicates/tasks', { items, delete_files: deleteFiles }).then(r => r.data),
+  createBatchDeleteLowVersionsTask: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean, mainThreshold: number, detailThreshold: number) =>
+    api.post<BatchTaskInfo>('/batch/delete-low-versions/tasks', { items, delete_files: deleteFiles, main_threshold: mainThreshold, detail_threshold: detailThreshold }).then(r => r.data),
+  createDeleteVersionTask: (versionId: number, deleteFiles: boolean) =>
+    api.post<BatchTaskInfo>(`/versions/${versionId}/delete-task`, { delete_files: deleteFiles }).then(r => r.data),
+  createBatchDeleteImagesTask: (ids: number[], deleteFiles: boolean) =>
+    api.post<BatchTaskInfo>('/images/batch-delete-task', { ids, delete_files: deleteFiles }).then(r => r.data),
 };
 
 // ---------- Rejected Barcodes ----------

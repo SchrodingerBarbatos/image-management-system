@@ -23,7 +23,9 @@ import {
   versionApi,
   barcodeApi,
   barcodeSettingApi,
+  taskApi,
 } from "../services/api";
+import { useTaskPolling } from "../hooks/useTaskPolling";
 
 const { Text } = Typography;
 
@@ -361,14 +363,23 @@ const ImageCardDetail: React.FC<Props> = ({
     await loadBarcodeImages();
   }, [loadBarcodeImages]);
 
+  // Delete task polling
+  const deletePolling = useTaskPolling({
+    onComplete: () => {
+      reloadImages();
+      onDeleted();
+    },
+    successMessage: (task) => `删除完成，共删除 ${task.result_count} 项`,
+  });
+
   const handleVersionDelete = async (deleteFile: boolean) => {
     if (!versionDeleteTarget || deletingRef.current) return;
     deletingRef.current = true;
     const deletedCtime = versionDeleteTarget.folder_ctime;
     const deletedImageType = versionDeleteTarget.image_type;
     try {
-      await versionApi.delete(versionDeleteTarget.id, deleteFile);
-      message.success(deleteFile ? "已删除版本索引和文件" : "已删除版本索引");
+      const task = await taskApi.createDeleteVersionTask(versionDeleteTarget.id, deleteFile);
+      deletePolling.startPolling(task.id);
       setVersionDeleteTarget(null);
       // Reset selection if we deleted the currently selected version
       if (deletedImageType === "main" && mainVersion === deletedCtime) {
@@ -389,8 +400,6 @@ const ImageCardDetail: React.FC<Props> = ({
           barcodeSettingApi.update(barcode, { default_detail_ctime: "" }).catch(() => {});
         }
       }
-      await reloadImages();
-      onDeleted();
     } catch {
       message.error("删除版本失败，请重试");
     } finally {
@@ -514,6 +523,14 @@ const ImageCardDetail: React.FC<Props> = ({
   return (
     <Spin spinning={loading}>
       <Card size="small" title={<Text strong>条码: {barcode}</Text>}>
+        {deletePolling.polling && deletePolling.currentTask && (
+          <div style={{ marginBottom: 12, padding: 8, background: '#f5f5f5', borderRadius: 4 }}>
+            <div style={{ marginBottom: 4, fontSize: 13 }}>正在删除...</div>
+            <div style={{ fontSize: 12, color: '#666' }}>
+              进度: {deletePolling.currentTask.progress}/{deletePolling.currentTask.total}
+            </div>
+          </div>
+        )}
         {versions.length > 0 && (
           <Collapse
             size="small"

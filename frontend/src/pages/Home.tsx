@@ -4,7 +4,8 @@ import { DeleteOutlined, ExportOutlined } from '@ant-design/icons';
 import SearchBar from '../components/SearchBar';
 import ImageTable from '../components/ImageTable';
 import ImageCardDetail from '../components/ImageCardDetail';
-import { BarcodeRec, imageApi, barcodeApi, pendingApi, exportApi } from '../services/api';
+import { useTaskPolling } from '../hooks/useTaskPolling';
+import { BarcodeRec, imageApi, barcodeApi, pendingApi, exportApi, taskApi } from '../services/api';
 
 const ScanManager = React.lazy(() => import('../components/ScanManager'));
 const PendingList = React.lazy(() => import('../components/PendingList'));
@@ -44,6 +45,17 @@ const Home: React.FC = () => {
   const [capturedAllIds, setCapturedAllIds] = useState<number[]>([]);
   const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Delete task polling
+  const deletePolling = useTaskPolling({
+    onComplete: (task) => {
+      setSelectedMainIds(new Set()); setSelectedDetailIds(new Set());
+      setSelectedBarcodes(new Set());
+      setCapturedAllIds([]);
+      fetchBarcodes();
+    },
+    successMessage: (task) => `删除完成，共删除 ${task.result_count} 张图片`,
+  });
+
   // Modals
   const [scanVisible, setScanVisible] = useState(false);
   const [pendingVisible, setPendingVisible] = useState(false);
@@ -77,12 +89,10 @@ const Home: React.FC = () => {
     setBatchLoading(true);
     setBatchDeleteVisible(false);
     try {
-      await imageApi.batchDelete(capturedAllIds, deleteFile);
-      message.success(deleteFile ? `已删除 ${capturedAllIds.length} 张图片索引和文件` : `已删除 ${capturedAllIds.length} 张图片索引`);
-      setSelectedMainIds(new Set()); setSelectedDetailIds(new Set());
-      setSelectedBarcodes(new Set());
-      setCapturedAllIds([]);
-      fetchBarcodes();
+      const task = await taskApi.createBatchDeleteImagesTask(capturedAllIds, deleteFile);
+      deletePolling.startPolling(task.id);
+    } catch {
+      message.error('创建删除任务失败');
     } finally { setBatchLoading(false); }
   };
 
@@ -233,6 +243,20 @@ const Home: React.FC = () => {
       <Suspense fallback={<LazyFallback />}>
         {exportVisible && <ExportDialog visible={exportVisible} onClose={() => setExportVisible(false)} />}
       </Suspense>
+
+      {deletePolling.polling && deletePolling.currentTask && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24, zIndex: 1000,
+          background: '#fff', padding: '12px 16px', borderRadius: 8,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+          minWidth: 200,
+        }}>
+          <div style={{ marginBottom: 8, fontWeight: 500 }}>正在删除...</div>
+          <div style={{ fontSize: 12, color: '#666' }}>
+            进度: {deletePolling.currentTask.progress}/{deletePolling.currentTask.total}
+          </div>
+        </div>
+      )}
 
       <Modal title="批量删除" open={batchDeleteVisible} onCancel={() => setBatchDeleteVisible(false)}
         footer={null} width={400}>

@@ -8,7 +8,11 @@ _thread_local = threading.local()
 
 TASK_HANDLERS = {}
 
-VALID_TASK_TYPES = {'duplicate_scan', 'low_version_scan'}
+VALID_TASK_TYPES = {
+    'duplicate_scan', 'low_version_scan',
+    'batch_delete_duplicates', 'batch_delete_low_versions',
+    'delete_version', 'batch_delete_images',
+}
 
 
 def _get_thread_session():
