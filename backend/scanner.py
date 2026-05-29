@@ -17,6 +17,37 @@ def calculate_gtin_check_digit(payload: str) -> int:
     return (10 - (total % 10)) % 10
 
 
+def validate_business_gtin(barcode: str) -> tuple[bool, str]:
+    """业务有效性校验：拒绝 GS1 Restricted Circulation Numbers。
+
+    Returns:
+        (is_valid, reason)
+    """
+    length = len(barcode)
+
+    # GTIN-13: 前3位为 GS1 Prefix
+    if length == 13:
+        prefix3 = int(barcode[:3])
+        if 200 <= prefix3 <= 299:
+            return False, "GS1 200–299 为限制流通码（Restricted Circulation Number）"
+
+    # GTIN-14: 第2~4位为 GS1 Prefix（第1位为包装指示码）
+    elif length == 14:
+        prefix3 = int(barcode[1:4])
+        if 200 <= prefix3 <= 299:
+            return False, "GS1 200–299 为限制流通码（Restricted Circulation Number）"
+
+    # UPC-A / GTIN-12: 前3位含 Number System + Category
+    elif length == 12:
+        prefix3 = int(barcode[:3])
+        if 20 <= prefix3 <= 29:
+            return False, "UPC 020–029 为限制流通码"
+        if 40 <= prefix3 <= 49:
+            return False, "UPC 040–049 为企业内部流通码"
+
+    return True, ""
+
+
 def validate_gtin(barcode: str):
     """
     验证 GTIN-8 / GTIN-12 / GTIN-13 / GTIN-14
@@ -52,6 +83,11 @@ def validate_gtin(barcode: str):
         return False, (
             f"校验位错误（期望 {expected_check}，实际 {check_digit}）"
         )
+
+    # 4. 业务有效性校验（RCN 拒绝）
+    is_valid, reason = validate_business_gtin(barcode)
+    if not is_valid:
+        return False, reason
 
     return True, ""
 
