@@ -165,6 +165,28 @@ with engine.connect() as conn:
     if 'content_md5' not in img_cols:
         conn.execute(text("ALTER TABLE image ADD COLUMN content_md5 TEXT DEFAULT ''"))
         conn.commit()
+    # Migration: add last_scan_token to image (token-based leftover detection)
+    if 'last_scan_token' not in img_cols:
+        conn.execute(text("ALTER TABLE image ADD COLUMN last_scan_token TEXT DEFAULT ''"))
+        conn.commit()
+    # Create index on (scan_root_id, folder_path) for directory-level queries
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_scanroot_folderpath ON image (scan_root_id, folder_path)'))
+    # Create index on (scan_root_id, last_scan_token) for leftover detection
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_scanroot_token ON image (scan_root_id, last_scan_token)'))
+    conn.commit()
+    # Migration: deduplicate rejected_barcode before adding unique constraint
+    # Keep only the earliest record per (scan_root_id, barcode, file_path)
+    conn.execute(text('''
+        DELETE FROM rejected_barcode WHERE id NOT IN (
+            SELECT MIN(id) FROM rejected_barcode GROUP BY scan_root_id, barcode, file_path
+        )
+    '''))
+    # Create unique constraint on rejected_barcode (scan_root_id, barcode, file_path)
+    conn.execute(text('''
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_rejected_root_barcode_path
+        ON rejected_barcode (scan_root_id, barcode, file_path)
+    '''))
+    conn.commit()
     # export_task schema already migrated above via _migrate_export_task_schema
 
 # Rebuild versions if we just added the image_type column

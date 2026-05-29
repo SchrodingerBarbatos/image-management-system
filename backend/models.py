@@ -41,6 +41,7 @@ class Image(Base):
     scan_root_id = Column(Integer, ForeignKey('scan_root.id'), nullable=False)
     confirmed = Column(Boolean, default=True)
     status = Column(Text, default='active')
+    last_scan_token = Column(Text, default='')  # token-based leftover detection
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
     updated_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
 
@@ -51,6 +52,8 @@ class Image(Base):
         Index('idx_status_barcode_type', 'status', 'barcode', 'image_type'),
         Index('idx_barcode_type_ctime', 'barcode', 'image_type', 'folder_mtime'),
         Index('idx_scanroot_status', 'scan_root_id', 'status'),
+        Index('idx_scanroot_folderpath', 'scan_root_id', 'folder_path'),
+        Index('idx_scanroot_token', 'scan_root_id', 'last_scan_token'),
     )
 
 class ImageVersion(Base):
@@ -179,4 +182,5 @@ class RejectedBarcode(Base):
         Index('idx_rejected_barcode', 'barcode'),
         Index('idx_rejected_scan_root', 'scan_root_id'),
         Index('idx_rejected_created', 'created_at'),
+        UniqueConstraint('scan_root_id', 'barcode', 'file_path', name='uq_rejected_root_barcode_path'),
     )

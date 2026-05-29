@@ -67,12 +67,14 @@ def test_incremental_broken_cleaned_before_indexed_map(sess, monkeypatch):
         barcode="BC1", image_type="main", sequence=1,
         filename="a.jpg", ext="jpg", file_path=active_path,
         file_size=100, md5_hash="100_123",
+        folder_path="fake",
         scan_root_id=sr.id, status="active", confirmed=True,
     )
     broken = Image(
         barcode="BC2", image_type="main", sequence=1,
         filename="b.jpg", ext="jpg", file_path=broken_path,
         file_size=100, md5_hash="abc",
+        folder_path="fake",
         scan_root_id=sr.id, status="broken", confirmed=True,
     )
     sess.add_all([active, broken])
@@ -110,6 +112,7 @@ def test_full_scan_cleans_leftovers(sess, monkeypatch):
         barcode="BC1", image_type="main", sequence=1,
         filename="missing.jpg", ext="jpg", file_path=fpath,
         file_size=100, md5_hash="abc",
+        folder_path="fake",
         scan_root_id=sr.id, status="active", confirmed=True,
     )
     sess.add(img)
