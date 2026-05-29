@@ -394,20 +394,22 @@ def download_detail(task_id):
     ws_all = wb.active
     ws_all.title = '导出详情'
     ws_all.append(['条码', '匹配主图数量', '匹配详情图数量'])
-    for barcode, counts in barcode_counts.items():
-        ws_all.append([barcode, counts.get('main', 0), counts.get('detail', 0)])
 
     # Sheet 2: 主图匹配（新增）
     ws_main = wb.create_sheet('主图匹配')
     ws_main.append(['条码', '主图数量'])
-    for barcode, counts in barcode_counts.items():
-        ws_main.append([barcode, counts.get('main', 0)])
 
     # Sheet 3: 详情图匹配（新增）
     ws_detail = wb.create_sheet('详情图匹配')
     ws_detail.append(['条码', '详情图数量'])
+
+    # Write data to all sheets in single pass
     for barcode, counts in barcode_counts.items():
-        ws_detail.append([barcode, counts.get('detail', 0)])
+        main_count = counts.get('main', 0)
+        detail_count = counts.get('detail', 0)
+        ws_all.append([barcode, main_count, detail_count])
+        ws_main.append([barcode, main_count])
+        ws_detail.append([barcode, detail_count])
 
     # Auto-fit column widths for all sheets
     for ws in [ws_all, ws_main, ws_detail]:

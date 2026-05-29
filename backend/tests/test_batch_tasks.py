@@ -66,7 +66,9 @@ def client(sess, monkeypatch):
     app.config['TESTING'] = True
 
     from routes.batch_tasks import batch_tasks_bp
+    from routes.export import export_bp
     app.register_blueprint(batch_tasks_bp, url_prefix='/api')
+    app.register_blueprint(export_bp)
 
     return app.test_client()
 
@@ -1053,3 +1055,99 @@ def test_low_version_delete_rejects_cross_task_result_id(client, sess):
     err = resp.get_json()
     assert 'missing_ids' in err
     assert task2_result_id in err['missing_ids']
+
+
+# ===================================================================
+# Export detail download tests
+# ===================================================================
+
+
+def test_download_detail_has_three_sheets(client, sess):
+    """download_detail endpoint must return Excel with three sheets:
+    导出详情, 主图匹配, 详情图匹配."""
+    from routes.export import ExportTask as ET, _export_lock
+    from openpyxl import load_workbook
+    import io
+
+    barcode_data = json.dumps({
+        'BC001': {'main': 2, 'detail': 3},
+        'BC002': {'main': 0, 'detail': 1},
+        'BC003': {'main': 0, 'detail': 0},
+    }, ensure_ascii=False)
+
+    with _export_lock:
+        task = ET(status='done', barcode_data=barcode_data)
+        sess.add(task)
+        sess.commit()
+        task_id = task.id
+
+    resp = client.get(f'/export/tasks/{task_id}/detail')
+    assert resp.status_code == 200
+    assert resp.content_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+    wb = load_workbook(io.BytesIO(resp.data))
+    assert wb.sheetnames == ['导出详情', '主图匹配', '详情图匹配']
+
+    # Sheet 1: 导出详情
+    ws_all = wb['导出详情']
+    assert [cell.value for cell in ws_all[1]] == ['条码', '匹配主图数量', '匹配详情图数量']
+    rows_all = [[cell.value for cell in row] for row in ws_all.iter_rows(min_row=2)]
+    assert rows_all == [
+        ['BC001', 2, 3],
+        ['BC002', 0, 1],
+        ['BC003', 0, 0],
+    ]
+
+    # Sheet 2: 主图匹配
+    ws_main = wb['主图匹配']
+    assert [cell.value for cell in ws_main[1]] == ['条码', '主图数量']
+    rows_main = [[cell.value for cell in row] for row in ws_main.iter_rows(min_row=2)]
+    assert rows_main == [
+        ['BC001', 2],
+        ['BC002', 0],
+        ['BC003', 0],
+    ]
+
+    # Sheet 3: 详情图匹配
+    ws_detail = wb['详情图匹配']
+    assert [cell.value for cell in ws_detail[1]] == ['条码', '详情图数量']
+    rows_detail = [[cell.value for cell in row] for row in ws_detail.iter_rows(min_row=2)]
+    assert rows_detail == [
+        ['BC001', 3],
+        ['BC002', 1],
+        ['BC003', 0],
+    ]
+
+    # Cleanup
+    with _export_lock:
+        t = sess.get(ET, task_id)
+        if t:
+            sess.delete(t)
+            sess.commit()
+
+
+def test_download_detail_returns_404_for_missing_task(client, sess):
+    """download_detail must return 404 for non-existent task."""
+    resp = client.get('/export/tasks/99999/detail')
+    assert resp.status_code == 404
+
+
+def test_download_detail_returns_404_for_no_barcode_data(client, sess):
+    """download_detail must return 404 when task has no barcode_data."""
+    from routes.export import ExportTask as ET, _export_lock
+
+    with _export_lock:
+        task = ET(status='done', barcode_data=None)
+        sess.add(task)
+        sess.commit()
+        task_id = task.id
+
+    resp = client.get(f'/export/tasks/{task_id}/detail')
+    assert resp.status_code == 404
+
+    # Cleanup
+    with _export_lock:
+        t = sess.get(ET, task_id)
+        if t:
+            sess.delete(t)
+            sess.commit()
