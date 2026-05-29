@@ -176,18 +176,22 @@ _IDX_BARCODE = 1
 _IDX_MD5 = 2
 _IDX_IMAGE_TYPE = 3
 
+_INDEXED_MAP_BATCH = 2000
+
+
 def _load_indexed_map(root_id):
     """Load a lightweight index of images for a scan root.
     Returns {file_path: (image_id, barcode, md5_hash, image_type)}.
     Only queries the columns needed for scan logic — avoids loading full
-    ORM objects into the identity map, keeping memory usage flat for large dirs."""
-    rows = session.query(
+    ORM objects into the identity map, keeping memory usage flat for large dirs.
+    Uses yield_per() to batch-load rows and limit peak memory."""
+    result = {}
+    q = session.query(
         Image.id, Image.file_path, Image.barcode, Image.md5_hash, Image.image_type
-    ).filter(Image.scan_root_id == root_id).all()
-    return {
-        row.file_path: (row.id, row.barcode, row.md5_hash, row.image_type)
-        for row in rows
-    }
+    ).filter(Image.scan_root_id == root_id).yield_per(_INDEXED_MAP_BATCH)
+    for row in q:
+        result[row.file_path] = (row.id, row.barcode, row.md5_hash, row.image_type)
+    return result
 
 
 def scan_root(root_id, full_scan=False, progress_callback=None):
@@ -308,12 +312,16 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                     img = session.get(Image, img_id)
                     if not img:
                         continue
-                    img.barcode = reparsed['barcode']
+                    # Track both old and new barcode for version rebuild
+                    old_barcode = img_barcode
+                    new_barcode = reparsed['barcode']
+                    affected_barcodes.add(old_barcode)
+                    affected_barcodes.add(new_barcode)
+                    img.barcode = new_barcode
                     img.image_type = reparsed['image_type']
                     img.sequence = reparsed['sequence']
                     img.ext = reparsed['ext']
                     img.confirmed = reparsed['confirmed']
-                    affected_barcodes.add(reparsed['barcode'])
                 else:
                     img = session.get(Image, img_id)
                     if not img:

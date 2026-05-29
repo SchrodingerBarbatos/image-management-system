@@ -71,6 +71,6 @@ def generate_thumbnail(image_id, source_path):
 
         bg.save(thumb_path, 'JPEG', quality=THUMBNAIL_QUALITY)
         return True, md5_hash
-    except OSError:
+    except Exception:
         logger.exception("Failed to generate thumbnail for %s", image_id)
         return False, md5_hash

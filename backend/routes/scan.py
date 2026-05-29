@@ -188,6 +188,9 @@ def delete_scan_root(root_id):
         Image.scan_root_id == root_id
     ).distinct().all()}
 
+    # Save path before deletion to avoid accessing expired ORM object
+    root_path = root.path
+
     session.query(Image).filter(Image.scan_root_id == root_id).delete()
     session.delete(root)
     session.commit()
@@ -196,7 +199,7 @@ def delete_scan_root(root_id):
     for bc in affected_barcodes:
         update_versions_for_barcode(bc)
 
-    _add_log('delete_root', 'info', f'已删除扫描目录: {root.path}')
+    _add_log('delete_root', 'info', f'已删除扫描目录: {root_path}')
     return jsonify({'message': 'deleted'})
 
 
