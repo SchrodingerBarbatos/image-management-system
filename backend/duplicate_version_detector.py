@@ -56,6 +56,51 @@ def are_duplicate_versions(imgs_a, imgs_b):
     return True
 
 
+def sample_indices(count):
+    """Return fixed sample indices for pre-filtering.
+    Samples: first (0), middle (count // 2), last (count - 1).
+    Deduplicated and sorted. No random sampling.
+    """
+    if count <= 0:
+        return []
+    indices = sorted({0, count // 2, count - 1})
+    return indices
+
+
+def passes_sample_filter(imgs_a, imgs_b):
+    """Pre-filter using sampled positions (first/mid/last).
+    Returns (passed, matched_indices).
+    passed=True means all sampled positions matched.
+    matched_indices is the set of indices that were compared and matched.
+    Used ONLY for exclusion — never to判定重复.
+    Final duplicate判定 must use are_duplicate_versions_skip_indices().
+    """
+    if len(imgs_a) != len(imgs_b):
+        return False, set()
+    matched = set()
+    for idx in sample_indices(len(imgs_a)):
+        if not are_same_image(imgs_a[idx], imgs_b[idx]):
+            return False, set()
+        matched.add(idx)
+    return True, matched
+
+
+def are_duplicate_versions_skip_indices(imgs_a, imgs_b, skip_indices):
+    """Check if two version image lists are duplicates, skipping indices
+    already verified by sample filter. Same logic as are_duplicate_versions()
+    but skips positions in skip_indices.
+    skip_indices must come from the current pair's sample filter only.
+    """
+    if len(imgs_a) != len(imgs_b):
+        return False
+    for i, (a, b) in enumerate(zip(imgs_a, imgs_b)):
+        if i in skip_indices:
+            continue
+        if not are_same_image(a, b):
+            return False
+    return True
+
+
 def _version_signature(images):
     """Compute a fast signature for pre-filtering.
     Uses phash1|phash2|...|phashN in sequence order.
@@ -180,7 +225,7 @@ def _find_groups_in_pool(pool):
     and stats tracks comparison counts.
     """
     if len(pool) < 2:
-        return [], {'candidate_pairs': 0, 'actual_comparisons': 0}
+        return [], {'candidate_pairs': 0, 'sample_filter_rejected': 0, 'actual_comparisons': 0}
 
     # Pre-compute signatures and candidate keys
     items = []
@@ -192,6 +237,7 @@ def _find_groups_in_pool(pool):
     assigned = set()  # set of folder_ctime
     groups = []
     candidate_pairs = 0
+    sample_filter_rejected = 0
     actual_comparisons = 0
 
     # First pass: group by signature (fast path — exact signature match)
@@ -212,8 +258,12 @@ def _find_groups_in_pool(pool):
                 if j_idx in assigned:
                     continue
                 v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
+                passed, skip = passes_sample_filter(imgs_i, imgs_j)
+                if not passed:
+                    sample_filter_rejected += 1
+                    continue
                 actual_comparisons += 1
-                if are_duplicate_versions(imgs_i, imgs_j):
+                if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
                     assigned.add(j_idx)
                     members.append(_make_member(v_j, cnt_j, ts_j))
             if len(members) >= 2:
@@ -245,14 +295,22 @@ def _find_groups_in_pool(pool):
                     continue
                 v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
                 candidate_pairs += 1
+                passed, skip = passes_sample_filter(imgs_i, imgs_j)
+                if not passed:
+                    sample_filter_rejected += 1
+                    continue
                 actual_comparisons += 1
-                if are_duplicate_versions(imgs_i, imgs_j):
+                if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
                     assigned.add(j_idx)
                     members.append(_make_member(v_j, cnt_j, ts_j))
             if len(members) >= 2:
                 groups.append(members)
 
-    stats = {'candidate_pairs': candidate_pairs, 'actual_comparisons': actual_comparisons}
+    stats = {
+        'candidate_pairs': candidate_pairs,
+        'sample_filter_rejected': sample_filter_rejected,
+        'actual_comparisons': actual_comparisons,
+    }
     return groups, stats
 
 
@@ -314,7 +372,9 @@ def detect_duplicate_versions(sess, progress_callback=None):
     processed = 0
     all_groups = []
     group_id = 0
+    total_pools = 0
     total_candidate_pairs = 0
+    total_sample_rejected = 0
     total_actual_comparisons = 0
 
     for (barcode, image_type), vers in by_barcode_type.items():
@@ -343,8 +403,10 @@ def detect_duplicate_versions(sess, progress_callback=None):
             if len(count_pool) < 2:
                 continue
 
+            total_pools += 1
             member_lists, stats = _find_groups_in_pool(count_pool)
             total_candidate_pairs += stats['candidate_pairs']
+            total_sample_rejected += stats['sample_filter_rejected']
             total_actual_comparisons += stats['actual_comparisons']
 
             for members in member_lists:
@@ -362,7 +424,9 @@ def detect_duplicate_versions(sess, progress_callback=None):
 
     elapsed = time.monotonic() - start_time
     _log.info(
-        "DuplicateVersionScan: versions=%d candidate_pairs=%d actual_comparisons=%d groups=%d elapsed=%.1fs",
-        total_versions, total_candidate_pairs, total_actual_comparisons, len(all_groups), elapsed,
+        "DuplicateVersionScan: versions=%d pools=%d candidate_pairs=%d "
+        "sample_rejected=%d actual_comparisons=%d groups=%d elapsed=%.1fs",
+        total_versions, total_pools, total_candidate_pairs,
+        total_sample_rejected, total_actual_comparisons, len(all_groups), elapsed,
     )
     return all_groups

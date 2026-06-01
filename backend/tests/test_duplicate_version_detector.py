@@ -6,6 +6,9 @@ from duplicate_version_detector import (
     hamming_distance,
     are_same_image,
     are_duplicate_versions,
+    sample_indices,
+    passes_sample_filter,
+    are_duplicate_versions_skip_indices,
     _version_signature,
     _find_groups_in_pool,
     pick_keep_version,
@@ -134,6 +137,180 @@ class TestAreDuplicateVersions:
 
     def test_empty_lists(self):
         assert are_duplicate_versions([], []) is True
+
+
+# ---------- sample_indices ----------
+
+class TestSampleIndices:
+    def test_1_image(self):
+        assert sample_indices(1) == [0]
+
+    def test_2_images(self):
+        assert sample_indices(2) == [0, 1]
+
+    def test_3_images(self):
+        assert sample_indices(3) == [0, 1, 2]
+
+    def test_5_images(self):
+        assert sample_indices(5) == [0, 2, 4]
+
+    def test_9_images(self):
+        assert sample_indices(9) == [0, 4, 8]
+
+    def test_12_images(self):
+        assert sample_indices(12) == [0, 6, 11]
+
+    def test_4_images(self):
+        # first=0, mid=2, last=3 → [0, 2, 3]
+        assert sample_indices(4) == [0, 2, 3]
+
+    def test_6_images(self):
+        # first=0, mid=3, last=5 → [0, 3, 5]
+        assert sample_indices(6) == [0, 3, 5]
+
+    def test_0_images(self):
+        assert sample_indices(0) == []
+
+    def test_no_random(self):
+        """Calling twice returns same result (deterministic)."""
+        assert sample_indices(15) == sample_indices(15)
+
+
+# ---------- passes_sample_filter ----------
+
+class TestPassesSampleFilter:
+    def test_different_lengths(self):
+        a = [_make_image(content_md5='a')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is False
+        assert matched == set()
+
+    def test_first_image_different(self):
+        a = [_make_image(content_md5='x'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='y'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is False
+        assert matched == set()
+
+    def test_mid_image_different(self):
+        a = [_make_image(content_md5='a'), _make_image(content_md5='x'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='y'), _make_image(content_md5='c')]
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is False
+        assert matched == set()
+
+    def test_last_image_different(self):
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='x')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='y')]
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is False
+        assert matched == set()
+
+    def test_sampled_same_but_others_different(self):
+        """Sampled positions match but non-sampled differ → filter passes (True),
+        but are_duplicate_versions would return False."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='x'), _make_image(content_md5='c'),
+             _make_image(content_md5='d'), _make_image(content_md5='e'), _make_image(content_md5='f'),
+             _make_image(content_md5='g'), _make_image(content_md5='h'), _make_image(content_md5='i')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='DIFF'), _make_image(content_md5='c'),
+             _make_image(content_md5='DIFF'), _make_image(content_md5='e'), _make_image(content_md5='DIFF'),
+             _make_image(content_md5='g'), _make_image(content_md5='DIFF'), _make_image(content_md5='i')]
+        # 9 images: sample_indices = [0, 4, 8] → all match
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is True
+        assert matched == {0, 4, 8}
+        # But full comparison fails at index 1
+        assert are_duplicate_versions(a, b) is False
+
+    def test_matched_indices_returned(self):
+        """Verify matched_indices contains correct positions."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is True
+        # 3 images: sample_indices = [0, 1, 2]
+        assert matched == {0, 1, 2}
+
+    def test_all_match(self):
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        passed, _ = passes_sample_filter(a, b)
+        assert passed is True
+
+    def test_single_image_match(self):
+        a = [_make_image(content_md5='a')]
+        b = [_make_image(content_md5='a')]
+        passed, _ = passes_sample_filter(a, b)
+        assert passed is True
+
+    def test_single_image_mismatch(self):
+        a = [_make_image(content_md5='a')]
+        b = [_make_image(content_md5='b')]
+        passed, matched = passes_sample_filter(a, b)
+        assert passed is False
+        assert matched == set()
+
+
+# ---------- are_duplicate_versions_skip_indices ----------
+
+class TestAreDuplicateVersionsSkipIndices:
+    def test_different_lengths(self):
+        a = [_make_image(content_md5='a')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        assert are_duplicate_versions_skip_indices(a, b, {0}) is False
+
+    def test_skip_all_indices_duplicates(self):
+        """All indices skipped → vacuously True (all were pre-verified)."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        assert are_duplicate_versions_skip_indices(a, b, {0, 1}) is True
+
+    def test_skip_all_indices_different(self):
+        """All indices skipped but lengths differ → False."""
+        a = [_make_image(content_md5='a')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        assert are_duplicate_versions_skip_indices(a, b, {0}) is False
+
+    def test_skip_first_check_rest_match(self):
+        """Skip index 0 (pre-verified), rest match → True."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        assert are_duplicate_versions_skip_indices(a, b, {0}) is True
+
+    def test_skip_first_check_rest_mismatch(self):
+        """Skip index 0, but index 1 differs → False."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='x'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='y'), _make_image(content_md5='c')]
+        assert are_duplicate_versions_skip_indices(a, b, {0}) is False
+
+    def test_skip_none_all_checked(self):
+        """Empty skip set → checks all, same as are_duplicate_versions."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        assert are_duplicate_versions_skip_indices(a, b, set()) is True
+
+    def test_skip_none_mismatch(self):
+        """Empty skip set, mismatch at index 0 → False."""
+        a = [_make_image(content_md5='x'), _make_image(content_md5='b')]
+        b = [_make_image(content_md5='y'), _make_image(content_md5='b')]
+        assert are_duplicate_versions_skip_indices(a, b, set()) is False
+
+    def test_skip_mid_check_first_and_last(self):
+        """Skip middle index, check first and last."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='x'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='y'), _make_image(content_md5='c')]
+        # Skip index 1 (mid), check 0 and 2 → both match → True
+        assert are_duplicate_versions_skip_indices(a, b, {1}) is True
+
+    def test_consistency_with_full_check(self):
+        """When skip_indices covers all positions, result must match full check."""
+        a = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        b = [_make_image(content_md5='a'), _make_image(content_md5='b'), _make_image(content_md5='c')]
+        assert are_duplicate_versions_skip_indices(a, b, {0, 1, 2}) == are_duplicate_versions(a, b)
+
+    def test_empty_lists(self):
+        assert are_duplicate_versions_skip_indices([], [], set()) is True
 
 
 # ---------- _version_signature ----------
@@ -317,3 +494,36 @@ class TestFindGroupsInPool:
         assert len(groups[0]) == 3
         assert 'candidate_pairs' in stats
         assert 'actual_comparisons' in stats
+
+    def test_multi_image_sample_filter_no_false_positive(self):
+        """Two versions with same first/mid/last but different other positions
+        must NOT be grouped together. This is the critical end-to-end test
+        ensuring sample filter only排除, never误判."""
+        # 6 images: sample_indices = [0, 3, 5] (first/mid/last)
+        imgs_a = [
+            _make_image(content_md5='same'),   # 0 - sampled
+            _make_image(content_md5='a1'),      # 1
+            _make_image(content_md5='a2'),      # 2
+            _make_image(content_md5='same'),   # 3 - sampled
+            _make_image(content_md5='a4'),      # 4
+            _make_image(content_md5='same'),   # 5 - sampled
+        ]
+        imgs_b = [
+            _make_image(content_md5='same'),   # 0 - sampled
+            _make_image(content_md5='b1'),      # 1 - DIFFERENT
+            _make_image(content_md5='b2'),      # 2 - DIFFERENT
+            _make_image(content_md5='same'),   # 3 - sampled
+            _make_image(content_md5='b4'),      # 4 - DIFFERENT
+            _make_image(content_md5='same'),   # 5 - sampled
+        ]
+        pool = [
+            (_make_version('t1'), imgs_a, 6, 100),
+            (_make_version('t2'), imgs_b, 6, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # Must NOT be grouped — non-sampled positions differ
+        assert len(groups) == 0
+        # Sample filter should have passed (sampled positions match)
+        # but full comparison rejected
+        assert stats['sample_filter_rejected'] == 0
+        assert stats['actual_comparisons'] >= 1
