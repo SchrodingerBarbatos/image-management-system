@@ -269,11 +269,17 @@ def serve_thumbnail(img_id):
 
     thumb_path = get_thumbnail_path(img_id)
     if not thumbnail_exists(img_id):
-        ok, md5 = generate_thumbnail(img_id, img.file_path)
+        ok, md5, phash = generate_thumbnail(img_id, img.file_path)
         if not ok:
             return jsonify({'error': 'thumbnail generation failed'}), 500
+        changed = False
         if md5 and not img.content_md5:
             img.content_md5 = md5
+            changed = True
+        if phash and not img.phash:
+            img.phash = phash
+            changed = True
+        if changed:
             session.commit()
 
     # HTTP caching: use thumbnail file's mtime as ETag / Last-Modified

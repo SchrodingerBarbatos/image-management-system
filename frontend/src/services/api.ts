@@ -236,7 +236,7 @@ export const batchApi = {
 
 // ---------- Batch Task Framework ----------
 
-export type BatchTaskType = 'duplicate_scan' | 'low_version_scan' | 'batch_delete_duplicates' | 'batch_delete_low_versions' | 'delete_version' | 'batch_delete_images';
+export type BatchTaskType = 'duplicate_scan' | 'low_version_scan' | 'batch_delete_duplicates' | 'batch_delete_low_versions' | 'delete_version' | 'batch_delete_images' | 'duplicate_version_scan' | 'batch_delete_duplicate_versions';
 export type BatchTaskStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
 
 export interface BatchTaskInfo {
@@ -307,6 +307,40 @@ export interface TaskBatchDeleteResult {
   affected_barcodes: string[];
 }
 
+export interface DuplicateVersionMember {
+  id: number;
+  folder_ctime: string;
+  version_label: string;
+  image_count: number;
+  total_file_size: number;
+  total_pixels: number;
+  is_latest: boolean;
+  role: 'keep' | 'clean' | 'user_selected';
+  keep_reason: string;
+  delete_status: 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored';
+  delete_message: string;
+  deleted_at: string;
+  kept_version_ctime: string;
+}
+
+export interface DuplicateVersionGroup {
+  group_id: number;
+  barcode: string;
+  image_type: string;
+  image_count: number;
+  members: DuplicateVersionMember[];
+}
+
+export interface DuplicateVersionScanResults {
+  groups: DuplicateVersionGroup[];
+  summary: {
+    total_groups: number;
+    total_clean: number;
+    total_keep: number;
+    total_deleted: number;
+  };
+}
+
 export const taskApi = {
   // Common task endpoints
   listTasks: (params?: { type?: string; status?: string }) =>
@@ -363,6 +397,32 @@ export const taskApi = {
     api.post<BatchTaskInfo>(`/versions/${versionId}/delete-task`, { delete_files: deleteFiles }).then(r => r.data),
   createBatchDeleteImagesTask: (ids: number[], deleteFiles: boolean) =>
     api.post<BatchTaskInfo>('/images/batch-delete-task', { ids, delete_files: deleteFiles }).then(r => r.data),
+
+  // Duplicate version scan
+  createDuplicateVersionScan: () =>
+    api.post<BatchTaskInfo>('/batch/duplicate-version-scan/tasks').then(r => r.data),
+  listDuplicateVersionScanTasks: () =>
+    api.get<BatchTaskInfo[]>('/batch/duplicate-version-scan/tasks').then(r => r.data),
+  getDuplicateVersionScanTask: (taskId: number) =>
+    api.get<BatchTaskInfo>(`/batch/duplicate-version-scan/tasks/${taskId}`).then(r => r.data),
+  getDuplicateVersionScanResults: (taskId: number) =>
+    api.get<DuplicateVersionScanResults>(`/batch/duplicate-version-scan/tasks/${taskId}/results`).then(r => r.data),
+  deleteDuplicateVersionScanTask: (taskId: number) =>
+    api.delete(`/batch/duplicate-version-scan/tasks/${taskId}`).then(r => r.data),
+  changeDuplicateVersionKeep: (taskId: number, groupId: number, folderCtime: string) =>
+    api.post<{ ok: boolean }>(`/batch/duplicate-version-scan/tasks/${taskId}/change-keep`, {
+      group_id: groupId, folder_ctime: folderCtime,
+    }).then(r => r.data),
+  restoreDuplicateVersions: (taskId: number, resultIds: number[]) =>
+    api.post<{ restored_count: number; affected_barcodes: string[] }>(
+      `/batch/duplicate-version-scan/tasks/${taskId}/restore`, { result_ids: resultIds },
+    ).then(r => r.data),
+
+  // Async duplicate version delete
+  createBatchDeleteDuplicateVersionsTask: (scanTaskId: number, resultIds: number[]) =>
+    api.post<BatchTaskInfo>('/batch/delete-duplicate-versions/tasks', {
+      scan_task_id: scanTaskId, result_ids: resultIds,
+    }).then(r => r.data),
 };
 
 // ---------- Rejected Barcodes ----------

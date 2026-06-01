@@ -1,5 +1,6 @@
 import os, hashlib, logging
 from PIL import Image as PILImage
+import imagehash
 from config import THUMBNAIL_DIR, THUMBNAIL_SIZE, THUMBNAIL_QUALITY
 
 logger = logging.getLogger(__name__)
@@ -29,15 +30,16 @@ def _stream_md5(filepath):
 
 
 def generate_thumbnail(image_id, source_path):
-    """Generate a 200x200 thumbnail and compute MD5 from the same file.
-    Returns (success: bool, md5: str). md5 is '' if the file cannot be read."""
+    """Generate a 200x200 thumbnail, compute MD5 and pHash from the same file.
+    Returns (success: bool, md5: str, phash_hex: str).
+    md5/phash are '' if the file cannot be read."""
     thumb_path = get_thumbnail_path(image_id)
     os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
 
     # Stream MD5 without loading the entire file into memory
     md5_hash = _stream_md5(source_path)
     if not md5_hash:
-        return False, ''
+        return False, '', ''
 
     try:
         # Open directly from path — Pillow uses memory-mapped / lazy decoding
@@ -45,6 +47,12 @@ def generate_thumbnail(image_id, source_path):
         img.load()  # force full decode while we still need orig_mode / info
         orig_mode = img.mode
         img_info = dict(img.info) if img.info else {}
+
+        # Compute pHash from the full-resolution image before thumbnailing
+        try:
+            phash_hex = str(imagehash.phash(img))
+        except Exception:
+            phash_hex = ''
 
         # thumbnail() before convert() so JPEG draft mode can decode at reduced resolution
         img.thumbnail(THUMBNAIL_SIZE, PILImage.LANCZOS)
@@ -70,7 +78,7 @@ def generate_thumbnail(image_id, source_path):
             bg.paste(img, offset)
 
         bg.save(thumb_path, 'JPEG', quality=THUMBNAIL_QUALITY)
-        return True, md5_hash
+        return True, md5_hash, phash_hex
     except Exception:
         logger.exception("Failed to generate thumbnail for %s", image_id)
-        return False, md5_hash
+        return False, md5_hash, ''

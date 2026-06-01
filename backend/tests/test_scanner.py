@@ -53,7 +53,7 @@ def test_incremental_broken_cleaned_before_indexed_map(sess, monkeypatch):
 
     monkeypatch.setattr(scanner, "session", sess)
     monkeypatch.setattr(
-        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5")
+        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5", "phash123")
     )
 
     sr = ScanRoot(path="fake", enabled=True, recursive=False)
@@ -100,7 +100,7 @@ def test_full_scan_cleans_leftovers(sess, monkeypatch):
 
     monkeypatch.setattr(scanner, "session", sess)
     monkeypatch.setattr(
-        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5")
+        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5", "phash123")
     )
 
     sr = ScanRoot(path="fake", enabled=True, recursive=False)
@@ -147,7 +147,7 @@ def test_scan_rejects_invalid_gtin(sess, monkeypatch):
 
     monkeypatch.setattr(scanner, "session", sess)
     monkeypatch.setattr(
-        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5")
+        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5", "phash123")
     )
 
     sr = ScanRoot(path="fake", enabled=True, recursive=False)
@@ -188,7 +188,7 @@ def test_scan_rejects_gtin_with_invalid_check_digit(sess, monkeypatch):
 
     monkeypatch.setattr(scanner, "session", sess)
     monkeypatch.setattr(
-        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5")
+        scanner, "generate_thumbnail", lambda img_id, path: (True, "md5", "phash123")
     )
 
     sr = ScanRoot(path="fake", enabled=True, recursive=False)

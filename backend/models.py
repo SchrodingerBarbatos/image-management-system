@@ -36,6 +36,7 @@ class Image(Base):
     file_size = Column(Integer, default=0)
     md5_hash = Column(Text, default='')  # size_mtime fingerprint for fast change detection (name retained for compat)
     content_md5 = Column(Text, default='')  # real MD5 of file content, computed at scan time; survives DB portability
+    phash = Column(Text, default='')  # perceptual hash (64-bit hex), computed at scan time for visual similarity
     folder_path = Column(Text, default='')
     folder_ctime = Column('folder_mtime', Text, default='')
     scan_root_id = Column(Integer, ForeignKey('scan_root.id'), nullable=False)
@@ -186,4 +187,33 @@ class RejectedBarcode(Base):
         Index('idx_rejected_scan_root', 'scan_root_id'),
         Index('idx_rejected_created', 'created_at'),
         UniqueConstraint('scan_root_id', 'barcode', 'file_path', name='uq_rejected_root_barcode_path'),
+    )
+
+
+class DuplicateVersionScanResult(Base):
+    """Results of duplicate-version detection scan.
+    Each row represents one version within a duplicate group."""
+    __tablename__ = 'duplicate_version_scan_result'
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey('batch_task.id'), nullable=False)
+    group_id = Column(Integer, nullable=False)  # versions sharing the same group_id are duplicates
+    barcode = Column(Text, nullable=False)
+    image_type = Column(Text, nullable=False)
+    folder_ctime = Column(Text, nullable=False)
+    version_label = Column(Text, default='')
+    image_count = Column(Integer, default=0)
+    total_file_size = Column(Integer, default=0)
+    total_pixels = Column(Integer, default=0)  # sum of width*height for all images
+    is_latest = Column(Boolean, default=False)
+    role = Column(Text, default='clean')  # 'keep' | 'clean' | 'user_selected'
+    keep_reason = Column(Text, default='')  # reason for recommendation
+    delete_status = Column(Text, default='pending')  # 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored'
+    delete_message = Column(Text, default='')
+    deleted_at = Column(Text, default='')
+    kept_version_ctime = Column(Text, default='')  # folder_ctime of the kept version
+
+    __table_args__ = (
+        Index('idx_dvsr_task_id', 'task_id'),
+        Index('idx_dvsr_task_group', 'task_id', 'group_id'),
+        Index('idx_dvsr_task_barcode', 'task_id', 'barcode'),
     )

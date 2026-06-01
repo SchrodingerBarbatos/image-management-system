@@ -12,6 +12,7 @@ VALID_TASK_TYPES = {
     'duplicate_scan', 'low_version_scan',
     'batch_delete_duplicates', 'batch_delete_low_versions',
     'delete_version', 'batch_delete_images',
+    'duplicate_version_scan', 'batch_delete_duplicate_versions',
 }
 
 
@@ -191,11 +192,13 @@ def delete_task(task_id):
             return None
         if task.status == 'running':
             return {'error': '运行中的任务不能删除'}
-        from models import DuplicateScanResult, LowVersionScanResult
+        from models import DuplicateScanResult, LowVersionScanResult, DuplicateVersionScanResult
         if task.task_type == 'duplicate_scan':
             session.query(DuplicateScanResult).filter(DuplicateScanResult.task_id == task_id).delete()
         elif task.task_type == 'low_version_scan':
             session.query(LowVersionScanResult).filter(LowVersionScanResult.task_id == task_id).delete()
+        elif task.task_type == 'duplicate_version_scan':
+            session.query(DuplicateVersionScanResult).filter(DuplicateVersionScanResult.task_id == task_id).delete()
         session.delete(task)
         session.commit()
         return {'ok': True}

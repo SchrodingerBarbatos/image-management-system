@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Tabs, Button, Checkbox, Table, Space, InputNumber, Tag, Divider, message, Typography } from 'antd';
-import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults } from '../services/api';
+import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults, DuplicateVersionScanResults, DuplicateVersionGroup } from '../services/api';
 import { TaskList, TaskProgress } from './TaskList';
 import { useTaskPolling } from '../hooks/useTaskPolling';
 
@@ -24,6 +24,7 @@ const DELETE_STATUS_CONFIG: Record<string, { color: string; label: string }> = {
   deleted: { color: 'success', label: '已删除' },
   skipped: { color: 'warning', label: '已跳过' },
   failed: { color: 'error', label: '失败' },
+  restored: { color: 'blue', label: '已恢复' },
 };
 
 function fmtSize(bytes: number): string {
@@ -63,6 +64,18 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   const [lowResultSelectedIds, setLowResultSelectedIds] = useState<Set<number>>(new Set());
   const [lowPolling, setLowPolling] = useState(false);
 
+  // ===== Tab 3: Duplicate Versions =====
+  const [dvLoading, setDvLoading] = useState(false);
+  const [dvTaskId, setDvTaskId] = useState<number | null>(null);
+  const [dvTaskStatus, setDvTaskStatus] = useState<string>('');
+  const [dvCurrentTask, setDvCurrentTask] = useState<BatchTaskInfo | null>(null);
+  const [dvTasks, setDvTasks] = useState<BatchTaskInfo[]>([]);
+  const [dvResults, setDvResults] = useState<DuplicateVersionScanResults | null>(null);
+  const [dvPolling, setDvPolling] = useState(false);
+  const [dvResultsLoading, setDvResultsLoading] = useState(false);
+  const [dvExpandedGroups, setDvExpandedGroups] = useState<Set<number>>(new Set());
+  const dvPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // ===== Confirm modal =====
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [confirmDeleteFiles, setConfirmDeleteFiles] = useState(false);
@@ -89,6 +102,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   useEffect(() => {
     taskApi.listDuplicateScanTasks().then(setDupTasks).catch(() => {});
     taskApi.listLowVersionScanTasks().then(setLowTasks).catch(() => {});
+    taskApi.listDuplicateVersionScanTasks().then(setDvTasks).catch(() => {});
   }, []);
 
   // Cleanup poll timers on unmount
@@ -96,6 +110,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     return () => {
       if (dupPollTimerRef.current) clearTimeout(dupPollTimerRef.current);
       if (lowPollTimerRef.current) clearTimeout(lowPollTimerRef.current);
+      if (dvPollTimerRef.current) clearTimeout(dvPollTimerRef.current);
     };
   }, []);
 
@@ -181,6 +196,144 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     }).catch(() => {
       setLowPolling(false);
     });
+  };
+
+  // ===== Duplicate version scan task helpers =====
+  const refreshDvTasks = () => {
+    taskApi.listDuplicateVersionScanTasks().then(setDvTasks).catch(() => {});
+  };
+
+  const loadDvResults = (taskId: number) => {
+    setDvResultsLoading(true);
+    taskApi.getDuplicateVersionScanResults(taskId).then(data => {
+      setDvResults(data);
+    }).catch(() => {}).finally(() => setDvResultsLoading(false));
+  };
+
+  const cancelDvPolling = () => {
+    if (dvPollTimerRef.current) {
+      clearTimeout(dvPollTimerRef.current);
+      dvPollTimerRef.current = null;
+    }
+    setDvPolling(false);
+  };
+
+  const pollDvTask = (taskId: number) => {
+    cancelDvPolling();
+    setDvPolling(true);
+    taskApi.getTask(taskId).then(task => {
+      setDvTaskStatus(task.status);
+      setDvCurrentTask(task);
+      if (task.status === 'running' || task.status === 'queued') {
+        dvPollTimerRef.current = setTimeout(() => pollDvTask(taskId), 2000);
+      } else {
+        setDvPolling(false);
+        if (task.status === 'done') {
+          loadDvResults(taskId);
+        }
+        refreshDvTasks();
+      }
+    }).catch(() => {
+      setDvPolling(false);
+    });
+  };
+
+  const handleScanDuplicateVersions = async () => {
+    cancelDvPolling();
+    setDvLoading(true);
+    try {
+      const task = await taskApi.createDuplicateVersionScan();
+      setDvTaskId(task.id);
+      setDvTaskStatus(task.status);
+      setDvCurrentTask(task);
+      setDvResults(null);
+      setDvExpandedGroups(new Set());
+      if (task.status === 'running' || task.status === 'queued') {
+        pollDvTask(task.id);
+      } else if (task.status === 'done') {
+        loadDvResults(task.id);
+        refreshDvTasks();
+      }
+    } catch {
+      message.error('创建检测任务失败');
+    } finally {
+      setDvLoading(false);
+    }
+  };
+
+  const handleSelectDvTask = (taskId: number) => {
+    setDvTaskId(taskId);
+    setDvResults(null);
+    setDvCurrentTask(null);
+    setDvExpandedGroups(new Set());
+    loadDvResults(taskId);
+  };
+
+  const handleDeleteDvTask = async (taskId: number) => {
+    try {
+      await taskApi.deleteDuplicateVersionScanTask(taskId);
+      if (taskId === dvTaskId) {
+        setDvTaskId(null);
+        setDvResults(null);
+        setDvCurrentTask(null);
+        setDvExpandedGroups(new Set());
+      }
+      refreshDvTasks();
+      message.success('任务已删除');
+    } catch {
+      message.error('删除任务失败');
+    }
+  };
+
+  const toggleDvGroup = (groupId: number) => {
+    const next = new Set(dvExpandedGroups);
+    if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+    setDvExpandedGroups(next);
+  };
+
+  const handleChangeKeep = async (groupId: number, folderCtime: string) => {
+    if (!dvTaskId) return;
+    try {
+      await taskApi.changeDuplicateVersionKeep(dvTaskId, groupId, folderCtime);
+      loadDvResults(dvTaskId);
+      message.success('已更改保留版本');
+    } catch {
+      message.error('更改失败');
+    }
+  };
+
+  const handleExecuteCleanup = async () => {
+    if (!dvTaskId || !dvResults) return;
+    // Collect all clean member IDs that are not yet deleted
+    const cleanIds: number[] = [];
+    for (const g of dvResults.groups) {
+      for (const m of g.members) {
+        if (m.role === 'clean' && m.delete_status === 'pending') {
+          cleanIds.push(m.id);
+        }
+      }
+    }
+    if (cleanIds.length === 0) {
+      message.warning('没有需要清理的版本');
+      return;
+    }
+    try {
+      const task = await taskApi.createBatchDeleteDuplicateVersionsTask(dvTaskId, cleanIds);
+      deletePolling.startPolling(task.id);
+    } catch {
+      message.error('创建清理任务失败');
+    }
+  };
+
+  const handleRestoreVersions = async (resultIds: number[]) => {
+    if (!dvTaskId || resultIds.length === 0) return;
+    try {
+      const result = await taskApi.restoreDuplicateVersions(dvTaskId, resultIds);
+      message.success(`已恢复 ${result.restored_count} 张图片`);
+      loadDvResults(dvTaskId);
+    } catch {
+      message.error('恢复失败');
+    }
   };
 
   // ===== Tab 1: Scan duplicates =====
@@ -699,6 +852,185 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                 >
                   删索引和文件
                 </Button>
+              </Space>
+            </>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'duplicateVersions',
+      label: '检测重复版本',
+      children: (
+        <div>
+          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>
+            检测图片张数相同、对应位置图片视觉相同的重复版本（支持 MD5 精确匹配和 pHash 感知哈希相似度）
+          </div>
+
+          <Button type="primary" loading={dvLoading} onClick={handleScanDuplicateVersions} style={{ marginBottom: 16 }}>
+            检测重复版本
+          </Button>
+
+          {dvPolling && dvCurrentTask && (
+            <div style={{ marginBottom: 16 }}>
+              <TaskProgress task={dvCurrentTask} />
+            </div>
+          )}
+
+          {dvTaskStatus === 'error' && !dvPolling && (
+            <div style={{ color: '#ff4d4f', marginBottom: 16 }}>任务执行失败</div>
+          )}
+
+          <Divider>任务历史</Divider>
+          <div style={{ marginBottom: 16 }}>
+            <TaskList
+              tasks={dvTasks}
+              onSelectTask={handleSelectDvTask}
+              onDeleteTask={handleDeleteDvTask}
+              selectedTaskId={dvTaskId}
+              typeLabel="重复版本检测"
+              onRefresh={refreshDvTasks}
+            />
+          </div>
+
+          {dvResultsLoading && (
+            <div style={{ marginBottom: 16, color: '#1890ff' }}>正在加载结果...</div>
+          )}
+
+          {dvResults && dvResults.groups.length === 0 && !dvResultsLoading && (
+            <div style={{ color: '#52c41a', marginBottom: 16 }}>未发现重复版本</div>
+          )}
+
+          {dvResults && dvResults.groups.length > 0 && (
+            <>
+              <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
+                <Text type="secondary">
+                  发现 {dvResults.summary.total_groups} 组重复版本，
+                  保留 {dvResults.summary.total_keep} 个，
+                  建议清理 {dvResults.summary.total_clean} 个
+                  {dvResults.summary.total_deleted > 0 && `，已清理 ${dvResults.summary.total_deleted} 个`}
+                </Text>
+              </div>
+
+              <div style={{ maxHeight: 400, overflowY: 'auto', marginBottom: 16 }}>
+                {dvResults.groups.map(group => {
+                  const isExpanded = dvExpandedGroups.has(group.group_id);
+                  const keepMember = group.members.find(m => m.role === 'keep' || m.role === 'user_selected');
+                  const cleanMembers = group.members.filter(m => m.role === 'clean');
+                  return (
+                    <div key={group.group_id} style={{ border: '1px solid #f0f0f0', borderRadius: 6, marginBottom: 8, padding: 12 }}>
+                      <div
+                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                        onClick={() => toggleDvGroup(group.group_id)}
+                      >
+                        <Space>
+                          <Text strong>{group.barcode}</Text>
+                          <Tag>{TYPE_LABELS[group.image_type] || group.image_type}</Tag>
+                          <Text type="secondary">{group.image_count} 张图</Text>
+                          <Text type="secondary">{group.members.length} 个版本</Text>
+                        </Space>
+                        <Space>
+                          {keepMember && (
+                            <Tag color="green">保留: {keepMember.version_label} {keepMember.keep_reason && `(${keepMember.keep_reason})`}</Tag>
+                          )}
+                          <Text type="secondary">{isExpanded ? '▲' : '▼'}</Text>
+                        </Space>
+                      </div>
+
+                      {isExpanded && (
+                        <div style={{ marginTop: 12 }}>
+                          <Table
+                            rowKey="id"
+                            size="small"
+                            pagination={false}
+                            dataSource={group.members}
+                            columns={[
+                              {
+                                title: '角色', width: 80,
+                                render: (_: unknown, m: typeof group.members[0]) => {
+                                  if (m.role === 'keep' || m.role === 'user_selected') return <Tag color="green">保留</Tag>;
+                                  return <Tag color="red">清理</Tag>;
+                                },
+                              },
+                              { title: '版本', dataIndex: 'version_label', width: 60 },
+                              { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
+                              { title: '图片数', dataIndex: 'image_count', width: 60 },
+                              { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
+                              {
+                                title: '保留原因', dataIndex: 'keep_reason', width: 120,
+                                render: (v: string) => v || '-',
+                              },
+                              {
+                                title: '状态', width: 80,
+                                render: (_: unknown, m: typeof group.members[0]) => {
+                                  if (m.delete_status === 'deleted') return <Tag color="success">已清理</Tag>;
+                                  if (m.delete_status === 'restored') return <Tag color="blue">已恢复</Tag>;
+                                  if (m.delete_status === 'failed') return <Tag color="error">失败</Tag>;
+                                  if (m.delete_status === 'skipped') return <Tag color="warning">跳过</Tag>;
+                                  return <Tag>待处理</Tag>;
+                                },
+                              },
+                              {
+                                title: '操作', width: 120,
+                                render: (_: unknown, m: typeof group.members[0]) => (
+                                  <Space size="small">
+                                    {m.role === 'clean' && m.delete_status === 'pending' && (
+                                      <Button size="small" type="link" onClick={() => handleChangeKeep(group.group_id, m.folder_ctime)}>
+                                        设为保留
+                                      </Button>
+                                    )}
+                                    {m.delete_status === 'deleted' && (
+                                      <Button size="small" type="link" onClick={() => handleRestoreVersions([m.id])}>
+                                        恢复
+                                      </Button>
+                                    )}
+                                  </Space>
+                                ),
+                              },
+                            ]}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <Divider />
+              <Space>
+                <Button
+                  danger
+                  type="primary"
+                  loading={deleting}
+                  onClick={() => {
+                    if (!dvResults) return;
+                    const cleanCount = dvResults.groups.reduce(
+                      (sum, g) => sum + g.members.filter(m => m.role === 'clean' && m.delete_status === 'pending').length, 0
+                    );
+                    const keepCount = dvResults.summary.total_keep;
+                    openConfirm(
+                      async () => { await handleExecuteCleanup(); },
+                      false,
+                      '确认清理重复版本',
+                      `将保留 ${keepCount} 个版本，清理 ${cleanCount} 个重复版本。文件不会永久删除，可通过"恢复"功能恢复。`,
+                    );
+                  }}
+                >
+                  执行清理
+                </Button>
+                {dvResults.summary.total_deleted > 0 && (
+                  <Button
+                    onClick={() => {
+                      if (!dvResults || !dvTaskId) return;
+                      const deletedIds = dvResults.groups.flatMap(g =>
+                        g.members.filter(m => m.delete_status === 'deleted').map(m => m.id)
+                      );
+                      handleRestoreVersions(deletedIds);
+                    }}
+                  >
+                    恢复全部已清理
+                  </Button>
+                )}
               </Space>
             </>
           )}

@@ -8,6 +8,7 @@ from sqlalchemy import or_, func
 from models import (
     session, Image, ImageVersion, ScanRoot,
     BatchTask, DuplicateScanResult, LowVersionScanResult,
+    DuplicateVersionScanResult,
 )
 from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
@@ -603,10 +604,169 @@ def _run_batch_delete_images(task_id):
     _log.info("batch_delete_images task %d done: deleted %d images", task_id, deleted)
 
 
+# ---------- Duplicate version scan handler ----------
+
+def _run_duplicate_version_scan(task_id):
+    """Background handler for duplicate_version_scan tasks."""
+    _log.info("Starting duplicate_version_scan task %d", task_id)
+
+    # Clean up orphaned images first (consistent with other scan handlers)
+    _cleanup_orphaned_images()
+
+    from duplicate_version_detector import detect_duplicate_versions
+
+    sess = _get_thread_session()
+
+    def _progress(current, total):
+        update_task_progress(task_id, progress=current, total=total)
+
+    groups = detect_duplicate_versions(sess, progress_callback=_progress)
+
+    if not groups:
+        finish_task(task_id, result_count=0)
+        return
+
+    # Persist results
+    total_results = 0
+    for group in groups:
+        for member in group['members']:
+            sess.add(DuplicateVersionScanResult(
+                task_id=task_id,
+                group_id=group['group_id'],
+                barcode=group['barcode'],
+                image_type=group['image_type'],
+                folder_ctime=member['folder_ctime'],
+                version_label=member['version_label'],
+                image_count=member['image_count'],
+                total_file_size=member['total_file_size'],
+                total_pixels=member['total_pixels'],
+                is_latest=member['is_latest'],
+                role=member['role'],
+                keep_reason=member['keep_reason'],
+            ))
+            total_results += 1
+
+    sess.commit()
+    finish_task(task_id, result_count=total_results)
+    _log.info("duplicate_version_scan task %d done: %d results in %d groups",
+              task_id, total_results, len(groups))
+
+
+def _run_batch_delete_duplicate_versions(task_id):
+    """Background handler for batch_delete_duplicate_versions tasks.
+    Soft-deletes by marking Image.status = 'duplicate_version'."""
+    _log.info("Starting batch_delete_duplicate_versions task %d", task_id)
+
+    sess = _get_thread_session()
+    task = sess.get(BatchTask, task_id)
+    if not task:
+        finish_task(task_id, error_message='Task not found')
+        return
+
+    try:
+        params = json.loads(task.params_json) if task.params_json else {}
+    except (json.JSONDecodeError, TypeError):
+        params = {}
+
+    result_ids = params.get('result_ids', [])
+    scan_task_id = params.get('scan_task_id')
+
+    if not result_ids or not scan_task_id:
+        finish_task(task_id, error_message='result_ids and scan_task_id required')
+        return
+
+    total = len(result_ids)
+    update_task_progress(task_id, progress=0, total=total)
+
+    # Load scan results
+    results = sess.query(DuplicateVersionScanResult).filter(
+        DuplicateVersionScanResult.task_id == scan_task_id,
+        DuplicateVersionScanResult.id.in_(result_ids),
+    ).all()
+
+    if not results:
+        finish_task(task_id, error_message='No valid results found')
+        return
+
+    # Group by group_id to find the kept version
+    by_group = defaultdict(list)
+    for r in results:
+        by_group[r.group_id].append(r)
+
+    affected_barcodes = set()
+    deleted_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for r in results:
+        if r.role == 'keep' or r.role == 'user_selected':
+            # This is the version to keep — skip deletion
+            r.delete_status = 'skipped'
+            r.delete_message = '保留版本'
+            skipped_count += 1
+            update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count)
+            continue
+
+        if r.delete_status == 'deleted':
+            # Already deleted
+            skipped_count += 1
+            update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count)
+            continue
+
+        # Find the kept version in the same group
+        group_results = by_group.get(r.group_id, [])
+        kept = next((gr for gr in group_results if gr.role in ('keep', 'user_selected')), None)
+        kept_ctime = kept.folder_ctime if kept else ''
+
+        # Soft delete: mark images as 'duplicate_version'
+        imgs = sess.query(Image).filter(
+            Image.barcode == r.barcode,
+            Image.image_type == r.image_type,
+            Image.folder_ctime == r.folder_ctime,
+            Image.status == 'active',
+        ).all()
+
+        if not imgs:
+            r.delete_status = 'skipped'
+            r.delete_message = '已无有效图片'
+            skipped_count += 1
+            update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count)
+            continue
+
+        try:
+            for img in imgs:
+                img.status = 'duplicate_version'
+                img.updated_at = datetime.datetime.now().isoformat()
+            r.delete_status = 'deleted'
+            r.deleted_at = datetime.datetime.now().isoformat()
+            r.kept_version_ctime = kept_ctime
+            deleted_count += len(imgs)
+            affected_barcodes.add(r.barcode)
+        except Exception as e:
+            r.delete_status = 'failed'
+            r.delete_message = str(e)
+            failed_count += 1
+
+        update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count,
+                           current_item=r.barcode)
+
+    sess.commit()
+
+    # Rebuild versions for affected barcodes
+    for bc in affected_barcodes:
+        update_versions_for_barcode(bc)
+
+    finish_task(task_id, result_count=deleted_count)
+    _log.info("batch_delete_duplicate_versions task %d done: soft-deleted %d images, skipped %d",
+              task_id, deleted_count, skipped_count)
+
+
 register_handler('batch_delete_duplicates', _run_batch_delete_duplicates)
 register_handler('batch_delete_low_versions', _run_batch_delete_low_versions)
 register_handler('delete_version', _run_delete_version)
 register_handler('batch_delete_images', _run_batch_delete_images)
+register_handler('duplicate_version_scan', _run_duplicate_version_scan)
+register_handler('batch_delete_duplicate_versions', _run_batch_delete_duplicate_versions)
 
 
 # ---------- Common task routes ----------
@@ -1157,5 +1317,219 @@ def create_batch_delete_images_task():
     }
     from task_engine import create_task
     task_dict, is_new = create_task('batch_delete_images', params=params)
+    code = 201 if is_new else 200
+    return jsonify(task_dict), code
+
+
+# ---------- Duplicate version scan routes ----------
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks', methods=['POST'])
+def create_duplicate_version_scan():
+    from task_engine import create_task
+    task_dict, is_new = create_task('duplicate_version_scan', params={})
+    code = 201 if is_new else 200
+    return jsonify(task_dict), code
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks', methods=['GET'])
+def list_duplicate_version_scan_tasks():
+    from task_engine import get_tasks
+    tasks = get_tasks(task_type='duplicate_version_scan')
+    return jsonify(tasks)
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>', methods=['GET'])
+def get_duplicate_version_scan_task(task_id):
+    from task_engine import get_task
+    task = get_task(task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(task)
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>', methods=['DELETE'])
+def delete_duplicate_version_scan_task(task_id):
+    from task_engine import delete_task
+    result = delete_task(task_id)
+    if result is None:
+        return jsonify({'error': 'not found'}), 404
+    if 'error' in result:
+        return jsonify(result), 409
+    return jsonify(result)
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>/results', methods=['GET'])
+def get_duplicate_version_scan_results(task_id):
+    """Get duplicate version scan results, grouped by group_id."""
+    task = session.get(BatchTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+
+    # Load all results for this task
+    results = session.query(DuplicateVersionScanResult).filter(
+        DuplicateVersionScanResult.task_id == task_id,
+    ).order_by(DuplicateVersionScanResult.group_id, DuplicateVersionScanResult.id).all()
+
+    # Group by group_id
+    groups_dict = defaultdict(list)
+    for r in results:
+        groups_dict[r.group_id].append(r)
+
+    groups = []
+    for gid in sorted(groups_dict.keys()):
+        members = groups_dict[gid]
+        first = members[0]
+        groups.append({
+            'group_id': gid,
+            'barcode': first.barcode,
+            'image_type': first.image_type,
+            'image_count': first.image_count,
+            'members': [{
+                'id': m.id,
+                'folder_ctime': m.folder_ctime,
+                'version_label': m.version_label,
+                'image_count': m.image_count,
+                'total_file_size': m.total_file_size,
+                'total_pixels': m.total_pixels,
+                'is_latest': m.is_latest,
+                'role': m.role,
+                'keep_reason': m.keep_reason,
+                'delete_status': m.delete_status,
+                'delete_message': m.delete_message,
+                'deleted_at': m.deleted_at,
+                'kept_version_ctime': m.kept_version_ctime,
+            } for m in members],
+        })
+
+    # Summary
+    total_groups = len(groups)
+    total_clean = sum(1 for g in groups for m in g['members'] if m['role'] == 'clean')
+    total_keep = sum(1 for g in groups for m in g['members'] if m['role'] in ('keep', 'user_selected'))
+    total_deleted = sum(1 for g in groups for m in g['members'] if m['delete_status'] == 'deleted')
+
+    return jsonify({
+        'groups': groups,
+        'summary': {
+            'total_groups': total_groups,
+            'total_clean': total_clean,
+            'total_keep': total_keep,
+            'total_deleted': total_deleted,
+        },
+    })
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>/change-keep', methods=['POST'])
+def change_keep_version(task_id):
+    """Change which version is kept in a duplicate group."""
+    task = session.get(BatchTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+
+    data = request.json or {}
+    group_id = data.get('group_id')
+    new_keep_ctime = data.get('folder_ctime')
+
+    if not group_id or not new_keep_ctime:
+        return jsonify({'error': 'group_id and folder_ctime required'}), 400
+
+    # Get all members of this group
+    members = session.query(DuplicateVersionScanResult).filter(
+        DuplicateVersionScanResult.task_id == task_id,
+        DuplicateVersionScanResult.group_id == group_id,
+    ).all()
+
+    if not members:
+        return jsonify({'error': 'group not found'}), 404
+
+    # Verify the new keep version exists in the group
+    new_keep = next((m for m in members if m.folder_ctime == new_keep_ctime), None)
+    if not new_keep:
+        return jsonify({'error': 'folder_ctime not found in group'}), 404
+
+    # Update roles
+    for m in members:
+        if m.folder_ctime == new_keep_ctime:
+            m.role = 'user_selected'
+            m.keep_reason = '用户手动选择'
+        elif m.role in ('keep', 'user_selected'):
+            m.role = 'clean'
+            m.keep_reason = ''
+
+    session.commit()
+
+    return jsonify({'ok': True})
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>/restore', methods=['POST'])
+def restore_duplicate_versions(task_id):
+    """Restore soft-deleted duplicate versions."""
+    task = session.get(BatchTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+
+    data = request.json or {}
+    result_ids = data.get('result_ids', [])
+
+    result_ids, err = _validate_result_ids(result_ids)
+    if err:
+        return err
+
+    results, err = _check_result_id_consistency(result_ids, DuplicateVersionScanResult, task_id)
+    if err:
+        return err
+
+    affected_barcodes = set()
+    restored_count = 0
+
+    for r in results:
+        if r.delete_status != 'deleted':
+            continue
+        # Restore images
+        imgs = session.query(Image).filter(
+            Image.barcode == r.barcode,
+            Image.image_type == r.image_type,
+            Image.folder_ctime == r.folder_ctime,
+            Image.status == 'duplicate_version',
+        ).all()
+        for img in imgs:
+            img.status = 'active'
+            img.updated_at = datetime.datetime.now().isoformat()
+        r.delete_status = 'restored'
+        r.delete_message = '已恢复'
+        r.deleted_at = ''
+        restored_count += len(imgs)
+        affected_barcodes.add(r.barcode)
+
+    session.commit()
+
+    for bc in affected_barcodes:
+        update_versions_for_barcode(bc)
+
+    return jsonify({
+        'restored_count': restored_count,
+        'affected_barcodes': list(affected_barcodes),
+    })
+
+
+@batch_tasks_bp.route('/batch/delete-duplicate-versions/tasks', methods=['POST'])
+def create_batch_delete_duplicate_versions_task():
+    """Create an async task to soft-delete duplicate versions."""
+    data = request.json or {}
+    scan_task_id = data.get('scan_task_id')
+    result_ids = data.get('result_ids', [])
+
+    if not scan_task_id:
+        return jsonify({'error': 'scan_task_id required'}), 400
+
+    result_ids, err = _validate_result_ids(result_ids)
+    if err:
+        return err
+
+    params = {
+        'scan_task_id': scan_task_id,
+        'result_ids': result_ids,
+    }
+    from task_engine import create_task
+    task_dict, is_new = create_task('batch_delete_duplicate_versions', params=params)
     code = 201 if is_new else 200
     return jsonify(task_dict), code

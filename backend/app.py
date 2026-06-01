@@ -267,6 +267,39 @@ with engine.connect() as conn:
         conn.execute(text("ALTER TABLE batch_task ADD COLUMN failed_items TEXT DEFAULT '[]'"))
         conn.commit()
 
+    # Migration: add phash to image table
+    img_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('image')"))}
+    if 'phash' not in img_cols:
+        conn.execute(text("ALTER TABLE image ADD COLUMN phash TEXT DEFAULT ''"))
+        conn.commit()
+
+    # Migration: create duplicate_version_scan_result table
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS duplicate_version_scan_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES batch_task(id),
+            group_id INTEGER NOT NULL,
+            barcode TEXT NOT NULL,
+            image_type TEXT NOT NULL,
+            folder_ctime TEXT NOT NULL,
+            version_label TEXT DEFAULT '',
+            image_count INTEGER DEFAULT 0,
+            total_file_size INTEGER DEFAULT 0,
+            total_pixels INTEGER DEFAULT 0,
+            is_latest INTEGER DEFAULT 0,
+            role TEXT DEFAULT 'clean',
+            keep_reason TEXT DEFAULT '',
+            delete_status TEXT DEFAULT 'pending',
+            delete_message TEXT DEFAULT '',
+            deleted_at TEXT DEFAULT '',
+            kept_version_ctime TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dvsr_task_id ON duplicate_version_scan_result (task_id)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dvsr_task_group ON duplicate_version_scan_result (task_id, group_id)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dvsr_task_barcode ON duplicate_version_scan_result (task_id, barcode)'))
+    conn.commit()
+
     # Mark stale running and queued tasks as interrupted on startup
     now_iso = datetime.datetime.now().isoformat()
     _running = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'running'")).fetchone()[0]

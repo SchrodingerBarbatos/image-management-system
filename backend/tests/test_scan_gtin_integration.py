@@ -61,7 +61,7 @@ def test_scan_creates_rejected_for_non_gtin(sess, scan_dir):
     models.session = sess
 
     try:
-        with patch('scanner.generate_thumbnail', return_value=(None, 'fake_md5')):
+        with patch('scanner.generate_thumbnail', return_value=(True, 'fake_md5', 'phash')):
             result = scanner.scan_root(sr.id, full_scan=True)
     finally:
         scanner.session = original_session
@@ -101,7 +101,7 @@ def test_scan_rescan_revalidates_existing_gtin(sess, scan_dir):
 
     try:
         # First scan: all files processed
-        with patch('scanner.generate_thumbnail', return_value=(None, 'fake_md5')):
+        with patch('scanner.generate_thumbnail', return_value=(True, 'fake_md5', 'phash')):
             result1 = scanner.scan_root(sr.id, full_scan=True)
 
         assert result1['added'] == 1
@@ -113,7 +113,7 @@ def test_scan_rescan_revalidates_existing_gtin(sess, scan_dir):
         os.rename(old_path, new_path)
 
         # Second scan: revalidate
-        with patch('scanner.generate_thumbnail', return_value=(None, 'new_md5')):
+        with patch('scanner.generate_thumbnail', return_value=(True, 'new_md5', 'phash')):
             result2 = scanner.scan_root(sr.id, full_scan=True)
 
         # The old Image should be deleted, new RejectedBarcode created

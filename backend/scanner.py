@@ -252,34 +252,44 @@ def _insert_rejected_ignore(root_id, barcode, file_path, filename, reason):
 
 
 def _process_thumbnail_batch(thumb_jobs):
-    """Process a batch of thumbnail jobs and write back content_md5 via Core update.
-    Returns list of (image_id, md5) for successful MD5 computations."""
+    """Process a batch of thumbnail jobs and write back content_md5 and phash via Core update.
+    Returns dict of {image_id: md5} for successful MD5 computations."""
     if not thumb_jobs:
-        return []
+        return {}
     md5_updates = {}
+    phash_updates = {}
     for img_id, full_path in thumb_jobs:
-        _, md5 = generate_thumbnail(img_id, full_path)
+        _, md5, phash = generate_thumbnail(img_id, full_path)
         if md5:
             md5_updates[img_id] = md5
-    # Write back content_md5 via Core update (lightweight, no ORM objects)
-    if md5_updates:
-        _flush_md5_updates_core(md5_updates)
+        if phash:
+            phash_updates[img_id] = phash
+    # Write back content_md5 and phash via Core update (lightweight, no ORM objects)
+    if md5_updates or phash_updates:
+        _flush_hash_updates_core(md5_updates, phash_updates)
     return md5_updates
 
 
-def _flush_md5_updates_core(md5_updates):
-    """Batch-write content_md5 updates using Core UPDATE (no ORM objects loaded)."""
-    if not md5_updates:
+def _flush_hash_updates_core(md5_updates, phash_updates):
+    """Batch-write content_md5 and phash updates using Core UPDATE (no ORM objects loaded)."""
+    all_ids = set(md5_updates.keys()) | set(phash_updates.keys())
+    if not all_ids:
         return
-    ids = list(md5_updates.keys())
+    ids = list(all_ids)
     for chunk_start in range(0, len(ids), 500):
         chunk = ids[chunk_start:chunk_start + 500]
         for img_id in chunk:
-            session.execute(
-                update(Image)
-                .where(Image.id == img_id)
-                .values(content_md5=md5_updates[img_id])
-            )
+            values = {}
+            if img_id in md5_updates:
+                values['content_md5'] = md5_updates[img_id]
+            if img_id in phash_updates:
+                values['phash'] = phash_updates[img_id]
+            if values:
+                session.execute(
+                    update(Image)
+                    .where(Image.id == img_id)
+                    .values(**values)
+                )
     session.flush()
 
 
