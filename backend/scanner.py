@@ -174,19 +174,28 @@ def _walk_nonrecursive(path):
         return
 
 
-def count_image_files(roots):
+def count_image_files(roots, progress_callback=None):
     """Count total image files across all scan roots.
-    Uses os.walk — a single pass, same as the actual scan.
+    Note: this performs a separate os.walk traversal before the actual scan,
+    adding one extra pass over the directory tree. Acceptable trade-off for
+    accurate progress reporting. May add startup latency on network drives
+    or very large directories.
     Returns total count of image files matching IMAGE_EXTS."""
     total = 0
-    for r in roots:
+    for i, r in enumerate(roots):
         walk = os.walk if r.recursive else _walk_nonrecursive
         try:
-            for _, _, filenames in walk(r.path):
+            for dirpath, _, filenames in walk(r.path):
                 for fname in filenames:
                     ext = os.path.splitext(fname)[1].lower()
                     if ext in IMAGE_EXTS:
                         total += 1
+                if progress_callback:
+                    progress_callback('counting',
+                        counting_root_index=i + 1,
+                        counting_total_roots=len(roots),
+                        counting_current_dir=dirpath,
+                        counted_files=total)
         except OSError:
             continue
     return total

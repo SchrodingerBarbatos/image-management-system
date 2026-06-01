@@ -93,6 +93,10 @@ export interface ScanJobStatus {
   percent: number;
   eta_seconds: number;
   speed: number;
+  counted_files: number;
+  counting_current_dir: string;
+  counting_root_index: number;
+  counting_total_roots: number;
   error?: string;
 }
 

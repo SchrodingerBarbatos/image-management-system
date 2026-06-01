@@ -34,6 +34,8 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             'thumbnail_total': 0, 'thumbnail_current': 0,
             'total_files': 0, 'processed_files': 0, 'percent': 0,
             'eta_seconds': 0, 'speed': 0,
+            'counted_files': 0, 'counting_current_dir': '',
+            'counting_root_index': 0, 'counting_total_roots': len(root_ids),
             'error': None,
             'started_at': datetime.datetime.now().isoformat(),
         }
@@ -73,13 +75,14 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
     try:
         roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
 
-        # 阶段1: 统计文件数量（单次遍历，与实际扫描相同的 os.walk 路径）
+        # 阶段1: 统计文件数量（额外遍历一次目录，用于计算真实扫描百分比）
         progress('counting')
-        total_files = count_image_files(roots)
+        total_files = count_image_files(roots, progress_callback=progress)
         with _scan_lock:
             job = _scan_jobs.get(job_id)
             if job:
                 job['total_files'] = total_files
+                job['counting_current_dir'] = ''
 
         # 阶段2: 执行扫描（重置 started_at 以获得准确的 ETA）
         with _scan_lock:

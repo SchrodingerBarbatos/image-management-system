@@ -289,9 +289,11 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
             ? '扫描出错'
             : `阶段2/3 扫描文件 (目录 ${sp.current_root_index || 0}/${sp.total_roots || 0})`;
 
-          // 进度百分比：优先使用后端计算的 percent
+          // 进度百分比：仅 scanning/thumbnails/versioning 使用真实百分比
           let percent = sp.percent || 0;
-          if (sp.phase === 'thumbnails' && sp.thumbnail_total > 0) {
+          if (sp.phase === 'counting') {
+            percent = 0; // counting 阶段不显示假百分比
+          } else if (sp.phase === 'thumbnails' && sp.thumbnail_total > 0) {
             percent = Math.round((sp.thumbnail_current / sp.thumbnail_total) * 100);
           } else if (sp.phase === 'versioning' && (sp.versioning_total || 0) > 0) {
             percent = Math.round(((sp.versioning_current || 0) / (sp.versioning_total || 1)) * 100);
@@ -312,12 +314,36 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
                   percent={percent}
                   size="small"
                   status={sp.status === 'error' ? 'exception' : sp.status === 'done' ? 'success' : 'active'}
-                  format={() => sp.total_files > 0 && sp.status === 'running'
+                  showInfo={sp.phase === 'counting' ? false : undefined}
+                  format={() => sp.phase === 'counting'
+                    ? ''
+                    : sp.total_files > 0 && sp.status === 'running'
                     ? `${sp.processed_files || 0} / ${sp.total_files}`
                     : `${percent}%`}
                 />
 
-                {/* 当前目录 */}
+                {/* counting 阶段实时反馈 */}
+                {sp.phase === 'counting' && (
+                  <>
+                    <div style={{ fontSize: 12, color: '#888' }}>
+                      已发现图片: {sp.counted_files || 0}
+                    </div>
+                    {(sp.counting_current_dir || sp.counting_root_index > 0) && (
+                      <>
+                        {sp.counting_current_dir && (
+                          <div style={{ fontSize: 12, color: '#888' }}>当前目录: {sp.counting_current_dir}</div>
+                        )}
+                        {sp.counting_total_roots > 1 && (
+                          <div style={{ fontSize: 12, color: '#888' }}>
+                            目录: {sp.counting_root_index || 0} / {sp.counting_total_roots}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* 当前目录（scanning/thumbnails 阶段） */}
                 {(sp.phase === 'scanning' || sp.phase === 'thumbnails') && (sp.current_dir || sp.current_root_path) && (
                   <div style={{ fontSize: 12, color: '#888' }}>目录: {sp.current_dir || sp.current_root_path}</div>
                 )}
