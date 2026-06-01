@@ -516,11 +516,9 @@ def _run_delete_version(task_id):
             deleted_count += 1
         update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
 
-    # Delete the version record itself
-    sess.delete(v)
     sess.commit()
 
-    # Re-sequence remaining versions for this barcode
+    # 重建版本：如果图片全部删除，ImageVersion 会被清理；部分失败时保留版本
     update_versions_for_barcode(barcode)
 
     finish_task(task_id, result_count=deleted_count)
