@@ -201,22 +201,6 @@ def pick_keep_version(members):
     return best_idx, reason
 
 
-def _candidate_key(images, total_size):
-    """Compute a candidate key for pre-filtering before pairwise comparison.
-    Includes first/last image hash and file-size bucket. Two versions must
-    have the same candidate key to be considered potential duplicates.
-    This is a filter only — it can exclude non-matches but never判定重复.
-    Uses content_md5 first (exact match indicator), falls back to phash.
-    """
-    def _img_hash(img):
-        return img.content_md5 or img.phash or ''
-
-    first_hash = _img_hash(images[0]) if images else ''
-    last_hash = _img_hash(images[-1]) if images else ''
-    size_bucket = total_size // 65536
-    return (first_hash, last_hash, size_bucket)
-
-
 def _find_groups_in_pool(pool):
     """Given a list of (version, images, count, total_size) tuples,
     find duplicate groups using signature pre-filtering + sample filter
@@ -235,7 +219,7 @@ def _find_groups_in_pool(pool):
 
     assigned = set()  # set of folder_ctime
     groups = []
-    candidate_pairs = 0
+    candidate_pairs = 0       # cross-signature pairs only (not signature-bucket pairs)
     sample_filter_rejected = 0
     actual_comparisons = 0
 
