@@ -461,19 +461,19 @@ class TestFindGroupsInPool:
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
 
-    def test_candidate_key_filters_different_first_image(self):
-        """Different first image hash → candidate_key mismatch → no comparison."""
+    def test_different_first_image_rejected_by_sample_filter(self):
+        """Different first image → rejected by sample filter (first is always sampled)."""
         pool = [
             (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
             (_make_version('t2'), [_make_image(content_md5='b')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
-        # candidate_pairs should be 0 because candidate_key filters them out
-        assert stats['candidate_pairs'] == 0
+        assert stats['sample_filter_rejected'] >= 1
+        assert stats['actual_comparisons'] == 0
 
-    def test_candidate_key_allows_matching_first_image(self):
-        """Same first image hash → candidate_key matches → comparison happens."""
+    def test_same_first_image_passes_sample_filter(self):
+        """Same first image → sample filter passes → comparison happens."""
         pool = [
             (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
             (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
@@ -527,3 +527,70 @@ class TestFindGroupsInPool:
         # but full comparison rejected
         assert stats['sample_filter_rejected'] == 0
         assert stats['actual_comparisons'] >= 1
+
+    def test_phash_similar_not_missed(self):
+        """Two versions with different MD5 but pHash distance <= 5 must still
+        be grouped. Old candidate_key logic would漏判 these because it used
+        exact hash matching. Verify修复后不再漏判."""
+        # phash distance 3 between '0000000000000000' and '0000000000000007'
+        imgs_a = [
+            _make_image(content_md5='md5_a', phash='0000000000000000'),
+            _make_image(content_md5='md5_b', phash='0000000000000000'),
+            _make_image(content_md5='md5_c', phash='0000000000000000'),
+        ]
+        imgs_b = [
+            _make_image(content_md5='md5_x', phash='0000000000000007'),  # distance 3
+            _make_image(content_md5='md5_y', phash='0000000000000007'),  # distance 3
+            _make_image(content_md5='md5_z', phash='0000000000000007'),  # distance 3
+        ]
+        # Different signatures (different phash) → cross-signature path
+        pool = [
+            (_make_version('t1'), imgs_a, 3, 100),
+            (_make_version('t2'), imgs_b, 3, 200),  # different file_size too
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # Must be grouped — pHash distance <= 5 means are_same_image = True
+        assert len(groups) == 1
+        assert len(groups[0]) == 2
+
+    def test_different_size_bucket_not_missed(self):
+        """Two versions with same images but different total_file_size must
+        still be grouped. Old candidate_key used size_bucket as filter."""
+        imgs_a = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        imgs_b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
+        # Same signature → first pass handles this, but verify anyway
+        pool = [
+            (_make_version('t1'), imgs_a, 2, 100000),   # size_bucket = 1
+            (_make_version('t2'), imgs_b, 2, 200000),   # size_bucket = 3
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 1
+        assert len(groups[0]) == 2
+
+    def test_cross_signature_phash_similar_5_images(self):
+        """5 images with different MD5 but all pHash within threshold.
+        Sample indices = [0, 2, 4]. All sampled positions match via pHash.
+        Must be grouped even though signatures differ."""
+        imgs_a = [
+            _make_image(content_md5='', phash='a0a0a0a0a0a0a0a0'),
+            _make_image(content_md5='', phash='b0b0b0b0b0b0b0b0'),
+            _make_image(content_md5='', phash='c0c0c0c0c0c0c0c0'),
+            _make_image(content_md5='', phash='d0d0d0d0d0d0d0d0'),
+            _make_image(content_md5='', phash='e0e0e0e0e0e0e0e0'),
+        ]
+        # Each phash differs by 3 bits from corresponding image in imgs_a
+        imgs_b = [
+            _make_image(content_md5='', phash='a0a0a0a0a0a0a0a7'),  # 3 bits diff
+            _make_image(content_md5='', phash='b0b0b0b0b0b0b0b7'),
+            _make_image(content_md5='', phash='c0c0c0c0c0c0c0c7'),
+            _make_image(content_md5='', phash='d0d0d0d0d0d0d0d7'),
+            _make_image(content_md5='', phash='e0e0e0e0e0e0e0e7'),
+        ]
+        pool = [
+            (_make_version('t1'), imgs_a, 5, 500),
+            (_make_version('t2'), imgs_b, 5, 700),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # Must be grouped — all images have pHash distance <= 5
+        assert len(groups) == 1
+        assert len(groups[0]) == 2

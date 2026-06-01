@@ -219,20 +219,19 @@ def _candidate_key(images, total_size):
 
 def _find_groups_in_pool(pool):
     """Given a list of (version, images, count, total_size) tuples,
-    find duplicate groups using candidate-key filtering + signature
-    pre-filtering + short-circuit comparison.
+    find duplicate groups using signature pre-filtering + sample filter
+    + short-circuit comparison.
     Returns (groups, stats) where groups is a list of member-lists
     and stats tracks comparison counts.
     """
     if len(pool) < 2:
         return [], {'candidate_pairs': 0, 'sample_filter_rejected': 0, 'actual_comparisons': 0}
 
-    # Pre-compute signatures and candidate keys
+    # Pre-compute signatures
     items = []
     for v, imgs, cnt, ts in pool:
         sig = _version_signature(imgs)
-        ckey = _candidate_key(imgs, ts)
-        items.append((v, imgs, cnt, ts, sig, ckey))
+        items.append((v, imgs, cnt, ts, sig))
 
     assigned = set()  # set of folder_ctime
     groups = []
@@ -242,7 +241,7 @@ def _find_groups_in_pool(pool):
 
     # First pass: group by signature (fast path — exact signature match)
     sig_buckets = defaultdict(list)
-    for idx, (v, imgs, cnt, ts, sig, ckey) in enumerate(items):
+    for idx, (v, imgs, cnt, ts, sig) in enumerate(items):
         sig_buckets[sig].append(idx)
 
     for sig, bucket_indices in sig_buckets.items():
@@ -251,13 +250,13 @@ def _find_groups_in_pool(pool):
         for i_idx in bucket_indices:
             if i_idx in assigned:
                 continue
-            v_i, imgs_i, cnt_i, ts_i, _, _ = items[i_idx]
+            v_i, imgs_i, cnt_i, ts_i, _ = items[i_idx]
             assigned.add(i_idx)
             members = [_make_member(v_i, cnt_i, ts_i)]
             for j_idx in bucket_indices:
                 if j_idx in assigned:
                     continue
-                v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
+                v_j, imgs_j, cnt_j, ts_j, _ = items[j_idx]
                 passed, skip = passes_sample_filter(imgs_i, imgs_j)
                 if not passed:
                     sample_filter_rejected += 1
@@ -270,41 +269,32 @@ def _find_groups_in_pool(pool):
                 groups.append(members)
 
     # Second pass: cross-signature comparison for unassigned items.
-    # Use candidate_key as a fast filter: only compare versions whose
-    # (first_hash, last_hash, size_bucket) match. This reduces the number
-    # of expensive are_duplicate_versions() calls without affecting accuracy.
+    # No candidate_key bucketing — sample_filter handles exclusion.
+    # Candidate_key could miss duplicates with pHash distance <= 5
+    # or different file size buckets, causing漏判.
     unassigned = [idx for idx in range(len(items)) if idx not in assigned]
 
-    # Build candidate-key buckets for unassigned items
-    ckey_buckets = defaultdict(list)
-    for idx in unassigned:
-        _, _, _, _, _, ckey = items[idx]
-        ckey_buckets[ckey].append(idx)
-
-    for ckey, bucket_indices in ckey_buckets.items():
-        if len(bucket_indices) < 2:
+    for ui, i_idx in enumerate(unassigned):
+        if i_idx in assigned:
             continue
-        for ui, i_idx in enumerate(bucket_indices):
-            if i_idx in assigned:
+        v_i, imgs_i, cnt_i, ts_i, _ = items[i_idx]
+        assigned.add(i_idx)
+        members = [_make_member(v_i, cnt_i, ts_i)]
+        for j_idx in unassigned[ui + 1:]:
+            if j_idx in assigned:
                 continue
-            v_i, imgs_i, cnt_i, ts_i, _, _ = items[i_idx]
-            assigned.add(i_idx)
-            members = [_make_member(v_i, cnt_i, ts_i)]
-            for j_idx in bucket_indices[ui + 1:]:
-                if j_idx in assigned:
-                    continue
-                v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
-                candidate_pairs += 1
-                passed, skip = passes_sample_filter(imgs_i, imgs_j)
-                if not passed:
-                    sample_filter_rejected += 1
-                    continue
-                actual_comparisons += 1
-                if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
-                    assigned.add(j_idx)
-                    members.append(_make_member(v_j, cnt_j, ts_j))
-            if len(members) >= 2:
-                groups.append(members)
+            v_j, imgs_j, cnt_j, ts_j, _ = items[j_idx]
+            candidate_pairs += 1
+            passed, skip = passes_sample_filter(imgs_i, imgs_j)
+            if not passed:
+                sample_filter_rejected += 1
+                continue
+            actual_comparisons += 1
+            if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
+                assigned.add(j_idx)
+                members.append(_make_member(v_j, cnt_j, ts_j))
+        if len(members) >= 2:
+            groups.append(members)
 
     stats = {
         'candidate_pairs': candidate_pairs,
