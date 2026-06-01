@@ -156,26 +156,47 @@ def pick_keep_version(members):
     return best_idx, reason
 
 
+def _candidate_key(images, total_size):
+    """Compute a candidate key for pre-filtering before pairwise comparison.
+    Includes first/last image hash and file-size bucket. Two versions must
+    have the same candidate key to be considered potential duplicates.
+    This is a filter only — it can exclude non-matches but never判定重复.
+    Uses content_md5 first (exact match indicator), falls back to phash.
+    """
+    def _img_hash(img):
+        return img.content_md5 or img.phash or ''
+
+    first_hash = _img_hash(images[0]) if images else ''
+    last_hash = _img_hash(images[-1]) if images else ''
+    size_bucket = total_size // 65536
+    return (first_hash, last_hash, size_bucket)
+
+
 def _find_groups_in_pool(pool):
     """Given a list of (version, images, count, total_size) tuples,
-    find duplicate groups using signature pre-filtering + short-circuit comparison.
-    Returns list of member-lists (each with 2+ members).
+    find duplicate groups using candidate-key filtering + signature
+    pre-filtering + short-circuit comparison.
+    Returns (groups, stats) where groups is a list of member-lists
+    and stats tracks comparison counts.
     """
     if len(pool) < 2:
-        return []
+        return [], {'candidate_pairs': 0, 'actual_comparisons': 0}
 
-    # Pre-compute signatures
+    # Pre-compute signatures and candidate keys
     items = []
     for v, imgs, cnt, ts in pool:
         sig = _version_signature(imgs)
-        items.append((v, imgs, cnt, ts, sig))
+        ckey = _candidate_key(imgs, ts)
+        items.append((v, imgs, cnt, ts, sig, ckey))
 
     assigned = set()  # set of folder_ctime
     groups = []
+    candidate_pairs = 0
+    actual_comparisons = 0
 
-    # First pass: group by signature (fast path)
+    # First pass: group by signature (fast path — exact signature match)
     sig_buckets = defaultdict(list)
-    for idx, (v, imgs, cnt, ts, sig) in enumerate(items):
+    for idx, (v, imgs, cnt, ts, sig, ckey) in enumerate(items):
         sig_buckets[sig].append(idx)
 
     for sig, bucket_indices in sig_buckets.items():
@@ -184,38 +205,55 @@ def _find_groups_in_pool(pool):
         for i_idx in bucket_indices:
             if i_idx in assigned:
                 continue
-            v_i, imgs_i, cnt_i, ts_i, _ = items[i_idx]
+            v_i, imgs_i, cnt_i, ts_i, _, _ = items[i_idx]
             assigned.add(i_idx)
             members = [_make_member(v_i, cnt_i, ts_i)]
             for j_idx in bucket_indices:
                 if j_idx in assigned:
                     continue
-                v_j, imgs_j, cnt_j, ts_j, _ = items[j_idx]
+                v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
+                actual_comparisons += 1
                 if are_duplicate_versions(imgs_i, imgs_j):
                     assigned.add(j_idx)
                     members.append(_make_member(v_j, cnt_j, ts_j))
             if len(members) >= 2:
                 groups.append(members)
 
-    # Second pass: cross-signature comparison for unassigned items
+    # Second pass: cross-signature comparison for unassigned items.
+    # Use candidate_key as a fast filter: only compare versions whose
+    # (first_hash, last_hash, size_bucket) match. This reduces the number
+    # of expensive are_duplicate_versions() calls without affecting accuracy.
     unassigned = [idx for idx in range(len(items)) if idx not in assigned]
-    for ui, i_idx in enumerate(unassigned):
-        if i_idx in assigned:
-            continue
-        v_i, imgs_i, cnt_i, ts_i, _ = items[i_idx]
-        assigned.add(i_idx)
-        members = [_make_member(v_i, cnt_i, ts_i)]
-        for j_idx in unassigned[ui + 1:]:
-            if j_idx in assigned:
-                continue
-            v_j, imgs_j, cnt_j, ts_j, _ = items[j_idx]
-            if are_duplicate_versions(imgs_i, imgs_j):
-                assigned.add(j_idx)
-                members.append(_make_member(v_j, cnt_j, ts_j))
-        if len(members) >= 2:
-            groups.append(members)
 
-    return groups
+    # Build candidate-key buckets for unassigned items
+    ckey_buckets = defaultdict(list)
+    for idx in unassigned:
+        _, _, _, _, _, ckey = items[idx]
+        ckey_buckets[ckey].append(idx)
+
+    for ckey, bucket_indices in ckey_buckets.items():
+        if len(bucket_indices) < 2:
+            continue
+        for ui, i_idx in enumerate(bucket_indices):
+            if i_idx in assigned:
+                continue
+            v_i, imgs_i, cnt_i, ts_i, _, _ = items[i_idx]
+            assigned.add(i_idx)
+            members = [_make_member(v_i, cnt_i, ts_i)]
+            for j_idx in bucket_indices[ui + 1:]:
+                if j_idx in assigned:
+                    continue
+                v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
+                candidate_pairs += 1
+                actual_comparisons += 1
+                if are_duplicate_versions(imgs_i, imgs_j):
+                    assigned.add(j_idx)
+                    members.append(_make_member(v_j, cnt_j, ts_j))
+            if len(members) >= 2:
+                groups.append(members)
+
+    stats = {'candidate_pairs': candidate_pairs, 'actual_comparisons': actual_comparisons}
+    return groups, stats
 
 
 def _batch_load_images(sess):
@@ -255,9 +293,14 @@ def detect_duplicate_versions(sess, progress_callback=None):
         }]
     }
     """
+    import time
+    start_time = time.monotonic()
+
     versions = sess.query(ImageVersion).all()
     if not versions:
         return []
+
+    total_versions = len(versions)
 
     # Batch-load all images once (avoids N+1 queries)
     images_by_key = _batch_load_images(sess)
@@ -271,6 +314,8 @@ def detect_duplicate_versions(sess, progress_callback=None):
     processed = 0
     all_groups = []
     group_id = 0
+    total_candidate_pairs = 0
+    total_actual_comparisons = 0
 
     for (barcode, image_type), vers in by_barcode_type.items():
         processed += 1
@@ -298,7 +343,9 @@ def detect_duplicate_versions(sess, progress_callback=None):
             if len(count_pool) < 2:
                 continue
 
-            member_lists = _find_groups_in_pool(count_pool)
+            member_lists, stats = _find_groups_in_pool(count_pool)
+            total_candidate_pairs += stats['candidate_pairs']
+            total_actual_comparisons += stats['actual_comparisons']
 
             for members in member_lists:
                 keep_idx, reason = pick_keep_version(members)
@@ -313,5 +360,9 @@ def detect_duplicate_versions(sess, progress_callback=None):
                     'members': members,
                 })
 
-    _log.info("detect_duplicate_versions: found %d duplicate groups", len(all_groups))
+    elapsed = time.monotonic() - start_time
+    _log.info(
+        "DuplicateVersionScan: versions=%d candidate_pairs=%d actual_comparisons=%d groups=%d elapsed=%.1fs",
+        total_versions, total_candidate_pairs, total_actual_comparisons, len(all_groups), elapsed,
+    )
     return all_groups

@@ -220,7 +220,7 @@ class TestFindGroupsInPool:
             (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
             (_make_version('t2'), [_make_image(content_md5='b')], 1, 100),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
 
     def test_two_identical(self):
@@ -229,7 +229,7 @@ class TestFindGroupsInPool:
             (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
             (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
         assert len(groups[0]) == 2
 
@@ -240,7 +240,7 @@ class TestFindGroupsInPool:
             (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
             (_make_version('t3'), [_make_image(content_md5='a')], 1, 100),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
         assert len(groups[0]) == 3
 
@@ -252,7 +252,7 @@ class TestFindGroupsInPool:
             (_make_version('t3'), [_make_image(content_md5='b')], 1, 200),
             (_make_version('t4'), [_make_image(content_md5='b')], 1, 200),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 2
         assert all(len(g) == 2 for g in groups)
 
@@ -261,7 +261,7 @@ class TestFindGroupsInPool:
         pool = [
             (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
 
     def test_cross_signature_match(self):
@@ -271,7 +271,7 @@ class TestFindGroupsInPool:
             (_make_version('t1'), [_make_image(content_md5='md5val', phash='phash1')], 1, 100),
             (_make_version('t2'), [_make_image(content_md5='md5val', phash='phash2')], 1, 100),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         # Different signatures (p:phash1 vs p:phash2), but MD5 matches
         assert len(groups) == 1
 
@@ -281,5 +281,39 @@ class TestFindGroupsInPool:
             (_make_version('t1'), [_make_image(content_md5='a'), _make_image(content_md5='x')], 2, 100),
             (_make_version('t2'), [_make_image(content_md5='a'), _make_image(content_md5='y')], 2, 100),
         ]
-        groups = _find_groups_in_pool(pool)
+        groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
+
+    def test_candidate_key_filters_different_first_image(self):
+        """Different first image hash → candidate_key mismatch → no comparison."""
+        pool = [
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='b')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 0
+        # candidate_pairs should be 0 because candidate_key filters them out
+        assert stats['candidate_pairs'] == 0
+
+    def test_candidate_key_allows_matching_first_image(self):
+        """Same first image hash → candidate_key matches → comparison happens."""
+        pool = [
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 1
+        assert stats['actual_comparisons'] >= 1
+
+    def test_stats_tracking(self):
+        """Verify stats are properly tracked."""
+        pool = [
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3'), [_make_image(content_md5='a')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 1
+        assert len(groups[0]) == 3
+        assert 'candidate_pairs' in stats
+        assert 'actual_comparisons' in stats
