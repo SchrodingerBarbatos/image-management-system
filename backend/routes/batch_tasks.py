@@ -350,7 +350,7 @@ def _run_batch_delete_duplicates(task_id):
         key = (item['barcode'], item['image_type'], item['folder_ctime'])
         if key not in valid_duplicates:
             skipped_count += 1
-            update_task_progress(task_id, progress=i + 1)
+            update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
             continue
 
         count = _delete_folder_images(
@@ -358,7 +358,7 @@ def _run_batch_delete_duplicates(task_id):
         )
         total_deleted += count
         affected_barcodes.add(item['barcode'])
-        update_task_progress(task_id, progress=i + 1)
+        update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
 
     sess.commit()
 
@@ -423,13 +423,13 @@ def _run_batch_delete_low_versions(task_id):
         # Validate: still qualifies for deletion
         if count == 0 or threshold == 0 or total_versions <= 1 or count >= threshold:
             skipped_count += 1
-            update_task_progress(task_id, progress=i + 1)
+            update_task_progress(task_id, progress=i + 1, current_item=barcode)
             continue
 
         count = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
         total_deleted += count
         affected_barcodes.add(barcode)
-        update_task_progress(task_id, progress=i + 1)
+        update_task_progress(task_id, progress=i + 1, current_item=barcode)
 
     sess.commit()
 
@@ -497,7 +497,7 @@ def _run_delete_version(task_id):
                 pass
         sess.delete(img)
         deleted_count += 1
-        update_task_progress(task_id, progress=i + 1)
+        update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
 
     # Delete the version record itself
     sess.delete(v)
@@ -564,11 +564,11 @@ def _run_batch_delete_images(task_id):
                 os.remove(img.file_path)
             except OSError:
                 pass
-            update_task_progress(task_id, progress=i + 1)
+            update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
     else:
         # Even when not deleting files, report progress for consistency
         for i in range(total):
-            update_task_progress(task_id, progress=i + 1)
+            update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
 
     # Delete database records
     deleted = sess.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')

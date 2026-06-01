@@ -73,11 +73,12 @@ export const scanApi = {
 
 export interface ScanJobStatus {
   status: 'running' | 'done' | 'error';
-  phase: 'starting' | 'scan_start' | 'scanning' | 'thumbnails' | 'versioning' | 'root_done' | 'done' | 'error';
+  phase: 'counting' | 'starting' | 'scan_start' | 'scanning' | 'thumbnails' | 'versioning' | 'root_done' | 'done' | 'error';
   current_root_path?: string;
   current_root_index?: number;
   total_roots?: number;
   current_file?: string;
+  current_dir?: string;
   added: number;
   skipped: number;
   broken_cleaned: number;
@@ -85,6 +86,13 @@ export interface ScanJobStatus {
   rejected: number;
   thumbnail_total: number;
   thumbnail_current: number;
+  versioning_total?: number;
+  versioning_current?: number;
+  total_files: number;
+  processed_files: number;
+  percent: number;
+  eta_seconds: number;
+  speed: number;
   error?: string;
 }
 
@@ -219,6 +227,11 @@ export interface BatchTaskInfo {
   result_count: number;
   error_message: string;
   params_json: string;
+  current_item: string;
+  percent: number;
+  speed: number;
+  eta_seconds: number;
+  elapsed_seconds: number;
   created_at: string;
   started_at: string;
   finished_at: string;

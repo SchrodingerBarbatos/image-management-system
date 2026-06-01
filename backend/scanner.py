@@ -173,6 +173,24 @@ def _walk_nonrecursive(path):
     except OSError:
         return
 
+
+def count_image_files(roots):
+    """Count total image files across all scan roots.
+    Uses os.walk — a single pass, same as the actual scan.
+    Returns total count of image files matching IMAGE_EXTS."""
+    total = 0
+    for r in roots:
+        walk = os.walk if r.recursive else _walk_nonrecursive
+        try:
+            for _, _, filenames in walk(r.path):
+                for fname in filenames:
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in IMAGE_EXTS:
+                        total += 1
+        except OSError:
+            continue
+    return total
+
 # Lightweight tuple for dir_index entries to avoid loading full ORM objects.
 # Fields: (image_id, barcode, md5_hash, image_type)
 _IDX_ID = 0
@@ -248,25 +266,26 @@ def _flush_md5_updates_core(md5_updates):
     session.flush()
 
 
-def scan_root(root_id, full_scan=False, progress_callback=None):
+def scan_root(root_id, full_scan=False, progress_callback=None, processed_offset=0):
     """Scan a single scan root. If the root's allow_fuzzy toggle is on,
     image_type is taken from the root's fuzzy_image_type setting;
     otherwise defaults to 'main'.
 
     If full_scan is True, missing records are deleted only after disk scan succeeds.
-    progress_callback(phase, **kwargs) is called at key points for async progress reporting."""
+    progress_callback(phase, **kwargs) is called at key points for async progress reporting.
+    processed_offset: cumulative processed_files count from previous roots (for multi-root progress)."""
     root = session.get(ScanRoot, root_id)
     if not root:
         return {'error': 'Scan root not found'}
 
     try:
-        return _do_scan(root, root_id, full_scan, progress_callback)
+        return _do_scan(root, root_id, full_scan, progress_callback, processed_offset)
     except Exception:
         session.rollback()
         raise
 
 
-def _do_scan(root, root_id, full_scan, progress_callback):
+def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0):
 
     def _report(phase, **kw):
         if progress_callback:
@@ -285,6 +304,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
     skipped = 0
     broken_cleaned = 0  # in full_scan mode this counts all deleted records, not just broken
     rejected_count = 0
+    local_processed = 0  # counter local to this root
     thumb_jobs = []  # accumulated between batch processing
     affected_barcodes = set()
 
@@ -316,7 +336,10 @@ def _do_scan(root, root_id, full_scan, progress_callback):
                 continue
             full_path = os.path.normpath(os.path.join(dirpath, fname))
 
-            _report('scanning', current_file=fname, added=added, skipped=skipped, rejected=rejected_count)
+            local_processed += 1
+            _report('scanning', current_file=fname, added=added, skipped=skipped,
+                    rejected=rejected_count, processed_files=processed_offset + local_processed,
+                    current_dir=dirpath)
 
             entry = dir_index.pop(full_path, None)
             if entry is not None:
@@ -499,7 +522,7 @@ def _do_scan(root, root_id, full_scan, progress_callback):
 
     _report('root_done', added=added, skipped=skipped,
             broken_cleaned=broken_cleaned, broken_new=leftover_count,
-            rejected=rejected_count)
+            rejected=rejected_count, processed_files=processed_offset + local_processed)
 
     return {'added': added, 'skipped': skipped, 'broken_cleaned': broken_cleaned, 'broken_new': leftover_count,
             'rejected': rejected_count, 'affected_barcodes': list(affected_barcodes)}

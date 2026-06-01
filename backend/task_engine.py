@@ -201,7 +201,7 @@ def delete_task(task_id):
         return {'ok': True}
 
 
-def update_task_progress(task_id, progress=None, total=None, result_count=None):
+def update_task_progress(task_id, progress=None, total=None, result_count=None, current_item=None):
     """Update task progress fields. Called by handler."""
     sess = _get_thread_session()
     with _task_lock:
@@ -214,6 +214,8 @@ def update_task_progress(task_id, progress=None, total=None, result_count=None):
             task.total = total
         if result_count is not None:
             task.result_count = result_count
+        if current_item is not None:
+            task.current_item = current_item
         sess.commit()
 
 
@@ -235,7 +237,7 @@ def finish_task(task_id, result_count=0, error_message=''):
 
 
 def _task_to_dict(task):
-    return {
+    d = {
         'id': task.id,
         'task_type': task.task_type,
         'status': task.status,
@@ -244,7 +246,42 @@ def _task_to_dict(task):
         'result_count': task.result_count,
         'error_message': task.error_message,
         'params_json': task.params_json,
+        'current_item': task.current_item or '',
         'created_at': task.created_at,
         'started_at': task.started_at,
         'finished_at': task.finished_at,
     }
+    # 计算百分比、速度和剩余时间
+    if task.total and task.total > 0:
+        d['percent'] = round(task.progress / task.total * 100) if task.progress else 0
+    else:
+        d['percent'] = 0
+    if task.started_at and task.progress and task.progress > 0:
+        try:
+            started = datetime.datetime.fromisoformat(task.started_at)
+            elapsed = (datetime.datetime.now() - started).total_seconds()
+            if elapsed > 0:
+                d['speed'] = round(task.progress / elapsed, 1)
+                remaining = task.total - task.progress if task.total else 0
+                if d['speed'] > 0 and remaining > 0:
+                    d['eta_seconds'] = round(remaining / d['speed'])
+                else:
+                    d['eta_seconds'] = 0
+            else:
+                d['speed'] = 0
+                d['eta_seconds'] = 0
+        except (ValueError, TypeError):
+            d['speed'] = 0
+            d['eta_seconds'] = 0
+    else:
+        d['speed'] = 0
+        d['eta_seconds'] = 0
+    # 完成信息（所有终态任务都计算耗时）
+    if task.status in ('done', 'error', 'interrupted', 'cancelled') and task.started_at and task.finished_at:
+        try:
+            started = datetime.datetime.fromisoformat(task.started_at)
+            finished = datetime.datetime.fromisoformat(task.finished_at)
+            d['elapsed_seconds'] = round((finished - started).total_seconds())
+        except (ValueError, TypeError):
+            d['elapsed_seconds'] = 0
+    return d

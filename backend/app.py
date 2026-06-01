@@ -255,6 +255,12 @@ with engine.connect() as conn:
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_lv_task_barcode ON low_version_scan_result (task_id, barcode)'))
     conn.commit()
 
+    # Migration: add current_item column to batch_task if missing
+    task_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('batch_task')"))}
+    if 'current_item' not in task_cols:
+        conn.execute(text("ALTER TABLE batch_task ADD COLUMN current_item TEXT DEFAULT ''"))
+        conn.commit()
+
     # Mark stale running and queued tasks as interrupted on startup
     now_iso = datetime.datetime.now().isoformat()
     _running = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'running'")).fetchone()[0]

@@ -112,6 +112,7 @@ class BatchTask(Base):
     result_count = Column(Integer, default=0)
     error_message = Column(Text, default='')
     params_json = Column(Text, default='{}')
+    current_item = Column(Text, default='')  # 当前处理对象（删除任务等）
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
     started_at = Column(Text, default='')
     finished_at = Column(Text, default='')

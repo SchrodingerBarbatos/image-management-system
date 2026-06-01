@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Table, Button, Input, Switch, Select, Space, Popconfirm, message, Tag, Radio, Progress } from 'antd';
 import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined, LoadingOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import { ScanRoot, ScanLog, ScanJobStatus, scanRootApi, scanApi, scanLogApi } from '../services/api';
+import { fmtEta } from '../utils/format';
 import RejectedBarcodes from './RejectedBarcodes';
 
 interface Props {
@@ -274,51 +275,94 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
           </Space>
         )}
 
-        {scanProgress && (
-          <div style={{ marginBottom: 12, padding: '12px', background: '#fafafa', borderRadius: 6 }}>
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <Space>
-                <LoadingOutlined spin />
-                <span>
-                  {scanProgress.phase === 'thumbnails'
-                    ? '正在生成缩略图...'
-                    : scanProgress.phase === 'versioning'
-                    ? '正在更新版本信息...'
-                    : scanProgress.status === 'done'
-                    ? '扫描完成'
-                    : scanProgress.status === 'error'
-                    ? '扫描出错'
-                    : `正在扫描 (${scanProgress.current_root_index || 0}/${scanProgress.total_roots || 0})`}
-                </span>
-              </Space>
-              {scanProgress.current_root_path && (
-                <div style={{ fontSize: 12, color: '#888' }}>目录: {scanProgress.current_root_path}</div>
-              )}
-              {scanProgress.phase === 'scanning' && scanProgress.current_file && (
-                <div style={{ fontSize: 12, color: '#888' }}>当前文件: {scanProgress.current_file}</div>
-              )}
-              <div style={{ fontSize: 12 }}>
-                新增 {scanProgress.added} | 跳过 {scanProgress.skipped} | 清理 {scanProgress.broken_cleaned} | 拒绝 {scanProgress.rejected}
-              </div>
-              {scanProgress.phase === 'thumbnails' && scanProgress.thumbnail_total > 0 && (
+        {scanProgress && (() => {
+          const sp = scanProgress;
+          const phaseText = sp.phase === 'counting'
+            ? '阶段1/3 统计文件'
+            : sp.phase === 'thumbnails'
+            ? '阶段2/3 生成缩略图'
+            : sp.phase === 'versioning'
+            ? '阶段3/3 更新版本'
+            : sp.status === 'done'
+            ? '扫描完成'
+            : sp.status === 'error'
+            ? '扫描出错'
+            : `阶段2/3 扫描文件 (目录 ${sp.current_root_index || 0}/${sp.total_roots || 0})`;
+
+          // 进度百分比：优先使用后端计算的 percent
+          let percent = sp.percent || 0;
+          if (sp.phase === 'thumbnails' && sp.thumbnail_total > 0) {
+            percent = Math.round((sp.thumbnail_current / sp.thumbnail_total) * 100);
+          } else if (sp.phase === 'versioning' && (sp.versioning_total || 0) > 0) {
+            percent = Math.round(((sp.versioning_current || 0) / (sp.versioning_total || 1)) * 100);
+          } else if (sp.status === 'done') {
+            percent = 100;
+          }
+
+          return (
+            <div style={{ marginBottom: 12, padding: '12px', background: '#fafafa', borderRadius: 6 }}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Space>
+                  {sp.status === 'running' && <LoadingOutlined spin />}
+                  <span>{phaseText}</span>
+                </Space>
+
+                {/* 进度条 */}
                 <Progress
-                  percent={Math.round((scanProgress.thumbnail_current / scanProgress.thumbnail_total) * 100)}
+                  percent={percent}
                   size="small"
-                  format={() => `${scanProgress.thumbnail_current}/${scanProgress.thumbnail_total}`}
+                  status={sp.status === 'error' ? 'exception' : sp.status === 'done' ? 'success' : 'active'}
+                  format={() => sp.total_files > 0 && sp.status === 'running'
+                    ? `${sp.processed_files || 0} / ${sp.total_files}`
+                    : `${percent}%`}
                 />
-              )}
-              {scanProgress.phase !== 'thumbnails' && scanProgress.status === 'running' && (
-                <Progress percent={99} size="small" status="active" showInfo={false} />
-              )}
-              {scanProgress.status === 'done' && (
-                <Progress percent={100} size="small" status="success" showInfo={false} />
-              )}
-              {scanProgress.status === 'error' && (
-                <div style={{ color: 'red', fontSize: 12 }}>错误: {scanProgress.error}</div>
-              )}
-            </Space>
-          </div>
-        )}
+
+                {/* 当前目录 */}
+                {(sp.phase === 'scanning' || sp.phase === 'thumbnails') && (sp.current_dir || sp.current_root_path) && (
+                  <div style={{ fontSize: 12, color: '#888' }}>目录: {sp.current_dir || sp.current_root_path}</div>
+                )}
+
+                {/* 当前文件 */}
+                {sp.phase === 'scanning' && sp.current_file && (
+                  <div style={{ fontSize: 12, color: '#888' }}>文件: {sp.current_file}</div>
+                )}
+
+                {/* 统计信息 */}
+                {sp.phase !== 'counting' && (
+                  <div style={{ fontSize: 12 }}>
+                    新增 {sp.added} | 跳过 {sp.skipped} | 清理 {sp.broken_cleaned} | 拒绝 {sp.rejected}
+                  </div>
+                )}
+
+                {/* 速度和 ETA（仅扫描阶段） */}
+                {sp.phase === 'scanning' && sp.speed > 0 && (
+                  <div style={{ fontSize: 12, color: '#888' }}>
+                    速度: {sp.speed} 文件/秒
+                    {sp.eta_seconds > 0 && ` | 预计剩余: ${fmtEta(sp.eta_seconds)}`}
+                  </div>
+                )}
+
+                {/* 缩略图进度详情 */}
+                {sp.phase === 'thumbnails' && sp.thumbnail_total > 0 && (
+                  <div style={{ fontSize: 12, color: '#888' }}>
+                    缩略图: {sp.thumbnail_current}/{sp.thumbnail_total}
+                  </div>
+                )}
+
+                {/* 版本更新进度详情 */}
+                {sp.phase === 'versioning' && (sp.versioning_total || 0) > 0 && (
+                  <div style={{ fontSize: 12, color: '#888' }}>
+                    版本更新: {sp.versioning_current || 0}/{sp.versioning_total || 0}
+                  </div>
+                )}
+
+                {sp.status === 'error' && (
+                  <div style={{ color: 'red', fontSize: 12 }}>错误: {sp.error}</div>
+                )}
+              </Space>
+            </div>
+          );
+        })()}
         <Table rowKey="id" columns={columns} dataSource={roots} loading={loading} size="small"
           rowSelection={{
             selectedRowKeys,

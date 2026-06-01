@@ -1,7 +1,7 @@
 import os, json, uuid, threading, datetime, traceback
 from flask import Blueprint, request, jsonify
 from models import session, ScanRoot, Image, ScanLog, ImageVersion
-from scanner import scan_root
+from scanner import scan_root, count_image_files
 from versioning import update_versions_for_barcode, update_all_versions
 
 scan_bp = Blueprint('scan', __name__)
@@ -23,14 +23,17 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
     with _scan_lock:
         _scan_jobs[job_id] = {
             'status': 'running',
-            'phase': 'starting',
+            'phase': 'counting',
             'current_root_path': '',
             'current_root_index': 0,
             'total_roots': len(root_ids),
             'current_file': '',
+            'current_dir': '',
             'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'broken_new': 0,
             'rejected': 0,
             'thumbnail_total': 0, 'thumbnail_current': 0,
+            'total_files': 0, 'processed_files': 0, 'percent': 0,
+            'eta_seconds': 0, 'speed': 0,
             'error': None,
             'started_at': datetime.datetime.now().isoformat(),
         }
@@ -44,15 +47,48 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             if job:
                 job['phase'] = phase
                 job.update(kw)
+                # 计算真实进度
+                total_files = job.get('total_files', 0)
+                processed_files = job.get('processed_files', 0)
+                if total_files > 0 and phase == 'scanning':
+                    job['percent'] = min(99, round(processed_files / total_files * 100))
+                    # 计算速度和 ETA
+                    try:
+                        started = datetime.datetime.fromisoformat(job['started_at'])
+                        elapsed = (datetime.datetime.now() - started).total_seconds()
+                        if elapsed > 0 and processed_files > 0:
+                            job['speed'] = round(processed_files / elapsed, 1)
+                            remaining = total_files - processed_files
+                            if job['speed'] > 0 and remaining > 0:
+                                job['eta_seconds'] = round(remaining / job['speed'])
+                            else:
+                                job['eta_seconds'] = 0
+                    except (ValueError, TypeError):
+                        pass
 
     _add_log('scan', 'info',
         f"扫描开始 - {'全量' if full_scan else '增量'}模式",
         json.dumps({'job_id': job_id, 'root_ids': root_ids}))
 
     try:
+        roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
+
+        # 阶段1: 统计文件数量（单次遍历，与实际扫描相同的 os.walk 路径）
+        progress('counting')
+        total_files = count_image_files(roots)
+        with _scan_lock:
+            job = _scan_jobs.get(job_id)
+            if job:
+                job['total_files'] = total_files
+
+        # 阶段2: 执行扫描（重置 started_at 以获得准确的 ETA）
+        with _scan_lock:
+            job = _scan_jobs.get(job_id)
+            if job:
+                job['started_at'] = datetime.datetime.now().isoformat()
         total = {'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'rejected': 0}
         all_affected = set()
-        roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
+        processed_offset = 0  # 跨 root 的已处理文件累计数
 
         for i, r in enumerate(roots):
             with _scan_lock:
@@ -61,19 +97,28 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
                     job['current_root_index'] = i + 1
                     job['current_root_path'] = r.path
 
-            res = scan_root(r.id, full_scan=full_scan, progress_callback=progress)
+            res = scan_root(r.id, full_scan=full_scan, progress_callback=progress,
+                            processed_offset=processed_offset)
             for k in total:
                 total[k] += res.get(k, 0)
             all_affected.update(res.get('affected_barcodes', []))
+            # 更新 offset：使用回调中最后报告的 processed_files 值
+            with _scan_lock:
+                job = _scan_jobs.get(job_id)
+                if job:
+                    processed_offset = job.get('processed_files', processed_offset)
 
-        progress('versioning', versioning_total=len(all_affected))
+        # 阶段3: 更新版本
+        versioning_total = len(all_affected)
+        progress('versioning', versioning_total=versioning_total)
         for idx, bc in enumerate(sorted(all_affected)):
             update_versions_for_barcode(bc)
-            if (idx + 1) % 50 == 0:
-                progress('versioning', versioning_total=len(all_affected), versioning_current=idx + 1)
+            # 每 10 个或最后一个更新进度（提高小集合的粒度）
+            if (idx + 1) % 10 == 0 or idx + 1 == versioning_total:
+                progress('versioning', versioning_total=versioning_total, versioning_current=idx + 1)
 
         # Final progress update — mark all barcodes as processed
-        progress('versioning', versioning_total=len(all_affected), versioning_current=len(all_affected))
+        progress('versioning', versioning_total=versioning_total, versioning_current=versioning_total)
 
         _add_log('scan', 'success',
             f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}, 拒绝 {total['rejected']}",
@@ -84,6 +129,7 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             if job:
                 job['status'] = 'done'
                 job['phase'] = 'done'
+                job['percent'] = 100
                 job.update(total)
 
     except Exception as e:

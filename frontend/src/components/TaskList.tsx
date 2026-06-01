@@ -1,6 +1,7 @@
 import React from 'react';
 import { Tag, Space, Button, Progress, Spin, Typography, message } from 'antd';
 import { BatchTaskInfo, taskApi } from '../services/api';
+import { fmtEta } from '../utils/format';
 
 const { Text } = Typography;
 
@@ -21,10 +22,28 @@ export function TaskStatusBadge({ status }: { status: string }) {
 export function TaskProgress({ task }: { task: BatchTaskInfo }) {
   if (task.status === 'queued') return <Text type="secondary">排队中…</Text>;
   if (task.status === 'running') {
-    const percent = task.total > 0 ? Math.round((task.progress / task.total) * 100) : 0;
-    return <Progress percent={percent} size="small" />;
+    const percent = task.percent || (task.total > 0 ? Math.round((task.progress / task.total) * 100) : 0);
+    return (
+      <div>
+        <Progress percent={percent} size="small" />
+        <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+          {task.progress}/{task.total}
+          {task.current_item && ` | 当前: ${task.current_item}`}
+          {task.speed > 0 && ` | 速度: ${task.speed}/秒`}
+          {task.eta_seconds > 0 && ` | 剩余: ${fmtEta(task.eta_seconds)}`}
+        </div>
+      </div>
+    );
   }
-  if (task.status === 'done') return <Text type="success">完成（{task.result_count} 条结果）</Text>;
+  if (task.status === 'done') {
+    const elapsed = task.elapsed_seconds;
+    return (
+      <Text type="success">
+        完成（{task.result_count} 条结果）
+        {elapsed > 0 && `，耗时 ${elapsed}秒`}
+      </Text>
+    );
+  }
   if (task.status === 'error') return <Text type="danger">{task.error_message || '执行失败'}</Text>;
   if (task.status === 'interrupted') return <Text type="danger">程序中断</Text>;
   if (task.status === 'cancelled') return <Text type="warning">已取消</Text>;
