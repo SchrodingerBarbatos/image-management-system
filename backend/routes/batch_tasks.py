@@ -505,12 +505,15 @@ def _run_delete_version(task_id):
         if delete_files:
             try:
                 os.remove(img.file_path)
+                sess.delete(img)
+                deleted_count += 1
             except OSError as e:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
                     failed_item={'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
-        sess.delete(img)
-        deleted_count += 1
+        else:
+            sess.delete(img)
+            deleted_count += 1
         update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
 
     # Delete the version record itself
@@ -566,6 +569,7 @@ def _run_batch_delete_images(task_id):
 
     # Delete files if requested (with path safety validation)
     failed_count = 0
+    delete_db_ids = ids  # 默认删除所有传入 IDs 的索引（delete_files=False 时）
     if delete_files:
         imgs = sess.query(Image).filter(Image.id.in_(ids)).all()
         scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
@@ -574,9 +578,11 @@ def _run_batch_delete_images(task_id):
         if not is_valid:
             finish_task(task_id, error_message=f'路径安全验证失败: {error_msg}')
             return
+        delete_db_ids = []
         for i, img in enumerate(imgs):
             try:
                 os.remove(img.file_path)
+                delete_db_ids.append(img.id)
             except OSError as e:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
@@ -587,8 +593,8 @@ def _run_batch_delete_images(task_id):
         for i in range(total):
             update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
 
-    # Delete database records
-    deleted = sess.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
+    # Delete database records（仅删除文件删除成功的记录）
+    deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
     sess.commit()
 
     # Re-sequence remaining versions

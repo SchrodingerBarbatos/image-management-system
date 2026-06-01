@@ -45,14 +45,16 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     if delete_files:
         imgs = sess.query(Image).filter(Image.id.in_(match_ids)).all()
         failed_items = []
+        deleted_count = 0
         for img in imgs:
             try:
                 os.remove(img.file_path)
+                sess.delete(img)
+                deleted_count += 1
             except OSError as e:
                 _log.warning("Failed to delete file: %s", img.file_path)
                 failed_items.append({'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
-            sess.delete(img)
-        return len(imgs), failed_items
+        return deleted_count, failed_items
     else:
         count = sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
         return count, []
