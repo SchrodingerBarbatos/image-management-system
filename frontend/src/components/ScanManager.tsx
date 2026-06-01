@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Table, Button, Input, Switch, Select, Space, Popconfirm, message, Tag, Radio, Progress } from 'antd';
-import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined, LoadingOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
-import { ScanRoot, ScanLog, ScanJobStatus, scanRootApi, scanApi, scanLogApi } from '../services/api';
+import { PlusOutlined, DeleteOutlined, ScanOutlined, FileTextOutlined, LoadingOutlined, ExclamationCircleOutlined, CloseCircleOutlined, HistoryOutlined } from '@ant-design/icons';
+import { ScanRoot, ScanLog, ScanJobStatus, ScanHistoryRecord, scanRootApi, scanApi, scanLogApi } from '../services/api';
 import { fmtEta } from '../utils/format';
 import RejectedBarcodes from './RejectedBarcodes';
 
@@ -36,6 +36,10 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
 
   // Rejected barcodes viewer
   const [rejectedVisible, setRejectedVisible] = useState(false);
+
+  // Scan history
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [history, setHistory] = useState<ScanHistoryRecord[]>([]);
 
   const fetchRoots = () => {
     setLoading(true);
@@ -93,6 +97,23 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
     }
   };
 
+  // Cancel scan handler
+  const handleCancelScan = async () => {
+    if (!scanJobId) return;
+    try {
+      await scanApi.cancel(scanJobId);
+      message.info('取消请求已发送');
+    } catch (err: any) {
+      message.error(err?.response?.data?.error || '取消失败');
+    }
+  };
+
+  // Fetch scan history
+  const fetchHistory = () => {
+    scanApi.getHistory().then(setHistory).catch(() => {});
+    setHistoryVisible(true);
+  };
+
   // Start polling for job status
   const startPolling = (jobId: string) => {
     clearPolling();
@@ -104,8 +125,14 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
           clearPolling();
           setScanning(false);
           setScanJobId(null);
-          message.success(`扫描完成: 新增 ${status.added}, 跳过 ${status.skipped}`);
+          const elapsed = status.elapsed_seconds ? `，耗时 ${fmtEta(status.elapsed_seconds)}` : '';
+          message.success(`扫描完成: 新增 ${status.added}, 跳过 ${status.skipped}${elapsed}`);
           onScanComplete();
+        } else if (status.status === 'cancelled') {
+          clearPolling();
+          setScanning(false);
+          setScanJobId(null);
+          message.info('扫描已取消');
         } else if (status.status === 'error') {
           clearPolling();
           setScanning(false);
@@ -255,7 +282,11 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
             <Radio.Button value="incremental">增量</Radio.Button>
           </Radio.Group>
           <Button icon={<ScanOutlined />} loading={scanning} onClick={handleScan}>执行扫描</Button>
+          {scanning && scanJobId && (
+            <Button icon={<CloseCircleOutlined />} danger onClick={handleCancelScan}>取消扫描</Button>
+          )}
           <Button icon={<FileTextOutlined />} onClick={fetchLogs}>日志</Button>
+          <Button icon={<HistoryOutlined />} onClick={fetchHistory}>扫描记录</Button>
           <Button icon={<ExclamationCircleOutlined />} onClick={() => setRejectedVisible(true)}>非标品记录</Button>
         </Space>
         {showAdd && (
@@ -277,7 +308,9 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
 
         {scanProgress && (() => {
           const sp = scanProgress;
-          const phaseText = sp.phase === 'counting'
+          const phaseText = sp.cancel_requested && sp.status === 'running'
+            ? '正在取消...'
+            : sp.phase === 'counting'
             ? '阶段1/3 统计文件'
             : sp.phase === 'thumbnails'
             ? '阶段2/3 生成缩略图'
@@ -285,6 +318,8 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
             ? '阶段3/3 更新版本'
             : sp.status === 'done'
             ? '扫描完成'
+            : sp.status === 'cancelled'
+            ? '扫描已取消'
             : sp.status === 'error'
             ? '扫描出错'
             : `阶段2/3 扫描文件 (目录 ${sp.current_root_index || 0}/${sp.total_roots || 0})`;
@@ -313,7 +348,7 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
                 <Progress
                   percent={percent}
                   size="small"
-                  status={sp.status === 'error' ? 'exception' : sp.status === 'done' ? 'success' : 'active'}
+                  status={sp.status === 'error' ? 'exception' : sp.status === 'done' ? 'success' : sp.status === 'cancelled' ? 'exception' : 'active'}
                   showInfo={sp.phase === 'counting' ? false : undefined}
                   format={() => sp.phase === 'counting'
                     ? ''
@@ -382,6 +417,13 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
                   </div>
                 )}
 
+                {/* 耗时 */}
+                {(sp.status === 'done' || sp.status === 'cancelled') && sp.elapsed_seconds > 0 && (
+                  <div style={{ fontSize: 12, color: '#888' }}>
+                    耗时: {fmtEta(sp.elapsed_seconds)}
+                  </div>
+                )}
+
                 {sp.status === 'error' && (
                   <div style={{ color: 'red', fontSize: 12 }}>错误: {sp.error}</div>
                 )}
@@ -411,6 +453,37 @@ const ScanManager: React.FC<Props> = ({ visible, onClose, onScanComplete }) => {
         visible={rejectedVisible}
         onClose={() => setRejectedVisible(false)}
       />
+
+      <Modal title="最近扫描记录" open={historyVisible} onCancel={() => setHistoryVisible(false)} width={700} footer={null}>
+        {history.length === 0 ? (
+          <div style={{ color: '#999', textAlign: 'center', padding: 20 }}>暂无扫描记录</div>
+        ) : (
+          <Table
+            rowKey={(r, i) => `${r.started_at}-${i}`}
+            dataSource={history}
+            size="small"
+            pagination={false}
+            columns={[
+              {
+                title: '时间', dataIndex: 'started_at', width: 160,
+                render: (t: string) => t?.replace('T', ' ').slice(0, 19),
+              },
+              {
+                title: '模式', dataIndex: 'scan_mode', width: 70,
+                render: (m: string) => m === 'full' ? '全量' : '增量',
+              },
+              { title: '新增', dataIndex: 'added', width: 70 },
+              { title: '跳过', dataIndex: 'skipped', width: 70 },
+              { title: '拒绝', dataIndex: 'rejected', width: 60 },
+              { title: '清理', dataIndex: 'broken_cleaned', width: 60 },
+              {
+                title: '耗时', dataIndex: 'elapsed_seconds', width: 80,
+                render: (s: number) => s > 0 ? fmtEta(s) : '-',
+              },
+            ]}
+          />
+        )}
+      </Modal>
     </>
   );
 };

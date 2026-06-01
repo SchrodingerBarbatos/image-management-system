@@ -345,6 +345,7 @@ def _run_batch_delete_duplicates(task_id):
     affected_barcodes = set()
     total_deleted = 0
     skipped_count = 0
+    failed_count = 0
 
     for i, item in enumerate(items):
         key = (item['barcode'], item['image_type'], item['folder_ctime'])
@@ -353,10 +354,14 @@ def _run_batch_delete_duplicates(task_id):
             update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
             continue
 
-        count = _delete_folder_images(
+        count, failed_items = _delete_folder_images(
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
+        if failed_items:
+            failed_count += len(failed_items)
+            for fi in failed_items:
+                update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
         affected_barcodes.add(item['barcode'])
         update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
 
@@ -412,6 +417,7 @@ def _run_batch_delete_low_versions(task_id):
     affected_barcodes = set()
     total_deleted = 0
     skipped_count = 0
+    failed_count = 0
 
     for i, item in enumerate(items):
         barcode, image_type, folder_ctime = item['barcode'], item['image_type'], item['folder_ctime']
@@ -426,8 +432,12 @@ def _run_batch_delete_low_versions(task_id):
             update_task_progress(task_id, progress=i + 1, current_item=barcode)
             continue
 
-        count = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
+        count, failed_items = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
         total_deleted += count
+        if failed_items:
+            failed_count += len(failed_items)
+            for fi in failed_items:
+                update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
         affected_barcodes.add(barcode)
         update_task_progress(task_id, progress=i + 1, current_item=barcode)
 
@@ -489,12 +499,16 @@ def _run_delete_version(task_id):
     update_task_progress(task_id, progress=0, total=total)
 
     deleted_count = 0
+    failed_count = 0
+    from routes.batch import _classify_delete_error
     for i, img in enumerate(imgs):
         if delete_files:
             try:
                 os.remove(img.file_path)
-            except OSError:
-                pass
+            except OSError as e:
+                failed_count += 1
+                update_task_progress(task_id, failed_count=failed_count,
+                    failed_item={'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
         sess.delete(img)
         deleted_count += 1
         update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
@@ -551,10 +565,11 @@ def _run_batch_delete_images(task_id):
         Image.id.in_(ids)).distinct().all()}
 
     # Delete files if requested (with path safety validation)
+    failed_count = 0
     if delete_files:
         imgs = sess.query(Image).filter(Image.id.in_(ids)).all()
         scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
-        from routes.batch import validate_image_paths
+        from routes.batch import validate_image_paths, _classify_delete_error
         is_valid, error_msg = validate_image_paths(imgs, scan_roots)
         if not is_valid:
             finish_task(task_id, error_message=f'路径安全验证失败: {error_msg}')
@@ -562,8 +577,10 @@ def _run_batch_delete_images(task_id):
         for i, img in enumerate(imgs):
             try:
                 os.remove(img.file_path)
-            except OSError:
-                pass
+            except OSError as e:
+                failed_count += 1
+                update_task_progress(task_id, failed_count=failed_count,
+                    failed_item={'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
             update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
     else:
         # Even when not deleting files, report progress for consistency

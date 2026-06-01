@@ -7,6 +7,11 @@ from thumbnail import generate_thumbnail
 _log = logging.getLogger(__name__)
 
 
+class ScanCancelled(Exception):
+    """Raised when a scan is cancelled by the user."""
+    pass
+
+
 def calculate_gtin_check_digit(payload: str) -> int:
     """计算 GTIN 校验位。"""
     total = 0
@@ -174,18 +179,21 @@ def _walk_nonrecursive(path):
         return
 
 
-def count_image_files(roots, progress_callback=None):
+def count_image_files(roots, progress_callback=None, is_cancelled=None):
     """Count total image files across all scan roots.
     Note: this performs a separate os.walk traversal before the actual scan,
     adding one extra pass over the directory tree. Acceptable trade-off for
     accurate progress reporting. May add startup latency on network drives
     or very large directories.
-    Returns total count of image files matching IMAGE_EXTS."""
+    Returns total count of image files matching IMAGE_EXTS.
+    Raises ScanCancelled if is_cancelled returns True."""
     total = 0
     for i, r in enumerate(roots):
         walk = os.walk if r.recursive else _walk_nonrecursive
         try:
             for dirpath, _, filenames in walk(r.path):
+                if is_cancelled and is_cancelled():
+                    raise ScanCancelled()
                 for fname in filenames:
                     ext = os.path.splitext(fname)[1].lower()
                     if ext in IMAGE_EXTS:
@@ -275,26 +283,31 @@ def _flush_md5_updates_core(md5_updates):
     session.flush()
 
 
-def scan_root(root_id, full_scan=False, progress_callback=None, processed_offset=0):
+def scan_root(root_id, full_scan=False, progress_callback=None, processed_offset=0,
+              is_cancelled=None):
     """Scan a single scan root. If the root's allow_fuzzy toggle is on,
     image_type is taken from the root's fuzzy_image_type setting;
     otherwise defaults to 'main'.
 
     If full_scan is True, missing records are deleted only after disk scan succeeds.
     progress_callback(phase, **kwargs) is called at key points for async progress reporting.
-    processed_offset: cumulative processed_files count from previous roots (for multi-root progress)."""
+    processed_offset: cumulative processed_files count from previous roots (for multi-root progress).
+    is_cancelled: callable returning True if scan should be cancelled.
+    Raises ScanCancelled if is_cancelled returns True."""
     root = session.get(ScanRoot, root_id)
     if not root:
         return {'error': 'Scan root not found'}
 
     try:
-        return _do_scan(root, root_id, full_scan, progress_callback, processed_offset)
+        return _do_scan(root, root_id, full_scan, progress_callback, processed_offset,
+                        is_cancelled)
     except Exception:
         session.rollback()
         raise
 
 
-def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0):
+def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
+             is_cancelled=None):
 
     def _report(phase, **kw):
         if progress_callback:
@@ -334,6 +347,8 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0):
     walk = os.walk if root_recursive else _walk_nonrecursive
 
     for dirpath, _, filenames in walk(root_path):
+        if is_cancelled and is_cancelled():
+            raise ScanCancelled()
         folder_ctime = get_folder_ctime(dirpath)
 
         # Build directory-level index (replaces full-root indexed_map)
@@ -463,15 +478,23 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0):
 
         # Process thumbnail batch every _THUMB_BATCH_SIZE files
         if len(thumb_jobs) >= _THUMB_BATCH_SIZE:
+            if is_cancelled and is_cancelled():
+                raise ScanCancelled()
             _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0)
             _process_thumbnail_batch(thumb_jobs)
             thumb_jobs.clear()
 
     # Process remaining thumbnail jobs
     if thumb_jobs:
+        if is_cancelled and is_cancelled():
+            raise ScanCancelled()
         _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0)
         _process_thumbnail_batch(thumb_jobs)
         thumb_jobs.clear()
+
+    # Check cancellation before leftover handling
+    if is_cancelled and is_cancelled():
+        raise ScanCancelled()
 
     # Handle leftover records not found on disk (via scan token)
     # Query images that were NOT touched during this scan

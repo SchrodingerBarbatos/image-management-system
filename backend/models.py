@@ -113,6 +113,8 @@ class BatchTask(Base):
     error_message = Column(Text, default='')
     params_json = Column(Text, default='{}')
     current_item = Column(Text, default='')  # 当前处理对象（删除任务等）
+    failed_count = Column(Integer, default=0)  # 失败计数
+    failed_items = Column(Text, default='[]')  # 失败样本 JSON（最多 20 条）
     created_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
     started_at = Column(Text, default='')
     finished_at = Column(Text, default='')

@@ -13,6 +13,20 @@ batch_bp = Blueprint('batch', __name__)
 _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 
 
+def _classify_delete_error(filepath, error):
+    """Classify an OSError into a human-readable reason."""
+    if isinstance(error, FileNotFoundError):
+        return '文件不存在'
+    elif isinstance(error, PermissionError):
+        return '权限不足'
+    elif isinstance(error, OSError):
+        msg = str(error).lower()
+        if 'being used' in msg or '另一个程序正在使用' in msg:
+            return '文件被占用'
+        return f'系统错误: {error}'
+    return f'未知错误: {error}'
+
+
 def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     """删除指定条码+类型+文件夹下 active+confirmed+enabled 的图片，返回删除数量。
     过滤条件与扫描端点一致，确保预览和实际操作匹配。
@@ -30,15 +44,18 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     )
     if delete_files:
         imgs = sess.query(Image).filter(Image.id.in_(match_ids)).all()
+        failed_items = []
         for img in imgs:
             try:
                 os.remove(img.file_path)
-            except OSError:
+            except OSError as e:
                 _log.warning("Failed to delete file: %s", img.file_path)
+                failed_items.append({'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
             sess.delete(img)
-        return len(imgs)
+        return len(imgs), failed_items
     else:
-        return sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
+        count = sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
+        return count, []
 
 
 def _check_disabled_scan_roots(items):
@@ -290,7 +307,7 @@ def delete_duplicates():
     total_deleted = 0
 
     for item in items:
-        count = _delete_folder_images(
+        count, _failed = _delete_folder_images(
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
@@ -437,7 +454,7 @@ def delete_low_versions():
     total_deleted = 0
 
     for item in items:
-        count = _delete_folder_images(
+        count, _failed = _delete_folder_images(
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count

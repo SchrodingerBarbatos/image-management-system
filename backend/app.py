@@ -260,6 +260,12 @@ with engine.connect() as conn:
     if 'current_item' not in task_cols:
         conn.execute(text("ALTER TABLE batch_task ADD COLUMN current_item TEXT DEFAULT ''"))
         conn.commit()
+    if 'failed_count' not in task_cols:
+        conn.execute(text("ALTER TABLE batch_task ADD COLUMN failed_count INTEGER DEFAULT 0"))
+        conn.commit()
+    if 'failed_items' not in task_cols:
+        conn.execute(text("ALTER TABLE batch_task ADD COLUMN failed_items TEXT DEFAULT '[]'"))
+        conn.commit()
 
     # Mark stale running and queued tasks as interrupted on startup
     now_iso = datetime.datetime.now().isoformat()

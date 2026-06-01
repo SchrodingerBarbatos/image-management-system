@@ -201,8 +201,10 @@ def delete_task(task_id):
         return {'ok': True}
 
 
-def update_task_progress(task_id, progress=None, total=None, result_count=None, current_item=None):
-    """Update task progress fields. Called by handler."""
+def update_task_progress(task_id, progress=None, total=None, result_count=None,
+                         current_item=None, failed_count=None, failed_item=None):
+    """Update task progress fields. Called by handler.
+    failed_item: {file, reason} dict to append to failed_items (max 20)."""
     sess = _get_thread_session()
     with _task_lock:
         task = sess.get(BatchTask, task_id)
@@ -216,6 +218,16 @@ def update_task_progress(task_id, progress=None, total=None, result_count=None, 
             task.result_count = result_count
         if current_item is not None:
             task.current_item = current_item
+        if failed_count is not None:
+            task.failed_count = failed_count
+        if failed_item is not None:
+            try:
+                items = json.loads(task.failed_items) if task.failed_items else []
+            except (json.JSONDecodeError, TypeError):
+                items = []
+            if len(items) < 20:
+                items.append(failed_item)
+                task.failed_items = json.dumps(items, ensure_ascii=False)
         sess.commit()
 
 
@@ -247,10 +259,16 @@ def _task_to_dict(task):
         'error_message': task.error_message,
         'params_json': task.params_json,
         'current_item': task.current_item or '',
+        'failed_count': task.failed_count or 0,
         'created_at': task.created_at,
         'started_at': task.started_at,
         'finished_at': task.finished_at,
     }
+    # 解析 failed_items JSON
+    try:
+        d['failed_items'] = json.loads(task.failed_items) if task.failed_items else []
+    except (json.JSONDecodeError, TypeError):
+        d['failed_items'] = []
     # 计算百分比、速度和剩余时间
     if task.total and task.total > 0:
         d['percent'] = round(task.progress / task.total * 100) if task.progress else 0

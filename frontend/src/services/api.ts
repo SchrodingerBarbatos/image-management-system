@@ -69,11 +69,15 @@ export const scanApi = {
     api.get<ScanJobStatus & { job_id: string } | null>('/scan/status').then(r => r.data),
   getStatus: (jobId: string) =>
     api.get<ScanJobStatus>(`/scan/status/${jobId}`).then(r => r.data),
+  cancel: (jobId: string) =>
+    api.post(`/scan/cancel/${jobId}`).then(r => r.data),
+  getHistory: () =>
+    api.get<ScanHistoryRecord[]>('/scan/history').then(r => r.data),
 };
 
 export interface ScanJobStatus {
-  status: 'running' | 'done' | 'error';
-  phase: 'counting' | 'starting' | 'scan_start' | 'scanning' | 'thumbnails' | 'versioning' | 'root_done' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'cancelled';
+  phase: 'counting' | 'starting' | 'scan_start' | 'scanning' | 'thumbnails' | 'versioning' | 'root_done' | 'done' | 'error' | 'cancelled';
   current_root_path?: string;
   current_root_index?: number;
   total_roots?: number;
@@ -97,7 +101,20 @@ export interface ScanJobStatus {
   counting_current_dir: string;
   counting_root_index: number;
   counting_total_roots: number;
+  elapsed_seconds: number;
+  cancel_requested?: boolean;
   error?: string;
+}
+
+export interface ScanHistoryRecord {
+  started_at: string;
+  finished_at: string;
+  scan_mode: string;
+  added: number;
+  skipped: number;
+  rejected: number;
+  broken_cleaned: number;
+  elapsed_seconds: number;
 }
 
 export const scanLogApi = {
@@ -232,6 +249,8 @@ export interface BatchTaskInfo {
   error_message: string;
   params_json: string;
   current_item: string;
+  failed_count: number;
+  failed_items: { file: string; reason: string }[];
   percent: number;
   speed: number;
   eta_seconds: number;

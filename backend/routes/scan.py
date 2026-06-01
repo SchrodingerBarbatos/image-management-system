@@ -1,13 +1,15 @@
 import os, json, uuid, threading, datetime, traceback
 from flask import Blueprint, request, jsonify
 from models import session, ScanRoot, Image, ScanLog, ImageVersion
-from scanner import scan_root, count_image_files
+from scanner import scan_root, count_image_files, ScanCancelled
 from versioning import update_versions_for_barcode, update_all_versions
 
 scan_bp = Blueprint('scan', __name__)
 
 _scan_lock = threading.Lock()
 _scan_jobs = {}
+_scan_cancel_flags = {}  # job_id -> True when cancel requested
+_recent_scans = []  # 最近扫描记录（内存，最多 10 条）
 
 def _add_log(action, status, message, details=''):
     log = ScanLog(action=action, status=status, message=message, details=details)
@@ -37,11 +39,16 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
             'counted_files': 0, 'counting_current_dir': '',
             'counting_root_index': 0, 'counting_total_roots': len(root_ids),
             'error': None,
+            'elapsed_seconds': 0,
             'started_at': datetime.datetime.now().isoformat(),
         }
 
     if job_ready_event:
         job_ready_event.set()
+
+    def is_cancelled():
+        with _scan_lock:
+            return _scan_cancel_flags.get(job_id, False)
 
     def progress(phase, **kw):
         with _scan_lock:
@@ -72,12 +79,15 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
         f"扫描开始 - {'全量' if full_scan else '增量'}模式",
         json.dumps({'job_id': job_id, 'root_ids': root_ids}))
 
+    started_at = datetime.datetime.now()
+
     try:
         roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
 
         # 阶段1: 统计文件数量（额外遍历一次目录，用于计算真实扫描百分比）
         progress('counting')
-        total_files = count_image_files(roots, progress_callback=progress)
+        total_files = count_image_files(roots, progress_callback=progress,
+                                        is_cancelled=is_cancelled)
         with _scan_lock:
             job = _scan_jobs.get(job_id)
             if job:
@@ -101,7 +111,8 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
                     job['current_root_path'] = r.path
 
             res = scan_root(r.id, full_scan=full_scan, progress_callback=progress,
-                            processed_offset=processed_offset)
+                            processed_offset=processed_offset,
+                            is_cancelled=is_cancelled)
             for k in total:
                 total[k] += res.get(k, 0)
             all_affected.update(res.get('affected_barcodes', []))
@@ -115,6 +126,8 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
         versioning_total = len(all_affected)
         progress('versioning', versioning_total=versioning_total)
         for idx, bc in enumerate(sorted(all_affected)):
+            if is_cancelled():
+                raise ScanCancelled()
             update_versions_for_barcode(bc)
             # 每 10 个或最后一个更新进度（提高小集合的粒度）
             if (idx + 1) % 10 == 0 or idx + 1 == versioning_total:
@@ -123,6 +136,9 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
         # Final progress update — mark all barcodes as processed
         progress('versioning', versioning_total=versioning_total, versioning_current=versioning_total)
 
+        # elapsed_seconds 从原始 started_at 计算（包含 counting 阶段的总耗时）
+        # 注意：job['started_at'] 在 scanning 阶段被重置用于 ETA 计算，但 elapsed 使用原始值
+        elapsed = round((datetime.datetime.now() - started_at).total_seconds())
         _add_log('scan', 'success',
             f"扫描完成: 新增 {total['added']}, 跳过 {total['skipped']}, 拒绝 {total['rejected']}",
             json.dumps(total))
@@ -133,9 +149,24 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
                 job['status'] = 'done'
                 job['phase'] = 'done'
                 job['percent'] = 100
+                job['elapsed_seconds'] = elapsed
                 job.update(total)
 
+        # 记录最近扫描
+        _record_scan(scan_mode, total, elapsed, started_at)
+
+    except ScanCancelled:
+        elapsed = round((datetime.datetime.now() - started_at).total_seconds())
+        session.rollback()  # 回滚阶段 2 的未提交扫描数据
+        with _scan_lock:
+            job = _scan_jobs.get(job_id)
+            if job:
+                job['status'] = 'cancelled'
+                job['phase'] = 'cancelled'
+                job['elapsed_seconds'] = elapsed
+        _add_log('scan', 'info', f'扫描已取消（耗时 {elapsed}秒）', json.dumps({'elapsed_seconds': elapsed}))
     except Exception as e:
+        elapsed = round((datetime.datetime.now() - started_at).total_seconds())
         tb = traceback.format_exc()
         with _scan_lock:
             job = _scan_jobs.get(job_id)
@@ -143,11 +174,15 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
                 job['status'] = 'error'
                 job['phase'] = 'error'
                 job['error'] = f"{e}\n{tb}"
+                job['elapsed_seconds'] = elapsed
         try:
             _add_log('scan', 'error', f'扫描失败: {str(e)}')
         except Exception:
             pass
     finally:
+        # 清理取消标记
+        with _scan_lock:
+            _scan_cancel_flags.pop(job_id, None)
         session.remove()
 
 
@@ -157,11 +192,29 @@ def _cleanup_old_jobs():
     with _scan_lock:
         stale = [
             jid for jid, j in _scan_jobs.items()
-            if j['status'] in ('done', 'error')
+            if j['status'] in ('done', 'error', 'cancelled')
             and datetime.datetime.fromisoformat(j['started_at']) < cutoff
         ]
         for jid in stale:
             del _scan_jobs[jid]
+
+
+def _record_scan(scan_mode, totals, elapsed_seconds, started_at):
+    """Record a completed scan to the recent scan history (max 10)."""
+    record = {
+        'started_at': started_at.isoformat(),
+        'finished_at': datetime.datetime.now().isoformat(),
+        'scan_mode': scan_mode,
+        'added': totals.get('added', 0),
+        'skipped': totals.get('skipped', 0),
+        'rejected': totals.get('rejected', 0),
+        'broken_cleaned': totals.get('broken_cleaned', 0),
+        'elapsed_seconds': elapsed_seconds,
+    }
+    with _scan_lock:
+        _recent_scans.insert(0, record)
+        if len(_recent_scans) > 10:
+            _recent_scans.pop()
 
 _IN_CHUNK_SIZE = 500
 
@@ -332,6 +385,27 @@ def get_scan_status(job_id):
     if not job:
         return jsonify({'error': 'job not found'}), 404
     return jsonify(job)
+
+
+@scan_bp.route('/scan/cancel/<job_id>', methods=['POST'])
+def cancel_scan(job_id):
+    """Request cancellation of a running scan."""
+    with _scan_lock:
+        job = _scan_jobs.get(job_id)
+        if not job:
+            return jsonify({'error': 'job not found'}), 404
+        if job['status'] != 'running':
+            return jsonify({'error': '只能取消正在运行的扫描'}), 409
+        _scan_cancel_flags[job_id] = True
+        job['cancel_requested'] = True
+    return jsonify({'message': '取消请求已发送'})
+
+
+@scan_bp.route('/scan/history', methods=['GET'])
+def get_scan_history():
+    """返回最近扫描记录（最多 10 条）。"""
+    with _scan_lock:
+        return jsonify(list(_recent_scans))
 
 
 @scan_bp.route('/scan-logs', methods=['GET'])

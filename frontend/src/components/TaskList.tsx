@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Tag, Space, Button, Progress, Spin, Typography, message } from 'antd';
 import { BatchTaskInfo, taskApi } from '../services/api';
 import { fmtEta } from '../utils/format';
@@ -20,6 +20,8 @@ export function TaskStatusBadge({ status }: { status: string }) {
 }
 
 export function TaskProgress({ task }: { task: BatchTaskInfo }) {
+  const [showFailed, setShowFailed] = useState(false);
+
   if (task.status === 'queued') return <Text type="secondary">排队中…</Text>;
   if (task.status === 'running') {
     const percent = task.percent || (task.total > 0 ? Math.round((task.progress / task.total) * 100) : 0);
@@ -31,17 +33,38 @@ export function TaskProgress({ task }: { task: BatchTaskInfo }) {
           {task.current_item && ` | 当前: ${task.current_item}`}
           {task.speed > 0 && ` | 速度: ${task.speed}/秒`}
           {task.eta_seconds > 0 && ` | 剩余: ${fmtEta(task.eta_seconds)}`}
+          {task.failed_count > 0 && ` | 失败: ${task.failed_count}`}
         </div>
       </div>
     );
   }
   if (task.status === 'done') {
     const elapsed = task.elapsed_seconds;
+    const failed = task.failed_count || 0;
     return (
-      <Text type="success">
-        完成（{task.result_count} 条结果）
-        {elapsed > 0 && `，耗时 ${elapsed}秒`}
-      </Text>
+      <div>
+        <Text type="success">
+          完成（成功 {task.result_count} 条）
+          {failed > 0 && <Text type="danger">，失败 {failed} 条</Text>}
+          {elapsed > 0 && `，耗时 ${elapsed}秒`}
+        </Text>
+        {failed > 0 && task.failed_items && task.failed_items.length > 0 && (
+          <div style={{ marginTop: 4 }}>
+            <Button size="small" type="link" style={{ padding: 0 }} onClick={() => setShowFailed(!showFailed)}>
+              {showFailed ? '收起失败详情' : '查看失败详情'}
+            </Button>
+            {showFailed && (
+              <div style={{ fontSize: 12, color: '#ff4d4f', marginTop: 4, maxHeight: 120, overflow: 'auto' }}>
+                {task.failed_items.map((item, i) => (
+                  <div key={i} style={{ marginBottom: 2 }}>
+                    {item.file}: {item.reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     );
   }
   if (task.status === 'error') return <Text type="danger">{task.error_message || '执行失败'}</Text>;
