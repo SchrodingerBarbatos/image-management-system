@@ -87,20 +87,19 @@ def _get_ordered_images(sess, barcode, image_type, folder_ctime):
 
 
 def _compute_version_stats(images):
-    """Compute (image_count, total_file_size, total_pixels) for a list of images."""
+    """Compute (image_count, total_file_size) for a list of images."""
     count = len(images)
     total_size = sum(img.file_size or 0 for img in images)
-    return count, total_size, 0
+    return count, total_size
 
 
-def _make_member(v, cnt, total_size, total_px):
+def _make_member(v, cnt, total_size):
     """Create a member dict for a version."""
     return {
         'folder_ctime': v.folder_ctime,
         'version_label': v.version_label,
         'image_count': cnt,
         'total_file_size': total_size,
-        'total_pixels': total_px,
         'is_latest': v.is_latest,
         'role': 'clean',
         'keep_reason': '',
@@ -113,8 +112,7 @@ def pick_keep_version(members):
     1. user_selected (manual choice — handled externally)
     2. is_latest (current/active version)
     3. total_file_size larger
-    4. total_pixels higher (placeholder for future)
-    5. folder_ctime newer
+    4. folder_ctime newer
     Returns (best_index, reason_string).
     """
     if not members:
@@ -143,15 +141,7 @@ def pick_keep_version(members):
             continue
         if (m.get('total_file_size') or 0) < (best.get('total_file_size') or 0):
             continue
-        # Priority 4: total_pixels (placeholder)
-        if (m.get('total_pixels') or 0) > (best.get('total_pixels') or 0):
-            best_idx = i
-            best = m
-            reason = '总分辨率更高'
-            continue
-        if (m.get('total_pixels') or 0) < (best.get('total_pixels') or 0):
-            continue
-        # Priority 5: newer folder_ctime
+        # Priority 4: newer folder_ctime
         if (m.get('folder_ctime') or '') > (best.get('folder_ctime') or ''):
             best_idx = i
             best = m
@@ -167,7 +157,7 @@ def pick_keep_version(members):
 
 
 def _find_groups_in_pool(pool):
-    """Given a list of (version, images, count, total_size, total_px) tuples,
+    """Given a list of (version, images, count, total_size) tuples,
     find duplicate groups using signature pre-filtering + short-circuit comparison.
     Returns list of member-lists (each with 2+ members).
     """
@@ -176,16 +166,16 @@ def _find_groups_in_pool(pool):
 
     # Pre-compute signatures
     items = []
-    for v, imgs, cnt, ts, px in pool:
+    for v, imgs, cnt, ts in pool:
         sig = _version_signature(imgs)
-        items.append((v, imgs, cnt, ts, px, sig))
+        items.append((v, imgs, cnt, ts, sig))
 
     assigned = set()  # set of folder_ctime
     groups = []
 
     # First pass: group by signature (fast path)
     sig_buckets = defaultdict(list)
-    for idx, (v, imgs, cnt, ts, px, sig) in enumerate(items):
+    for idx, (v, imgs, cnt, ts, sig) in enumerate(items):
         sig_buckets[sig].append(idx)
 
     for sig, bucket_indices in sig_buckets.items():
@@ -194,16 +184,16 @@ def _find_groups_in_pool(pool):
         for i_idx in bucket_indices:
             if i_idx in assigned:
                 continue
-            v_i, imgs_i, cnt_i, ts_i, px_i, _ = items[i_idx]
+            v_i, imgs_i, cnt_i, ts_i, _ = items[i_idx]
             assigned.add(i_idx)
-            members = [_make_member(v_i, cnt_i, ts_i, px_i)]
+            members = [_make_member(v_i, cnt_i, ts_i)]
             for j_idx in bucket_indices:
                 if j_idx in assigned:
                     continue
-                v_j, imgs_j, cnt_j, ts_j, px_j, _ = items[j_idx]
+                v_j, imgs_j, cnt_j, ts_j, _ = items[j_idx]
                 if are_duplicate_versions(imgs_i, imgs_j):
                     assigned.add(j_idx)
-                    members.append(_make_member(v_j, cnt_j, ts_j, px_j))
+                    members.append(_make_member(v_j, cnt_j, ts_j))
             if len(members) >= 2:
                 groups.append(members)
 
@@ -212,16 +202,16 @@ def _find_groups_in_pool(pool):
     for ui, i_idx in enumerate(unassigned):
         if i_idx in assigned:
             continue
-        v_i, imgs_i, cnt_i, ts_i, px_i, _ = items[i_idx]
+        v_i, imgs_i, cnt_i, ts_i, _ = items[i_idx]
         assigned.add(i_idx)
-        members = [_make_member(v_i, cnt_i, ts_i, px_i)]
+        members = [_make_member(v_i, cnt_i, ts_i)]
         for j_idx in unassigned[ui + 1:]:
             if j_idx in assigned:
                 continue
-            v_j, imgs_j, cnt_j, ts_j, px_j, _ = items[j_idx]
+            v_j, imgs_j, cnt_j, ts_j, _ = items[j_idx]
             if are_duplicate_versions(imgs_i, imgs_j):
                 assigned.add(j_idx)
-                members.append(_make_member(v_j, cnt_j, ts_j, px_j))
+                members.append(_make_member(v_j, cnt_j, ts_j))
         if len(members) >= 2:
             groups.append(members)
 
@@ -259,7 +249,6 @@ def detect_duplicate_versions(sess, progress_callback=None):
             version_label: str,
             image_count: int,
             total_file_size: int,
-            total_pixels: int,
             is_latest: bool,
             role: str,  # 'keep' or 'clean'
             keep_reason: str,
@@ -294,8 +283,8 @@ def detect_duplicate_versions(sess, progress_callback=None):
             imgs = images_by_key.get((barcode, image_type, v.folder_ctime), [])
             if not imgs:
                 continue
-            count, total_size, total_px = _compute_version_stats(imgs)
-            version_data.append((v, imgs, count, total_size, total_px))
+            count, total_size = _compute_version_stats(imgs)
+            version_data.append((v, imgs, count, total_size))
 
         if len(version_data) < 2:
             continue

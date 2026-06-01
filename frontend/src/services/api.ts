@@ -313,7 +313,6 @@ export interface DuplicateVersionMember {
   version_label: string;
   image_count: number;
   total_file_size: number;
-  total_pixels: number;
   is_latest: boolean;
   role: 'keep' | 'clean' | 'user_selected';
   keep_reason: string;

@@ -639,7 +639,6 @@ def _run_duplicate_version_scan(task_id):
                 version_label=member['version_label'],
                 image_count=member['image_count'],
                 total_file_size=member['total_file_size'],
-                total_pixels=member['total_pixels'],
                 is_latest=member['is_latest'],
                 role=member['role'],
                 keep_reason=member['keep_reason'],
@@ -654,8 +653,11 @@ def _run_duplicate_version_scan(task_id):
 
 def _run_batch_delete_duplicate_versions(task_id):
     """Background handler for batch_delete_duplicate_versions tasks.
-    Soft-deletes by marking Image.status = 'duplicate_version'."""
+    Soft-deletes by marking Image.status = 'duplicate_version'.
+    Re-validates duplicate relationships before deletion."""
     _log.info("Starting batch_delete_duplicate_versions task %d", task_id)
+
+    from duplicate_version_detector import are_duplicate_versions, _get_ordered_images
 
     sess = _get_thread_session()
     task = sess.get(BatchTask, task_id)
@@ -678,77 +680,97 @@ def _run_batch_delete_duplicate_versions(task_id):
     total = len(result_ids)
     update_task_progress(task_id, progress=0, total=total)
 
-    # Load scan results
+    # Load the submitted clean results
     results = sess.query(DuplicateVersionScanResult).filter(
         DuplicateVersionScanResult.task_id == scan_task_id,
         DuplicateVersionScanResult.id.in_(result_ids),
+        DuplicateVersionScanResult.role == 'clean',
     ).all()
 
     if not results:
-        finish_task(task_id, error_message='No valid results found')
+        finish_task(task_id, error_message='No valid clean results found')
         return
 
-    # Group by group_id to find the kept version
-    by_group = defaultdict(list)
-    for r in results:
-        by_group[r.group_id].append(r)
+    # Load ALL group members for each referenced group to find the kept version.
+    # The submitted result_ids only contain clean members; we need the keep members too.
+    group_ids = list({r.group_id for r in results})
+    all_group_members = sess.query(DuplicateVersionScanResult).filter(
+        DuplicateVersionScanResult.task_id == scan_task_id,
+        DuplicateVersionScanResult.group_id.in_(group_ids),
+    ).all()
+
+    # Build group_id → {kept_version_ctime} lookup from all members
+    kept_by_group = {}
+    for m in all_group_members:
+        if m.role in ('keep', 'user_selected'):
+            kept_by_group[m.group_id] = m.folder_ctime
 
     affected_barcodes = set()
-    deleted_count = 0
+    deleted_image_count = 0
     skipped_count = 0
     failed_count = 0
+    processed = 0
 
     for r in results:
-        if r.role == 'keep' or r.role == 'user_selected':
-            # This is the version to keep — skip deletion
-            r.delete_status = 'skipped'
-            r.delete_message = '保留版本'
-            skipped_count += 1
-            update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count)
-            continue
+        processed += 1
 
         if r.delete_status == 'deleted':
-            # Already deleted
             skipped_count += 1
-            update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count)
+            update_task_progress(task_id, progress=processed, current_item=r.barcode)
             continue
 
-        # Find the kept version in the same group
-        group_results = by_group.get(r.group_id, [])
-        kept = next((gr for gr in group_results if gr.role in ('keep', 'user_selected')), None)
-        kept_ctime = kept.folder_ctime if kept else ''
+        # Find the kept version for this group
+        kept_ctime = kept_by_group.get(r.group_id, '')
+        if not kept_ctime:
+            r.delete_status = 'skipped'
+            r.delete_message = '未找到保留版本'
+            skipped_count += 1
+            update_task_progress(task_id, progress=processed, current_item=r.barcode)
+            continue
 
-        # Soft delete: mark images as 'duplicate_version'
-        imgs = sess.query(Image).filter(
-            Image.barcode == r.barcode,
-            Image.image_type == r.image_type,
-            Image.folder_ctime == r.folder_ctime,
-            Image.status == 'active',
-        ).all()
+        # Fix 1: Re-validate duplicate relationship before deletion.
+        # Load current active images for both the kept version and this version,
+        # then re-run are_duplicate_versions to confirm they're still duplicates.
+        kept_imgs = _get_ordered_images(sess, r.barcode, r.image_type, kept_ctime)
+        clean_imgs = _get_ordered_images(sess, r.barcode, r.image_type, r.folder_ctime)
 
-        if not imgs:
+        if not clean_imgs:
             r.delete_status = 'skipped'
             r.delete_message = '已无有效图片'
             skipped_count += 1
-            update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count)
+            update_task_progress(task_id, progress=processed, current_item=r.barcode)
             continue
 
+        if not kept_imgs:
+            r.delete_status = 'skipped'
+            r.delete_message = '保留版本已无有效图片'
+            skipped_count += 1
+            update_task_progress(task_id, progress=processed, current_item=r.barcode)
+            continue
+
+        if not are_duplicate_versions(kept_imgs, clean_imgs):
+            r.delete_status = 'skipped'
+            r.delete_message = '数据已变更，不再是重复版本'
+            skipped_count += 1
+            update_task_progress(task_id, progress=processed, current_item=r.barcode)
+            continue
+
+        # Soft delete: mark images as 'duplicate_version'
         try:
-            for img in imgs:
+            for img in clean_imgs:
                 img.status = 'duplicate_version'
                 img.updated_at = datetime.datetime.now().isoformat()
             r.delete_status = 'deleted'
             r.deleted_at = datetime.datetime.now().isoformat()
             r.kept_version_ctime = kept_ctime
-            deleted_count += len(imgs)
+            deleted_image_count += len(clean_imgs)
             affected_barcodes.add(r.barcode)
         except Exception as e:
             r.delete_status = 'failed'
             r.delete_message = str(e)
             failed_count += 1
 
-        update_task_progress(task_id, progress=deleted_count + skipped_count + failed_count,
-                           current_item=r.barcode)
+        update_task_progress(task_id, progress=processed, current_item=r.barcode)
 
     sess.commit()
 
@@ -756,9 +778,9 @@ def _run_batch_delete_duplicate_versions(task_id):
     for bc in affected_barcodes:
         update_versions_for_barcode(bc)
 
-    finish_task(task_id, result_count=deleted_count)
-    _log.info("batch_delete_duplicate_versions task %d done: soft-deleted %d images, skipped %d",
-              task_id, deleted_count, skipped_count)
+    finish_task(task_id, result_count=deleted_image_count)
+    _log.info("batch_delete_duplicate_versions task %d done: soft-deleted %d images, skipped %d, failed %d",
+              task_id, deleted_image_count, skipped_count, failed_count)
 
 
 register_handler('batch_delete_duplicates', _run_batch_delete_duplicates)
@@ -1390,7 +1412,6 @@ def get_duplicate_version_scan_results(task_id):
                 'version_label': m.version_label,
                 'image_count': m.image_count,
                 'total_file_size': m.total_file_size,
-                'total_pixels': m.total_pixels,
                 'is_latest': m.is_latest,
                 'role': m.role,
                 'keep_reason': m.keep_reason,

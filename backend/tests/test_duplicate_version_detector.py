@@ -178,15 +178,15 @@ class TestPickKeepVersion:
         assert idx == 0
 
     def test_single(self):
-        members = [{'is_latest': False, 'total_file_size': 100, 'total_pixels': 0, 'folder_ctime': '2024-01-01'}]
+        members = [{'is_latest': False, 'total_file_size': 100,  'folder_ctime': '2024-01-01'}]
         idx, reason = pick_keep_version(members)
         assert idx == 0
         assert reason == '默认保留'
 
     def test_is_latest_priority(self):
         members = [
-            {'is_latest': False, 'total_file_size': 100, 'total_pixels': 0, 'folder_ctime': '2024-01-01'},
-            {'is_latest': True, 'total_file_size': 50, 'total_pixels': 0, 'folder_ctime': '2023-01-01'},
+            {'is_latest': False, 'total_file_size': 100,  'folder_ctime': '2024-01-01'},
+            {'is_latest': True, 'total_file_size': 50,  'folder_ctime': '2023-01-01'},
         ]
         idx, reason = pick_keep_version(members)
         assert idx == 1
@@ -194,8 +194,8 @@ class TestPickKeepVersion:
 
     def test_total_file_size_priority(self):
         members = [
-            {'is_latest': False, 'total_file_size': 100, 'total_pixels': 0, 'folder_ctime': '2024-01-01'},
-            {'is_latest': False, 'total_file_size': 200, 'total_pixels': 0, 'folder_ctime': '2023-01-01'},
+            {'is_latest': False, 'total_file_size': 100,  'folder_ctime': '2024-01-01'},
+            {'is_latest': False, 'total_file_size': 200,  'folder_ctime': '2023-01-01'},
         ]
         idx, reason = pick_keep_version(members)
         assert idx == 1
@@ -203,8 +203,8 @@ class TestPickKeepVersion:
 
     def test_folder_ctime_tiebreaker(self):
         members = [
-            {'is_latest': False, 'total_file_size': 100, 'total_pixels': 0, 'folder_ctime': '2023-01-01'},
-            {'is_latest': False, 'total_file_size': 100, 'total_pixels': 0, 'folder_ctime': '2024-06-01'},
+            {'is_latest': False, 'total_file_size': 100,  'folder_ctime': '2023-01-01'},
+            {'is_latest': False, 'total_file_size': 100,  'folder_ctime': '2024-06-01'},
         ]
         idx, reason = pick_keep_version(members)
         assert idx == 1
@@ -217,8 +217,8 @@ class TestFindGroupsInPool:
     def test_no_duplicates(self):
         """Different content → no groups."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100, 0),
-            (_make_version('t2'), [_make_image(content_md5='b')], 1, 100, 0),
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='b')], 1, 100),
         ]
         groups = _find_groups_in_pool(pool)
         assert len(groups) == 0
@@ -226,8 +226,8 @@ class TestFindGroupsInPool:
     def test_two_identical(self):
         """Same content → one group with 2 members."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100, 0),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100, 0),
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups = _find_groups_in_pool(pool)
         assert len(groups) == 1
@@ -236,9 +236,9 @@ class TestFindGroupsInPool:
     def test_three_identical(self):
         """Three identical → one group with 3 members."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100, 0),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100, 0),
-            (_make_version('t3'), [_make_image(content_md5='a')], 1, 100, 0),
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups = _find_groups_in_pool(pool)
         assert len(groups) == 1
@@ -247,10 +247,10 @@ class TestFindGroupsInPool:
     def test_two_pairs(self):
         """Two separate duplicate pairs → two groups."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100, 0),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100, 0),
-            (_make_version('t3'), [_make_image(content_md5='b')], 1, 200, 0),
-            (_make_version('t4'), [_make_image(content_md5='b')], 1, 200, 0),
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3'), [_make_image(content_md5='b')], 1, 200),
+            (_make_version('t4'), [_make_image(content_md5='b')], 1, 200),
         ]
         groups = _find_groups_in_pool(pool)
         assert len(groups) == 2
@@ -259,7 +259,7 @@ class TestFindGroupsInPool:
     def test_single_pool(self):
         """Pool with 1 item → no groups."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100, 0),
+            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups = _find_groups_in_pool(pool)
         assert len(groups) == 0
@@ -268,8 +268,8 @@ class TestFindGroupsInPool:
         """Items with different signatures but matching via MD5 should be grouped.
         This happens when one has phash and the other doesn't, but MD5 matches."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='md5val', phash='phash1')], 1, 100, 0),
-            (_make_version('t2'), [_make_image(content_md5='md5val', phash='phash2')], 1, 100, 0),
+            (_make_version('t1'), [_make_image(content_md5='md5val', phash='phash1')], 1, 100),
+            (_make_version('t2'), [_make_image(content_md5='md5val', phash='phash2')], 1, 100),
         ]
         groups = _find_groups_in_pool(pool)
         # Different signatures (p:phash1 vs p:phash2), but MD5 matches
@@ -278,8 +278,8 @@ class TestFindGroupsInPool:
     def test_multiple_images_short_circuit(self):
         """With multiple images, short-circuit on first mismatch."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a'), _make_image(content_md5='x')], 2, 100, 0),
-            (_make_version('t2'), [_make_image(content_md5='a'), _make_image(content_md5='y')], 2, 100, 0),
+            (_make_version('t1'), [_make_image(content_md5='a'), _make_image(content_md5='x')], 2, 100),
+            (_make_version('t2'), [_make_image(content_md5='a'), _make_image(content_md5='y')], 2, 100),
         ]
         groups = _find_groups_in_pool(pool)
         assert len(groups) == 0
