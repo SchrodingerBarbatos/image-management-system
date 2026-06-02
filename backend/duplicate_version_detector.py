@@ -18,6 +18,18 @@ _log = logging.getLogger(__name__)
 # pHash hamming distance threshold for visual similarity
 PHASH_THRESHOLD = 5
 
+# Relaxed pHash threshold for strong MI candidates (>= 3 position hits).
+# When MI evidence is strong, individual positions may have slightly larger
+# hamming distance due to recompression artifacts, but the overall pattern
+# is still correct.  Full per-image verification with this threshold
+# controls false positives while allowing borderline cases through.
+PHASH_STRONG_MI_THRESHOLD = 8
+
+# Minimum sampled position hits for a candidate pair to be considered
+# "strong MI evidence" — bypasses sample_filter and uses the relaxed
+# PHASH_STRONG_MI_THRESHOLD for full verification.
+MI_STRONG_HITS_THRESHOLD = 3
+
 # Multi-index hashing parameters (per position)
 # Split 64-bit pHash into 8 × 8-bit chunks.
 # With threshold 5: worst case 1 bit in 5 chunks → 3 chunks match exactly.
@@ -36,11 +48,14 @@ def hamming_distance(hex1, hex2):
     return bin(b1 ^ b2).count('1')
 
 
-def are_same_image(img_a, img_b):
+def are_same_image(img_a, img_b, threshold=None):
     """Check if two images are visually the same.
     Layer 1: exact MD5 match (fast).
     Layer 2: pHash perceptual similarity (hamming distance <= threshold).
+    threshold defaults to PHASH_THRESHOLD when not specified.
     """
+    if threshold is None:
+        threshold = PHASH_THRESHOLD
     md5_a = img_a.content_md5 or ''
     md5_b = img_b.content_md5 or ''
     if md5_a and md5_b and md5_a == md5_b:
@@ -48,7 +63,7 @@ def are_same_image(img_a, img_b):
     phash_a = img_a.phash or ''
     phash_b = img_b.phash or ''
     if phash_a and phash_b:
-        if hamming_distance(phash_a, phash_b) <= PHASH_THRESHOLD:
+        if hamming_distance(phash_a, phash_b) <= threshold:
             return True
     return False
 
@@ -99,18 +114,20 @@ def passes_sample_filter(imgs_a, imgs_b):
     return True, matched
 
 
-def are_duplicate_versions_skip_indices(imgs_a, imgs_b, skip_indices):
+def are_duplicate_versions_skip_indices(imgs_a, imgs_b, skip_indices,
+                                         threshold=None):
     """Check if two version image lists are duplicates, skipping indices
     already verified by sample filter. Same logic as are_duplicate_versions()
     but skips positions in skip_indices.
     skip_indices must come from the current pair's sample filter only.
+    threshold is passed to are_same_image; defaults to PHASH_THRESHOLD.
     """
     if len(imgs_a) != len(imgs_b):
         return False
     for i, (a, b) in enumerate(zip(imgs_a, imgs_b)):
         if i in skip_indices:
             continue
-        if not are_same_image(a, b):
+        if not are_same_image(a, b, threshold):
             return False
     return True
 
@@ -379,7 +396,7 @@ def _find_groups_in_pool(pool):
         return [], {
             'candidate_pairs': 0, 'raw_mi_candidates': 0,
             'sample_filter_rejected': 0, 'actual_comparisons': 0,
-            'exact_duplicates_skipped': 0,
+            'exact_duplicates_skipped': 0, 'strong_mi_bypassed': 0,
         }
 
     # Pre-compute signatures and content hashes
@@ -396,6 +413,7 @@ def _find_groups_in_pool(pool):
     sample_filter_rejected = 0
     actual_comparisons = 0
     exact_duplicates_skipped = 0
+    strong_mi_bypassed = 0
     image_count = items[0][2]
 
     _log.debug("Pool: %d versions, image_count=%d", len(pool), image_count)
@@ -450,6 +468,7 @@ def _find_groups_in_pool(pool):
             'sample_filter_rejected': sample_filter_rejected,
             'actual_comparisons': actual_comparisons,
             'exact_duplicates_skipped': exact_duplicates_skipped,
+            'strong_mi_bypassed': strong_mi_bypassed,
         }
         return groups, stats
 
@@ -474,6 +493,13 @@ def _find_groups_in_pool(pool):
         raw_mi_candidates += len(pos_candidates)
         for pair in pos_candidates:
             pair_position_hits[pair] += 1
+
+    # Strong MI pairs (>= 3 position hits) bypass sample_filter during
+    # verification.  sample_filter can reject a valid pair when one of the
+    # few sampled positions happens to disagree, but 3+ agreeing positions
+    # provide strong evidence; full per-image verification remains mandatory.
+    mi_pair_hits = {pair: hits for pair, hits in pair_position_hits.items()
+                    if hits >= MI_STRONG_HITS_THRESHOLD}
 
     mi_candidates = {pair for pair, hits in pair_position_hits.items()
                      if hits >= min_position_hits}
@@ -527,15 +553,30 @@ def _find_groups_in_pool(pool):
             if j_idx not in remaining:
                 continue
             v_j, imgs_j, cnt_j, ts_j, _, _ = items[j_idx]
-            passed, skip = passes_sample_filter(imgs_i, imgs_j)
-            if not passed:
-                sample_filter_rejected += 1
-                continue
-            actual_comparisons += 1
-            if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
-                remaining.discard(j_idx)
-                assigned.add(j_idx)
-                members.append(_make_member(v_j, cnt_j, ts_j))
+            pair = (min(i_idx, j_idx), max(i_idx, j_idx))
+            if pair in mi_pair_hits:
+                # Strong MI candidate: bypass sample_filter, go straight to
+                # full verification with relaxed threshold.  3+ sampled
+                # positions already agree, so individual positions may have
+                # slightly larger hamming distance but overall pattern holds.
+                strong_mi_bypassed += 1
+                actual_comparisons += 1
+                if are_duplicate_versions_skip_indices(
+                        imgs_i, imgs_j, set(),
+                        threshold=PHASH_STRONG_MI_THRESHOLD):
+                    remaining.discard(j_idx)
+                    assigned.add(j_idx)
+                    members.append(_make_member(v_j, cnt_j, ts_j))
+            else:
+                passed, skip = passes_sample_filter(imgs_i, imgs_j)
+                if not passed:
+                    sample_filter_rejected += 1
+                    continue
+                actual_comparisons += 1
+                if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
+                    remaining.discard(j_idx)
+                    assigned.add(j_idx)
+                    members.append(_make_member(v_j, cnt_j, ts_j))
 
         if len(members) >= 2:
             groups.append(members)
@@ -545,9 +586,12 @@ def _find_groups_in_pool(pool):
         'sample_filter_rejected': sample_filter_rejected,
         'actual_comparisons': actual_comparisons,
         'exact_duplicates_skipped': exact_duplicates_skipped,
+        'strong_mi_bypassed': strong_mi_bypassed,
     }
-    _log.debug("Pool result: %d groups, %d actual_comparisons, %d sample_rejected, %d exact_skipped",
-               len(groups), actual_comparisons, sample_filter_rejected, exact_duplicates_skipped)
+    _log.debug("Pool result: %d groups, %d actual_comparisons, %d sample_rejected, "
+               "%d strong_mi_bypassed, %d exact_skipped",
+               len(groups), actual_comparisons, sample_filter_rejected,
+               strong_mi_bypassed, exact_duplicates_skipped)
     return groups, stats
 
 
@@ -637,6 +681,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
     total_sample_rejected = 0
     total_actual_comparisons = 0
     total_exact_duplicates_skipped = 0
+    total_strong_mi_bypassed = 0
     max_versions_in_group = 0
     max_images_in_group = 0
     last_progress_time = start_time
@@ -697,6 +742,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
             total_sample_rejected += stats['sample_filter_rejected']
             total_actual_comparisons += stats['actual_comparisons']
             total_exact_duplicates_skipped += stats.get('exact_duplicates_skipped', 0)
+            total_strong_mi_bypassed += stats.get('strong_mi_bypassed', 0)
 
             for members in member_lists:
                 keep_idx, reason = pick_keep_version(members)
@@ -727,12 +773,13 @@ def detect_duplicate_versions(sess, progress_callback=None):
     _log.info(
         "DuplicateVersionScan: versions=%d groups=%d pools=%d "
         "raw_mi_candidates=%d filtered_candidates=%d "
-        "sample_rejected=%d actual_comparisons=%d "
+        "sample_rejected=%d strong_mi_bypassed=%d actual_comparisons=%d "
         "exact_skipped=%d max_versions=%d max_imgs=%d "
         "duplicate_groups=%d elapsed=%.1fs",
         total_versions, total_groups, total_pools,
         total_raw_mi_candidates, total_candidate_pairs,
-        total_sample_rejected, total_actual_comparisons,
+        total_sample_rejected, total_strong_mi_bypassed,
+        total_actual_comparisons,
         total_exact_duplicates_skipped, max_versions_in_group,
         max_images_in_group, len(all_groups), elapsed,
     )

@@ -718,6 +718,139 @@ class TestFindGroupsInPool:
         assert len(groups) == 1
         assert len(groups[0]) == 2
 
+    def test_strong_mi_bypasses_sample_filter(self):
+        """Strong MI candidates (>= 3 position hits) must bypass sample_filter.
+
+        Scenario from barcode=6901294179608/detail:
+        3 versions, 9 images each.  Sample indices = [0, 2, 4, 6, 8].
+        All three versions differ ONLY at sampled position 0, so they each
+        have a unique version signature (forcing the MI cross-signature path).
+
+        pHash distances at position 0:
+          A vs B: 4 bits  (within PHASH_THRESHOLD=5, passes sample_filter)
+          A vs C: 4 bits  (within PHASH_THRESHOLD=5, passes sample_filter)
+          B vs C: 8 bits  (> PHASH_THRESHOLD=5, sample_filter REJECTS)
+
+        MI hash detects ALL pairs at all 5 positions (each pair shares 4+
+        matching sampled positions), giving mi_hit_count = 5 >= 3 for each.
+
+        The fix must bypass sample_filter for pair (B,C) and send it
+        directly to full per-image verification with relaxed threshold
+        (PHASH_STRONG_MI_THRESHOLD=8), which passes (all 9 images match).
+        """
+        # Three pHashes at position 0 with pairwise distances 4, 4, 8:
+        # A = 0x0000000000000000 (reference)
+        # B = 0x000000000000000F (4 bits in low nibble)
+        # C = 0x00000000000000F0 (4 bits in next nibble, non-overlapping)
+        # B vs C: distance 8 (non-overlapping bits combine)
+        phash_pos0_a = '0000000000000000'
+        phash_pos0_b = '000000000000000f'
+        phash_pos0_c = '00000000000000f0'
+        assert hamming_distance(phash_pos0_a, phash_pos0_b) == 4  # <= 5
+        assert hamming_distance(phash_pos0_a, phash_pos0_c) == 4  # <= 5
+        assert hamming_distance(phash_pos0_b, phash_pos0_c) == 8  # > 5, <= 8
+
+        common = [  # positions 1-8: identical across all versions
+            None,  # placeholder for position 0
+            _make_image(phash='1111111111111111', sequence=1),
+            _make_image(phash='2222222222222222', sequence=2),
+            _make_image(phash='3333333333333333', sequence=3),
+            _make_image(phash='4444444444444444', sequence=4),
+            _make_image(phash='5555555555555555', sequence=5),
+            _make_image(phash='6666666666666666', sequence=6),
+            _make_image(phash='7777777777777777', sequence=7),
+            _make_image(phash='8888888888888888', sequence=8),
+        ]
+
+        def _make_imgs(phash_pos0):
+            imgs = list(common)
+            imgs[0] = _make_image(phash=phash_pos0, sequence=0)
+            return imgs
+
+        pool = [
+            (_make_version('t1', content_hash='h1'), _make_imgs(phash_pos0_a), 9, 900),
+            (_make_version('t2', content_hash='h2'), _make_imgs(phash_pos0_b), 9, 900),
+            (_make_version('t3', content_hash='h3'), _make_imgs(phash_pos0_c), 9, 900),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # Must find one group with all 3 members — strong MI bypasses sample_filter
+        assert len(groups) == 1
+        assert len(groups[0]) == 3
+        assert stats['strong_mi_bypassed'] >= 1  # at least (B,C) pair bypassed
+        assert stats['actual_comparisons'] >= 2
+
+    def test_strong_mi_bypass_required_for_grouping(self):
+        """Without the MI bypass, this pair would be rejected by sample_filter.
+
+        2 versions, 9 images.  Position 0 has distance 8 (> PHASH_THRESHOLD=5).
+        All other positions identical.  sample_filter rejects the pair at
+        position 0, so without the bypass no group would form.
+
+        With the bypass, the pair has mi_hit_count = 4 (positions 2, 4, 6, 8)
+        >= MI_STRONG_HITS_THRESHOLD = 3, so it's sent directly to full
+        verification with PHASH_STRONG_MI_THRESHOLD = 8, which passes.
+        """
+        phash_b = '000000000000000f'
+        phash_c = '00000000000000f0'
+        assert hamming_distance(phash_b, phash_c) == 8  # > 5, <= 8
+
+        common = [
+            _make_image(phash='1111111111111111', sequence=1),
+            _make_image(phash='2222222222222222', sequence=2),
+            _make_image(phash='3333333333333333', sequence=3),
+            _make_image(phash='4444444444444444', sequence=4),
+            _make_image(phash='5555555555555555', sequence=5),
+            _make_image(phash='6666666666666666', sequence=6),
+            _make_image(phash='7777777777777777', sequence=7),
+            _make_image(phash='8888888888888888', sequence=8),
+        ]
+
+        imgs_b = [_make_image(phash=phash_b, sequence=0)] + list(common)
+        imgs_c = [_make_image(phash=phash_c, sequence=0)] + list(common)
+
+        pool = [
+            (_make_version('t1', content_hash='h1'), imgs_b, 9, 900),
+            (_make_version('t2', content_hash='h2'), imgs_c, 9, 900),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 1
+        assert len(groups[0]) == 2
+        assert stats['strong_mi_bypassed'] >= 1
+        assert stats['actual_comparisons'] >= 1
+
+    def test_strong_mi_rejected_above_threshold(self):
+        """Pair with distance 9 (> PHASH_STRONG_MI_THRESHOLD=8) must be
+        rejected even with strong MI evidence.
+
+        This is the boundary test: distance 8 passes, distance 9 does not.
+        """
+        # Distance 9: B and C differ by 9 bits (4 + 4 + 1)
+        phash_b = '000000000000000f'   # 4 bits
+        phash_c = '00000000000001f0'   # 5 bits (4 + 1), non-overlapping with B
+        assert hamming_distance(phash_b, phash_c) == 9  # > 8
+
+        common = [
+            _make_image(phash='1111111111111111', sequence=1),
+            _make_image(phash='2222222222222222', sequence=2),
+            _make_image(phash='3333333333333333', sequence=3),
+            _make_image(phash='4444444444444444', sequence=4),
+            _make_image(phash='5555555555555555', sequence=5),
+            _make_image(phash='6666666666666666', sequence=6),
+            _make_image(phash='7777777777777777', sequence=7),
+            _make_image(phash='8888888888888888', sequence=8),
+        ]
+
+        imgs_b = [_make_image(phash=phash_b, sequence=0)] + list(common)
+        imgs_c = [_make_image(phash=phash_c, sequence=0)] + list(common)
+
+        pool = [
+            (_make_version('t1', content_hash='h1'), imgs_b, 9, 900),
+            (_make_version('t2', content_hash='h2'), imgs_c, 9, 900),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # Distance 9 > PHASH_STRONG_MI_THRESHOLD=8 → must NOT be grouped
+        assert len(groups) == 0
+
 
 # ---------- exact duplicate skipping ----------
 
