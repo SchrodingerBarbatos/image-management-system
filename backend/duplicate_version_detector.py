@@ -37,6 +37,111 @@ _MI_NUM_CHUNKS = 8          # number of chunks per hash
 _MI_MIN_CHUNKS = max(1, _MI_NUM_CHUNKS - PHASH_THRESHOLD)  # = 3
 
 
+def _image_detail_dict(img):
+    """Extract detailed image info dict for debug logging."""
+    return {
+        'id': img.id,
+        'filename': img.filename,
+        'sequence': img.sequence,
+        'file_path': img.file_path,
+        'content_md5': img.content_md5 or '',
+        'phash': img.phash or '',
+        'file_size': getattr(img, 'file_size', None),
+    }
+
+
+def _find_first_mismatch(imgs_a, imgs_b, skip_indices=None, threshold=None):
+    """Find the first mismatching image pair between two version lists.
+
+    Returns (index, img_a, img_b, md5_equal, phash_distance, threshold_used)
+    if a mismatch is found, or None if all images match.
+    Used for debug logging when verification fails.
+    """
+    if threshold is None:
+        threshold = PHASH_THRESHOLD
+    if skip_indices is None:
+        skip_indices = set()
+    if len(imgs_a) != len(imgs_b):
+        return (-1, None, None, None, None, threshold)  # length mismatch
+    for i, (a, b) in enumerate(zip(imgs_a, imgs_b)):
+        if i in skip_indices:
+            continue
+        md5_a = a.content_md5 or ''
+        md5_b = b.content_md5 or ''
+        md5_equal = bool(md5_a and md5_b and md5_a == md5_b)
+        phash_a = a.phash or ''
+        phash_b = b.phash or ''
+        phash_dist = hamming_distance(phash_a, phash_b) if (phash_a and phash_b) else None
+        if not are_same_image(a, b, threshold):
+            return (i, a, b, md5_equal, phash_dist, threshold)
+    return None  # all matched
+
+
+def _log_pair_mismatch(barcode, image_type, v_a, v_b, imgs_a, imgs_b,
+                       mismatch_info, context=''):
+    """Log detailed mismatch info when full verification fails.
+
+    mismatch_info: (index, img_a, img_b, md5_equal, phash_distance, threshold)
+    Uses DEBUG level with isEnabledFor guard to avoid performance impact
+    when debug logging is disabled.
+    """
+    if not _log.isEnabledFor(logging.DEBUG):
+        return
+    idx, img_a, img_b, md5_equal, phash_dist, threshold = mismatch_info
+    if idx == -1:
+        _log.debug(
+            "[VERIFY_FAIL] %s barcode=%s image_type=%s "
+            "length mismatch: len_a=%d len_b=%d",
+            context, barcode, image_type, len(imgs_a), len(imgs_b))
+        return
+    detail_a = _image_detail_dict(img_a) if img_a else {}
+    detail_b = _image_detail_dict(img_b) if img_b else {}
+    _log.debug(
+        "[VERIFY_FAIL] %s barcode=%s image_type=%s\n"
+        "  folder_ctime A=%s version_label A=%s\n"
+        "  folder_ctime B=%s version_label B=%s\n"
+        "  failing_index=%d\n"
+        "  image A: id=%s filename=%s sequence=%s file_path=%s\n"
+        "           content_md5=%s phash=%s file_size=%s\n"
+        "  image B: id=%s filename=%s sequence=%s file_path=%s\n"
+        "           content_md5=%s phash=%s file_size=%s\n"
+        "  md5_equal=%s phash_distance=%s threshold=%s",
+        context, barcode, image_type,
+        v_a.folder_ctime, v_a.version_label,
+        v_b.folder_ctime, v_b.version_label,
+        idx,
+        detail_a.get('id'), detail_a.get('filename'),
+        detail_a.get('sequence'), detail_a.get('file_path'),
+        detail_a.get('content_md5'), detail_a.get('phash'),
+        detail_a.get('file_size'),
+        detail_b.get('id'), detail_b.get('filename'),
+        detail_b.get('sequence'), detail_b.get('file_path'),
+        detail_b.get('content_md5'), detail_b.get('phash'),
+        detail_b.get('file_size'),
+        md5_equal, phash_dist, threshold)
+
+
+def _log_version_images(barcode, image_type, version_data):
+    """Log the full ordered image list for a (barcode, image_type) group.
+
+    version_data: list of (version, images, count, total_size) tuples.
+    Only logs when debug level is enabled to avoid performance impact.
+    """
+    if not _log.isEnabledFor(logging.DEBUG):
+        return
+    _log.debug("[VERSION_IMAGES] barcode=%s image_type=%s versions=%d",
+               barcode, image_type, len(version_data))
+    for v, imgs, cnt, ts in version_data:
+        img_list = []
+        for img in imgs:
+            img_list.append(
+                f"(seq={img.sequence}, fn={img.filename}, "
+                f"md5={img.content_md5 or ''}, phash={img.phash or ''}, "
+                f"path={img.file_path})")
+        _log.debug("  folder_ctime=%s version_label=%s images=[%s]",
+                   v.folder_ctime, v.version_label, '; '.join(img_list))
+
+
 def hamming_distance(hex1, hex2):
     """Compute hamming distance between two hex hash strings."""
     if not hex1 or not hex2:
@@ -416,6 +521,13 @@ def _find_groups_in_pool(pool):
     strong_mi_bypassed = 0
     image_count = items[0][2]
 
+    # Pre-comparison image list logging for debug (target barcode)
+    # TODO: remove hardcoded barcode probe after debugging 6901294179608 issue
+    sample_barcode = getattr(items[0][0], 'barcode', '')
+    sample_image_type = getattr(items[0][0], 'image_type', '')
+    if sample_barcode == '6901294179608' and sample_image_type == 'detail':
+        _log_version_images(sample_barcode, sample_image_type, pool)
+
     _log.debug("Pool: %d versions, image_count=%d", len(pool), image_count)
 
     # --- Step 0: Skip exact content_hash duplicates ---
@@ -457,6 +569,14 @@ def _find_groups_in_pool(pool):
                 if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
                     assigned.add(j_idx)
                     members.append(_make_member(v_j, cnt_j, ts_j))
+                else:
+                    # Log detailed mismatch for failed verification
+                    mismatch = _find_first_mismatch(imgs_i, imgs_j, skip)
+                    if mismatch:
+                        _log_pair_mismatch(
+                            sample_barcode, sample_image_type,
+                            v_i, v_j, imgs_i, imgs_j,
+                            mismatch, context='pass1_exact_sig')
             if len(members) >= 2:
                 groups.append(members)
 
@@ -567,16 +687,39 @@ def _find_groups_in_pool(pool):
                     remaining.discard(j_idx)
                     assigned.add(j_idx)
                     members.append(_make_member(v_j, cnt_j, ts_j))
+                else:
+                    mismatch = _find_first_mismatch(
+                        imgs_i, imgs_j, set(),
+                        threshold=PHASH_STRONG_MI_THRESHOLD)
+                    if mismatch:
+                        _log_pair_mismatch(
+                            sample_barcode, sample_image_type,
+                            v_i, v_j, imgs_i, imgs_j,
+                            mismatch, context='strong_mi')
             else:
                 passed, skip = passes_sample_filter(imgs_i, imgs_j)
                 if not passed:
                     sample_filter_rejected += 1
+                    # Log sample filter rejection details for debug
+                    mismatch = _find_first_mismatch(imgs_i, imgs_j)
+                    if mismatch:
+                        _log_pair_mismatch(
+                            sample_barcode, sample_image_type,
+                            v_i, v_j, imgs_i, imgs_j,
+                            mismatch, context='sample_filter_reject')
                     continue
                 actual_comparisons += 1
                 if are_duplicate_versions_skip_indices(imgs_i, imgs_j, skip):
                     remaining.discard(j_idx)
                     assigned.add(j_idx)
                     members.append(_make_member(v_j, cnt_j, ts_j))
+                else:
+                    mismatch = _find_first_mismatch(imgs_i, imgs_j, skip)
+                    if mismatch:
+                        _log_pair_mismatch(
+                            sample_barcode, sample_image_type,
+                            v_i, v_j, imgs_i, imgs_j,
+                            mismatch, context='mi_candidate')
 
         if len(members) >= 2:
             groups.append(members)
