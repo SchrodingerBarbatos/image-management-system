@@ -150,39 +150,35 @@ def _build_sample_signature(images, indices):
 
 
 def _parse_single_hash(segment):
-    """Parse a single 'p:hex' or 'm:hex' segment into an integer.
-    Returns (int_value, bit_width) or (None, 0) if invalid.
+    """Parse a single 'p:hex' or 'm:hex' segment.
+    Returns (hash_type, int_value, bit_width) or (None, None, 0) if invalid.
+    hash_type is 'p' for pHash or 'm' for MD5.
     """
     if not segment or ':' not in segment:
-        return None, 0
-    _, hex_val = segment.split(':', 1)
+        return None, None, 0
+    hash_type, hex_val = segment.split(':', 1)
     if not hex_val:
-        return None, 0
+        return None, None, 0
     try:
         val = int(hex_val, 16)
     except (ValueError, OverflowError):
-        return None, 0
-    return val, len(hex_val) * 4
+        return None, None, 0
+    return hash_type, val, len(hex_val) * 4
 
 
-def _mi_hash_candidates_for_position(position_data):
-    """Multi-index hashing for a single sampled position.
+def _mi_hash_candidates_for_group(group_data, bit_width):
+    """Multi-index hashing for a single typed group at one position.
 
-    Finds candidate pairs within hamming distance <= PHASH_THRESHOLD
-    for hash values at one position.
+    All entries in group_data must have the same bit_width.
 
     Args:
-        position_data: list of (idx, hash_value, bit_width) tuples
+        group_data: list of (idx, hash_value) tuples
+        bit_width: number of bits per hash value
 
     Returns:
         set of (i, j) pairs with i < j
     """
-    if len(position_data) < 2:
-        return set()
-
-    # Use bit width from first valid entry
-    _, _, bit_width = position_data[0]
-    if bit_width < _MI_NUM_CHUNKS:
+    if len(group_data) < 2 or bit_width < _MI_NUM_CHUNKS:
         return set()
 
     chunk_size = max(1, bit_width // _MI_NUM_CHUNKS)
@@ -195,7 +191,7 @@ def _mi_hash_candidates_for_position(position_data):
             shift = 0
         mask = (1 << chunk_size) - 1
         d = defaultdict(list)
-        for idx, val, _ in position_data:
+        for idx, val in group_data:
             chunk_val = (val >> shift) & mask
             d[chunk_val].append(idx)
         chunk_dicts.append(d)
@@ -215,6 +211,34 @@ def _mi_hash_candidates_for_position(position_data):
 
     candidates = {pair for pair, cnt in pair_counts.items() if cnt >= _MI_MIN_CHUNKS}
     return candidates
+
+
+def _mi_hash_candidates_for_position(position_data):
+    """Multi-index hashing for a single sampled position.
+
+    Splits entries by hash_type and bit_width so that pHash and MD5 values
+    are never compared across types. Each typed group is processed
+    independently with its own chunk_size.
+
+    Args:
+        position_data: list of (hash_type, idx, hash_value, bit_width) tuples
+
+    Returns:
+        set of (i, j) pairs with i < j
+    """
+    if len(position_data) < 2:
+        return set()
+
+    # Group by (hash_type, bit_width) to never mix pHash and MD5
+    groups = defaultdict(list)
+    for hash_type, idx, val, bit_width in position_data:
+        groups[(hash_type, bit_width)].append((idx, val))
+
+    all_candidates = set()
+    for (hash_type, bit_width), group_data in groups.items():
+        all_candidates.update(_mi_hash_candidates_for_group(group_data, bit_width))
+
+    return all_candidates
 
 
 def _mi_hash_candidates(sample_sigs):
@@ -244,9 +268,9 @@ def _mi_hash_candidates(sample_sigs):
             segments = sig.split('|')
             if pos >= len(segments):
                 continue
-            val, bit_width = _parse_single_hash(segments[pos])
-            if val is not None and bit_width > 0:
-                position_data.append((idx, val, bit_width))
+            hash_type, val, bit_width = _parse_single_hash(segments[pos])
+            if hash_type is not None and bit_width > 0:
+                position_data.append((hash_type, idx, val, bit_width))
 
         pos_candidates = _mi_hash_candidates_for_position(position_data)
         all_candidates.update(pos_candidates)
