@@ -783,12 +783,102 @@ def _run_batch_delete_duplicate_versions(task_id):
               task_id, deleted_image_count, skipped_count, failed_count)
 
 
+# ---------- Hash backfill handler ----------
+
+def _run_hash_backfill(task_id):
+    """Background handler for hash_backfill tasks.
+    Scans active images where phash or content_md5 is empty,
+    generates thumbnail/hash for each, reports progress."""
+    _log.info("Starting hash_backfill task %d", task_id)
+
+    sess = _get_thread_session()
+
+    # Count total candidates first (with ScanRoot.enabled filter)
+    total = sess.query(Image).filter(
+        Image.status == 'active',
+        (Image.phash == '') | (Image.phash == None) |
+        (Image.content_md5 == '') | (Image.content_md5 == None),
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True,
+    ).count()
+
+    if not total:
+        finish_task(task_id, result_count=0)
+        _log.info("hash_backfill task %d done: no images need backfill", task_id)
+        return
+
+    update_task_progress(task_id, progress=0, total=total)
+    _log.info("hash_backfill: %d images need backfill", total)
+
+    from thumbnail import generate_thumbnail
+    from scanner import _flush_hash_updates_core
+
+    md5_updates = {}
+    phash_updates = {}
+    success_count = 0
+    fail_count = 0
+
+    # Use yield_per for memory-safe iteration over large result sets
+    candidates = sess.query(Image).filter(
+        Image.status == 'active',
+        (Image.phash == '') | (Image.phash == None) |
+        (Image.content_md5 == '') | (Image.content_md5 == None),
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True,
+    ).yield_per(500)
+
+    for i, img in enumerate(candidates):
+        try:
+            file_path = img.file_path
+            if not file_path or not os.path.exists(file_path):
+                fail_count += 1
+                continue
+
+            # Generate thumbnail + compute MD5 + pHash
+            _, md5, phash = generate_thumbnail(img.id, file_path)
+            if md5:
+                md5_updates[img.id] = md5
+            if phash:
+                phash_updates[img.id] = phash
+            # Count success only when both hashes are present
+            if md5 and phash:
+                success_count += 1
+            elif md5:
+                # Got MD5 but pHash failed — still partial success
+                success_count += 1
+                _log.warning("hash_backfill: image %d got MD5 but no pHash", img.id)
+
+            # Batch flush every 100 images
+            if len(md5_updates) >= 100:
+                _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
+                md5_updates.clear()
+                phash_updates.clear()
+
+        except Exception as e:
+            _log.warning("hash_backfill: failed for image %d: %s", img.id, e)
+            fail_count += 1
+
+        if (i + 1) % 100 == 0:
+            update_task_progress(task_id, progress=i + 1, total=total)
+
+    # Final flush
+    if md5_updates or phash_updates:
+        _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
+
+    sess.commit()
+    update_task_progress(task_id, progress=total, total=total, result_count=success_count)
+    finish_task(task_id, result_count=success_count)
+    _log.info("hash_backfill task %d done: %d success, %d failed out of %d",
+              task_id, success_count, fail_count, total)
+
+
 register_handler('batch_delete_duplicates', _run_batch_delete_duplicates)
 register_handler('batch_delete_low_versions', _run_batch_delete_low_versions)
 register_handler('delete_version', _run_delete_version)
 register_handler('batch_delete_images', _run_batch_delete_images)
 register_handler('duplicate_version_scan', _run_duplicate_version_scan)
 register_handler('batch_delete_duplicate_versions', _run_batch_delete_duplicate_versions)
+register_handler('hash_backfill', _run_hash_backfill)
 
 
 # ---------- Common task routes ----------
@@ -1655,3 +1745,30 @@ def create_batch_delete_duplicate_versions_task():
     task_dict, is_new = create_task('batch_delete_duplicate_versions', params=params)
     code = 201 if is_new else 200
     return jsonify(task_dict), code
+
+
+# ---------- Hash backfill routes ----------
+
+@batch_tasks_bp.route('/batch/hash-backfill/tasks', methods=['POST'])
+def create_hash_backfill():
+    """Create an async task to backfill missing phash/content_md5/thumbnails."""
+    from task_engine import create_task
+    task_dict, is_new = create_task('hash_backfill', params={})
+    code = 201 if is_new else 200
+    return jsonify(task_dict), code
+
+
+@batch_tasks_bp.route('/batch/hash-backfill/tasks', methods=['GET'])
+def list_hash_backfill_tasks():
+    from task_engine import get_tasks
+    tasks = get_tasks(task_type='hash_backfill')
+    return jsonify(tasks)
+
+
+@batch_tasks_bp.route('/batch/hash-backfill/tasks/<int:task_id>', methods=['GET'])
+def get_hash_backfill_task(task_id):
+    from task_engine import get_task
+    task = get_task(task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(task)

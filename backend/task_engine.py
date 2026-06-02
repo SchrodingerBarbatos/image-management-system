@@ -13,6 +13,7 @@ VALID_TASK_TYPES = {
     'batch_delete_duplicates', 'batch_delete_low_versions',
     'delete_version', 'batch_delete_images',
     'duplicate_version_scan', 'batch_delete_duplicate_versions',
+    'hash_backfill',
 }
 
 

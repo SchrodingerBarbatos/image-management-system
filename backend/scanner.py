@@ -2,7 +2,7 @@ import re, os, hashlib, datetime, uuid, logging
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import session, Image, ImageVersion, ScanRoot, RejectedBarcode
-from thumbnail import generate_thumbnail
+from thumbnail import generate_thumbnail, thumbnail_exists
 
 _log = logging.getLogger(__name__)
 
@@ -270,8 +270,11 @@ def _process_thumbnail_batch(thumb_jobs):
     return md5_updates
 
 
-def _flush_hash_updates_core(md5_updates, phash_updates):
-    """Batch-write content_md5 and phash updates using Core UPDATE (no ORM objects loaded)."""
+def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
+    """Batch-write content_md5 and phash updates using Core UPDATE (no ORM objects loaded).
+    If sess is provided, use it instead of the module-level session."""
+    if sess is None:
+        sess = session
     all_ids = set(md5_updates.keys()) | set(phash_updates.keys())
     if not all_ids:
         return
@@ -285,12 +288,12 @@ def _flush_hash_updates_core(md5_updates, phash_updates):
             if img_id in phash_updates:
                 values['phash'] = phash_updates[img_id]
             if values:
-                session.execute(
+                sess.execute(
                     update(Image)
                     .where(Image.id == img_id)
                     .values(**values)
                 )
-    session.flush()
+    sess.flush()
 
 
 def scan_root(root_id, full_scan=False, progress_callback=None, processed_offset=0,
@@ -388,12 +391,16 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                         affected_barcodes.add(img.barcode)
                     continue
                 if fp == img_md5:
-                    # fingerprint 未变（文件大小 + mtime 均未变），跳过
-                    skipped += 1
-                    # Update last_scan_token via ORM to ensure visibility in subsequent queries
+                    # fingerprint 未变（文件大小 + mtime 均未变）
+                    # 检查是否需要补算 content_md5 / phash / thumbnail
                     img = session.get(Image, img_id)
                     if img:
                         img.last_scan_token = scan_token
+                        needs_hash = not img.content_md5 or not img.phash
+                        needs_thumb = not thumbnail_exists(img_id)
+                        if needs_hash or needs_thumb:
+                            thumb_jobs.append((img_id, full_path))
+                    skipped += 1
                     continue
                 # fingerprint 已变 → 文件内容已变化，重新解析并更新
                 try:

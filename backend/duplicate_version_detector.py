@@ -600,6 +600,27 @@ def detect_duplicate_versions(sess, progress_callback=None):
         return []
 
     total_groups = len(distinct_groups)
+
+    # --- Diagnostics: image_type counts for ImageVersion ---
+    from sqlalchemy import func
+    type_counts = sess.query(
+        ImageVersion.image_type, func.count(ImageVersion.id)
+    ).group_by(ImageVersion.image_type).all()
+    _log.info("DuplicateVersionScan diagnostics: ImageVersion counts by type: %s",
+              {t: c for t, c in type_counts})
+
+    # --- Diagnostics: active confirmed images with empty phash by image_type ---
+    empty_phash_counts = sess.query(
+        Image.image_type, func.count(Image.id)
+    ).filter(
+        Image.status == 'active',
+        Image.confirmed == True,
+        (Image.phash == '') | (Image.phash == None),
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True,
+    ).group_by(Image.image_type).all()
+    _log.info("DuplicateVersionScan diagnostics: active images with empty phash by type: %s",
+              {t: c for t, c in empty_phash_counts})
     processed = 0
     all_groups = []
     group_id = 0
@@ -686,6 +707,12 @@ def detect_duplicate_versions(sess, progress_callback=None):
         progress_callback(current=total_groups, total=total_groups)
 
     elapsed = time.monotonic() - start_time
+
+    # --- Diagnostics: duplicate groups found by image_type ---
+    dup_groups_by_type = defaultdict(int)
+    for g in all_groups:
+        dup_groups_by_type[g['image_type']] += 1
+
     _log.info(
         "DuplicateVersionScan: versions=%d groups=%d pools=%d "
         "raw_mi_candidates=%d filtered_candidates=%d "
@@ -698,4 +725,6 @@ def detect_duplicate_versions(sess, progress_callback=None):
         total_exact_duplicates_skipped, max_versions_in_group,
         max_images_in_group, len(all_groups), elapsed,
     )
+    _log.info("DuplicateVersionScan diagnostics: duplicate groups by type: %s",
+              dict(dup_groups_by_type))
     return all_groups
