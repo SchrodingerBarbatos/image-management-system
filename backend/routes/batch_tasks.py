@@ -12,7 +12,7 @@ from models import (
 )
 from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
-from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats
+from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error
 
 
 def _cleanup_orphaned_images():
@@ -1528,6 +1528,107 @@ def restore_duplicate_versions(task_id):
 
     return jsonify({
         'restored_count': restored_count,
+        'affected_barcodes': list(affected_barcodes),
+    })
+
+
+@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>/permanent-delete', methods=['POST'])
+def permanent_delete_duplicate_versions(task_id):
+    """Permanently delete soft-deleted duplicate versions (index only or index+files)."""
+    task = session.get(BatchTask, task_id)
+    if not task:
+        return jsonify({'error': 'not found'}), 404
+
+    data = request.json or {}
+    result_ids = data.get('result_ids', [])
+    delete_files = bool(data.get('delete_files', False))
+
+    result_ids, err = _validate_result_ids(result_ids)
+    if err:
+        return err
+
+    results, err = _check_result_id_consistency(result_ids, DuplicateVersionScanResult, task_id)
+    if err:
+        return err
+
+    # Only operate on soft-deleted results
+    results = [r for r in results if r.delete_status == 'deleted']
+    if not results:
+        return jsonify({'error': '没有可永久删除的结果'}), 400
+
+    affected_barcodes = set()
+    permanently_deleted_count = 0
+    failed_count = 0
+
+    # Pre-validate paths if deleting files
+    if delete_files:
+        scan_roots = {sr.id: sr.path for sr in session.query(ScanRoot).all()}
+
+    for r in results:
+        imgs = session.query(Image).filter(
+            Image.barcode == r.barcode,
+            Image.image_type == r.image_type,
+            Image.folder_ctime == r.folder_ctime,
+            Image.status == 'duplicate_version',
+        ).all()
+
+        if not imgs:
+            # No matching images — mark as permanently deleted (already gone)
+            r.delete_status = 'permanently_deleted'
+            r.delete_message = '已永久删除（索引已不存在）'
+            r.deleted_at = datetime.datetime.now().isoformat()
+            permanently_deleted_count += 1
+            affected_barcodes.add(r.barcode)
+            continue
+
+        if delete_files:
+            # Validate paths are inside scan roots
+            is_valid, error_msg = validate_image_paths(imgs, scan_roots)
+            if not is_valid:
+                r.delete_status = 'failed'
+                r.delete_message = f'路径验证失败: {error_msg}'
+                failed_count += 1
+                continue
+
+            # Per-file atomicity: delete DB row immediately after each successful file delete
+            file_errors = []
+            deleted_db_count = 0
+            for img in imgs:
+                try:
+                    os.remove(img.file_path)
+                    session.delete(img)
+                    deleted_db_count += 1
+                except FileNotFoundError:
+                    # File already gone — still clean up DB row
+                    session.delete(img)
+                    deleted_db_count += 1
+                except OSError as e:
+                    file_errors.append(f'{img.file_path}: {_classify_delete_error(img.file_path, e)}')
+
+            if file_errors:
+                r.delete_status = 'failed'
+                r.delete_message = f'部分文件删除失败: {"; ".join(file_errors)}'
+                failed_count += 1
+                continue
+        else:
+            # Index-only: delete all DB rows
+            for img in imgs:
+                session.delete(img)
+
+        r.delete_status = 'permanently_deleted'
+        r.delete_message = '已永久删除'
+        r.deleted_at = datetime.datetime.now().isoformat()
+        permanently_deleted_count += 1
+        affected_barcodes.add(r.barcode)
+
+    session.commit()
+
+    for bc in affected_barcodes:
+        update_versions_for_barcode(bc)
+
+    return jsonify({
+        'permanently_deleted_count': permanently_deleted_count,
+        'failed_count': failed_count,
         'affected_barcodes': list(affected_barcodes),
     })
 

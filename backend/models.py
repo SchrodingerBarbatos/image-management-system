@@ -207,7 +207,7 @@ class DuplicateVersionScanResult(Base):
     is_latest = Column(Boolean, default=False)
     role = Column(Text, default='clean')  # 'keep' | 'clean' | 'user_selected'
     keep_reason = Column(Text, default='')  # reason for recommendation
-    delete_status = Column(Text, default='pending')  # 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored'
+    delete_status = Column(Text, default='pending')  # 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored' | 'permanently_deleted'
     delete_message = Column(Text, default='')
     deleted_at = Column(Text, default='')
     kept_version_ctime = Column(Text, default='')  # folder_ctime of the kept version

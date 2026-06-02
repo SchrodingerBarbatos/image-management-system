@@ -316,7 +316,7 @@ export interface DuplicateVersionMember {
   is_latest: boolean;
   role: 'keep' | 'clean' | 'user_selected';
   keep_reason: string;
-  delete_status: 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored';
+  delete_status: 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored' | 'permanently_deleted';
   delete_message: string;
   deleted_at: string;
   kept_version_ctime: string;
@@ -415,6 +415,10 @@ export const taskApi = {
   restoreDuplicateVersions: (taskId: number, resultIds: number[]) =>
     api.post<{ restored_count: number; affected_barcodes: string[] }>(
       `/batch/duplicate-version-scan/tasks/${taskId}/restore`, { result_ids: resultIds },
+    ).then(r => r.data),
+  permanentDeleteDuplicateVersions: (taskId: number, resultIds: number[], deleteFiles: boolean) =>
+    api.post<{ permanently_deleted_count: number; failed_count: number; affected_barcodes: string[] }>(
+      `/batch/duplicate-version-scan/tasks/${taskId}/permanent-delete`, { result_ids: resultIds, delete_files: deleteFiles },
     ).then(r => r.data),
 
   // Async duplicate version delete
