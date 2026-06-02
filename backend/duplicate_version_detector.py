@@ -530,20 +530,22 @@ def _find_groups_in_pool(pool):
     return groups, stats
 
 
-def _batch_load_images(sess):
-    """Load all active+confirmed images from enabled scan roots, grouped by
-    (barcode, image_type, folder_ctime), ordered by sequence then filename.
-    Returns dict: {(barcode, image_type, folder_ctime): [Image, ...]}"""
-    all_imgs = sess.query(Image).filter(
+def _load_images_for_group(sess, barcode, image_type):
+    """Load active+confirmed images for one (barcode, image_type) group,
+    grouped by folder_ctime, ordered by sequence then filename.
+    Returns dict: {folder_ctime: [Image, ...]}"""
+    imgs = sess.query(Image).filter(
+        Image.barcode == barcode,
+        Image.image_type == image_type,
         Image.status == 'active',
         Image.confirmed == True,
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
         ScanRoot.enabled == True,
-    ).order_by(Image.barcode, Image.image_type, Image.folder_ctime, Image.sequence, Image.filename).all()
+    ).order_by(Image.folder_ctime, Image.sequence, Image.filename).all()
 
     grouped = defaultdict(list)
-    for img in all_imgs:
-        grouped[(img.barcode, img.image_type, img.folder_ctime)].append(img)
+    for img in imgs:
+        grouped[img.folder_ctime].append(img)
     return grouped
 
 
@@ -576,10 +578,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
 
     total_versions = len(versions)
 
-    # Batch-load all images once (avoids N+1 queries)
-    images_by_key = _batch_load_images(sess)
-
-    # Group by (barcode, image_type)
+    # Group versions by (barcode, image_type)
     by_barcode_type = defaultdict(list)
     for v in versions:
         by_barcode_type[(v.barcode, v.image_type)].append(v)
@@ -593,6 +592,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
     total_sample_rejected = 0
     total_actual_comparisons = 0
     total_exact_duplicates_skipped = 0
+    max_images_in_group = 0
     last_progress_time = start_time
 
     for (barcode, image_type), vers in by_barcode_type.items():
@@ -604,10 +604,16 @@ def detect_duplicate_versions(sess, progress_callback=None):
             progress_callback(current=processed, total=total_groups)
             last_progress_time = now
 
-        # Build version data from batch-loaded images
+        # Load images only for this barcode/image_type group
+        imgs_by_ctime = _load_images_for_group(sess, barcode, image_type)
+        group_img_count = sum(len(v) for v in imgs_by_ctime.values())
+        if group_img_count > max_images_in_group:
+            max_images_in_group = group_img_count
+
+        # Build version_data from per-group images
         version_data = []
         for v in vers:
-            imgs = images_by_key.get((barcode, image_type, v.folder_ctime), [])
+            imgs = imgs_by_ctime.get(v.folder_ctime, [])
             if not imgs:
                 continue
             count, total_size = _compute_version_stats(imgs)
@@ -651,11 +657,13 @@ def detect_duplicate_versions(sess, progress_callback=None):
 
     elapsed = time.monotonic() - start_time
     _log.info(
-        "DuplicateVersionScan: versions=%d pools=%d candidate_pairs=%d "
-        "sample_rejected=%d actual_comparisons=%d exact_duplicates_skipped=%d "
-        "groups=%d elapsed=%.1fs",
-        total_versions, total_pools, total_candidate_pairs,
-        total_sample_rejected, total_actual_comparisons,
-        total_exact_duplicates_skipped, len(all_groups), elapsed,
+        "DuplicateVersionScan: versions=%d groups=%d pools=%d "
+        "candidate_pairs=%d sample_rejected=%d actual_comparisons=%d "
+        "exact_duplicates_skipped=%d max_imgs_in_group=%d "
+        "duplicate_groups=%d elapsed=%.1fs",
+        total_versions, total_groups, total_pools,
+        total_candidate_pairs, total_sample_rejected, total_actual_comparisons,
+        total_exact_duplicates_skipped, max_images_in_group,
+        len(all_groups), elapsed,
     )
     return all_groups
