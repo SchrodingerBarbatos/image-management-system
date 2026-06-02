@@ -68,13 +68,17 @@ def are_duplicate_versions(imgs_a, imgs_b):
 
 def sample_indices(count):
     """Return fixed sample indices for pre-filtering.
-    Samples: first (0), middle (count // 2), last (count - 1).
+    Samples: first (0), 25%, middle (count // 2), 75%, last (count - 1).
+    25% and 75% are included when count >= 4.
     Deduplicated and sorted. No random sampling.
     """
     if count <= 0:
         return []
-    indices = sorted({0, count // 2, count - 1})
-    return indices
+    indices = {0, count // 2, count - 1}
+    if count >= 4:
+        indices.add(count // 4)
+        indices.add(3 * count // 4)
+    return sorted(indices)
 
 
 def passes_sample_filter(imgs_a, imgs_b):
@@ -244,23 +248,21 @@ def _mi_hash_candidates_for_position(position_data):
 def _mi_hash_candidates(sample_sigs):
     """Multi-index hashing to find candidate pairs within hamming distance.
 
-    Runs MI hash independently per sampled position with per-position threshold,
-    then unions all candidates. This correctly handles the case where each
-    position can differ by up to PHASH_THRESHOLD bits independently.
+    Runs MI hash independently per sampled position with per-position threshold.
+    Returns per-position candidate sets for multi-position filtering.
 
     Args:
         sample_sigs: list of (idx, sig_string) where sig is '|' joined 'p:hex' or 'm:hex'
 
     Returns:
-        set of (i, j) pairs with i < j that are candidate matches
+        list of set, one per sampled position. Each set contains (i, j) pairs with i < j.
     """
     if len(sample_sigs) < 2:
-        return set()
+        return []
 
     # Parse into per-position data
-    # sig format: 'p:hex1|p:hex2|p:hex3' (one segment per sampled position)
     num_positions = len(sample_sigs[0][1].split('|'))
-    all_candidates = set()
+    per_position = []
 
     for pos in range(num_positions):
         position_data = []
@@ -273,9 +275,9 @@ def _mi_hash_candidates(sample_sigs):
                 position_data.append((hash_type, idx, val, bit_width))
 
         pos_candidates = _mi_hash_candidates_for_position(position_data)
-        all_candidates.update(pos_candidates)
+        per_position.append(pos_candidates)
 
-    return all_candidates
+    return per_position
 
 
 def _get_ordered_images(sess, barcode, image_type, folder_ctime):
@@ -367,6 +369,7 @@ def _find_groups_in_pool(pool):
     - Exact content_hash duplicate skipping (handled by duplicate-folder)
     - Signature bucketing for exact matches
     - Multi-index hashing on sampled positions for perceptual candidates
+    - Multi-position filtering (require hits on multiple positions)
     - Sample filter + full comparison for verification
 
     Returns (groups, stats) where groups is a list of member-lists
@@ -374,8 +377,9 @@ def _find_groups_in_pool(pool):
     """
     if len(pool) < 2:
         return [], {
-            'candidate_pairs': 0, 'sample_filter_rejected': 0,
-            'actual_comparisons': 0, 'exact_duplicates_skipped': 0,
+            'candidate_pairs': 0, 'raw_mi_candidates': 0,
+            'sample_filter_rejected': 0, 'actual_comparisons': 0,
+            'exact_duplicates_skipped': 0,
         }
 
     # Pre-compute signatures and content hashes
@@ -388,13 +392,13 @@ def _find_groups_in_pool(pool):
     assigned = set()
     groups = []
     candidate_pairs = 0
+    raw_mi_candidates = 0
     sample_filter_rejected = 0
     actual_comparisons = 0
     exact_duplicates_skipped = 0
+    image_count = items[0][2]
 
     # --- Step 0: Skip exact content_hash duplicates ---
-    # Versions with identical content_hash are exact duplicates.
-    # These are already handled by the duplicate-folder feature.
     ch_groups = defaultdict(list)
     for idx, (v, imgs, cnt, ts, sig, ch) in enumerate(items):
         if ch:
@@ -440,7 +444,7 @@ def _find_groups_in_pool(pool):
     unassigned = [idx for idx in range(len(items)) if idx not in assigned]
     if len(unassigned) < 2:
         stats = {
-            'candidate_pairs': candidate_pairs,
+            'candidate_pairs': candidate_pairs, 'raw_mi_candidates': raw_mi_candidates,
             'sample_filter_rejected': sample_filter_rejected,
             'actual_comparisons': actual_comparisons,
             'exact_duplicates_skipped': exact_duplicates_skipped,
@@ -448,25 +452,38 @@ def _find_groups_in_pool(pool):
         return groups, stats
 
     # Build sample signatures for multi-index hashing (pHash-based)
-    sample_idxs = sample_indices(items[0][2])  # items[0][2] = image_count
+    sample_idxs = sample_indices(image_count)
     sample_sigs = []
     for idx in unassigned:
         imgs = items[idx][1]
         sig = _build_sample_signature(imgs, sample_idxs)
         sample_sigs.append((idx, sig))
 
-    # Find candidate pairs via multi-index hashing
-    mi_candidates = _mi_hash_candidates(sample_sigs)
+    # Find candidate pairs via multi-index hashing (per-position)
+    per_position_candidates = _mi_hash_candidates(sample_sigs)
+    num_positions = len(per_position_candidates)
+
+    # Multi-position filter: count how many positions each pair is a candidate in
+    # image_count <= 3: require >= 1 position hit
+    # image_count >= 4: require >= 2 position hits
+    min_position_hits = 2 if image_count >= 4 else 1
+    pair_position_hits = defaultdict(int)
+    for pos_candidates in per_position_candidates:
+        raw_mi_candidates += len(pos_candidates)
+        for pair in pos_candidates:
+            pair_position_hits[pair] += 1
+
+    mi_candidates = {pair for pair, hits in pair_position_hits.items()
+                     if hits >= min_position_hits}
     candidate_pairs = len(mi_candidates)
 
-    # Build adjacency list from MI hash candidates
+    # Build adjacency list from filtered MI hash candidates
     adj = defaultdict(set)
     for i, j in mi_candidates:
         adj[i].add(j)
         adj[j].add(i)
 
     # Also group by sampled MD5 values to catch cross-signature matches
-    # (versions with different pHash but same content_md5 at sampled positions)
     md5_sample_buckets = defaultdict(list)
     for idx in unassigned:
         imgs = items[idx][1]
@@ -503,7 +520,6 @@ def _find_groups_in_pool(pool):
         assigned.add(i_idx)
         members = [_make_member(v_i, cnt_i, ts_i)]
 
-        # Check all candidates adjacent to i_idx
         for j_idx in sorted(adj.get(i_idx, set())):
             if j_idx not in remaining:
                 continue
@@ -522,7 +538,7 @@ def _find_groups_in_pool(pool):
             groups.append(members)
 
     stats = {
-        'candidate_pairs': candidate_pairs,
+        'candidate_pairs': candidate_pairs, 'raw_mi_candidates': raw_mi_candidates,
         'sample_filter_rejected': sample_filter_rejected,
         'actual_comparisons': actual_comparisons,
         'exact_duplicates_skipped': exact_duplicates_skipped,
@@ -552,6 +568,9 @@ def _load_images_for_group(sess, barcode, image_type):
 def detect_duplicate_versions(sess, progress_callback=None):
     """Detect all duplicate versions across the database.
 
+    Streams versions per (barcode, image_type) group to avoid loading all
+    ImageVersion rows into memory at once.
+
     Returns a list of groups, each containing:
     {
         group_id: int,
@@ -572,30 +591,40 @@ def detect_duplicate_versions(sess, progress_callback=None):
     import time
     start_time = time.monotonic()
 
-    versions = sess.query(ImageVersion).all()
-    if not versions:
+    # Query distinct (barcode, image_type) groups — no full table load
+    distinct_groups = sess.query(
+        ImageVersion.barcode, ImageVersion.image_type
+    ).distinct().all()
+
+    if not distinct_groups:
         return []
 
-    total_versions = len(versions)
-
-    # Group versions by (barcode, image_type)
-    by_barcode_type = defaultdict(list)
-    for v in versions:
-        by_barcode_type[(v.barcode, v.image_type)].append(v)
-
-    total_groups = len(by_barcode_type)
+    total_groups = len(distinct_groups)
     processed = 0
     all_groups = []
     group_id = 0
+    total_versions = 0
     total_pools = 0
     total_candidate_pairs = 0
+    total_raw_mi_candidates = 0
     total_sample_rejected = 0
     total_actual_comparisons = 0
     total_exact_duplicates_skipped = 0
+    max_versions_in_group = 0
     max_images_in_group = 0
     last_progress_time = start_time
 
-    for (barcode, image_type), vers in by_barcode_type.items():
+    for barcode, image_type in distinct_groups:
+        # Load versions for this specific (barcode, image_type) group
+        vers = sess.query(ImageVersion).filter(
+            ImageVersion.barcode == barcode,
+            ImageVersion.image_type == image_type,
+        ).all()
+
+        total_versions += len(vers)
+        if len(vers) > max_versions_in_group:
+            max_versions_in_group = len(vers)
+
         processed += 1
 
         # Throttle progress updates: every 5 groups or every 1 second
@@ -634,6 +663,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
             total_pools += 1
             member_lists, stats = _find_groups_in_pool(count_pool)
             total_candidate_pairs += stats['candidate_pairs']
+            total_raw_mi_candidates += stats.get('raw_mi_candidates', 0)
             total_sample_rejected += stats['sample_filter_rejected']
             total_actual_comparisons += stats['actual_comparisons']
             total_exact_duplicates_skipped += stats.get('exact_duplicates_skipped', 0)
@@ -658,12 +688,14 @@ def detect_duplicate_versions(sess, progress_callback=None):
     elapsed = time.monotonic() - start_time
     _log.info(
         "DuplicateVersionScan: versions=%d groups=%d pools=%d "
-        "candidate_pairs=%d sample_rejected=%d actual_comparisons=%d "
-        "exact_duplicates_skipped=%d max_imgs_in_group=%d "
+        "raw_mi_candidates=%d filtered_candidates=%d "
+        "sample_rejected=%d actual_comparisons=%d "
+        "exact_skipped=%d max_versions=%d max_imgs=%d "
         "duplicate_groups=%d elapsed=%.1fs",
         total_versions, total_groups, total_pools,
-        total_candidate_pairs, total_sample_rejected, total_actual_comparisons,
-        total_exact_duplicates_skipped, max_images_in_group,
-        len(all_groups), elapsed,
+        total_raw_mi_candidates, total_candidate_pairs,
+        total_sample_rejected, total_actual_comparisons,
+        total_exact_duplicates_skipped, max_versions_in_group,
+        max_images_in_group, len(all_groups), elapsed,
     )
     return all_groups

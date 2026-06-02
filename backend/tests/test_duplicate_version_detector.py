@@ -154,22 +154,25 @@ class TestSampleIndices:
     def test_3_images(self):
         assert sample_indices(3) == [0, 1, 2]
 
-    def test_5_images(self):
-        assert sample_indices(5) == [0, 2, 4]
-
-    def test_9_images(self):
-        assert sample_indices(9) == [0, 4, 8]
-
-    def test_12_images(self):
-        assert sample_indices(12) == [0, 6, 11]
-
     def test_4_images(self):
-        # first=0, mid=2, last=3 → [0, 2, 3]
-        assert sample_indices(4) == [0, 2, 3]
+        # first=0, 25%=1, mid=2, 75%=3, last=3 → dedup → [0, 1, 2, 3]
+        assert sample_indices(4) == [0, 1, 2, 3]
+
+    def test_5_images(self):
+        # first=0, 25%=1, mid=2, 75%=3, last=4 → [0, 1, 2, 3, 4]
+        assert sample_indices(5) == [0, 1, 2, 3, 4]
 
     def test_6_images(self):
-        # first=0, mid=3, last=5 → [0, 3, 5]
-        assert sample_indices(6) == [0, 3, 5]
+        # first=0, 25%=1, mid=3, 75%=4, last=5 → [0, 1, 3, 4, 5]
+        assert sample_indices(6) == [0, 1, 3, 4, 5]
+
+    def test_9_images(self):
+        # first=0, 25%=2, mid=4, 75%=6, last=8 → [0, 2, 4, 6, 8]
+        assert sample_indices(9) == [0, 2, 4, 6, 8]
+
+    def test_12_images(self):
+        # first=0, 25%=3, mid=6, 75%=9, last=11 → [0, 3, 6, 9, 11]
+        assert sample_indices(12) == [0, 3, 6, 9, 11]
 
     def test_0_images(self):
         assert sample_indices(0) == []
@@ -213,16 +216,17 @@ class TestPassesSampleFilter:
     def test_sampled_same_but_others_different(self):
         """Sampled positions match but non-sampled differ → filter passes (True),
         but are_duplicate_versions would return False."""
+        # 9 images: sample_indices = [0, 2, 4, 6, 8]
+        # Make sampled positions match, non-sampled differ
         a = [_make_image(content_md5='a'), _make_image(content_md5='x'), _make_image(content_md5='c'),
              _make_image(content_md5='d'), _make_image(content_md5='e'), _make_image(content_md5='f'),
              _make_image(content_md5='g'), _make_image(content_md5='h'), _make_image(content_md5='i')]
         b = [_make_image(content_md5='a'), _make_image(content_md5='DIFF'), _make_image(content_md5='c'),
              _make_image(content_md5='DIFF'), _make_image(content_md5='e'), _make_image(content_md5='DIFF'),
              _make_image(content_md5='g'), _make_image(content_md5='DIFF'), _make_image(content_md5='i')]
-        # 9 images: sample_indices = [0, 4, 8] → all match
         passed, matched = passes_sample_filter(a, b)
         assert passed is True
-        assert matched == {0, 4, 8}
+        assert matched == {0, 2, 4, 6, 8}
         # But full comparison fails at index 1
         assert are_duplicate_versions(a, b) is False
 
@@ -388,73 +392,79 @@ class TestBuildSampleSignature:
 
 class TestMiHashCandidates:
     def test_empty_input(self):
-        assert _mi_hash_candidates([]) == set()
+        assert _mi_hash_candidates([]) == []
 
     def test_single_item(self):
-        assert _mi_hash_candidates([(0, 'p:aaaa')]) == set()
+        assert _mi_hash_candidates([(0, 'p:aaaa')]) == []
 
     def test_identical_signatures(self):
-        """Two items with identical signatures should be candidates."""
+        """Two items with identical signatures should be candidates in every position."""
         sig = 'p:0000000000000001|p:0000000000000001|p:0000000000000001'
         result = _mi_hash_candidates([(0, sig), (1, sig)])
-        assert (0, 1) in result
+        # 3 positions, each should have (0,1)
+        assert len(result) == 3
+        assert all((0, 1) in pos for pos in result)
 
     def test_very_different_signatures(self):
         """Signatures with very different pHash values should NOT be candidates."""
         sig_a = 'p:0000000000000000|p:0000000000000000|p:0000000000000000'
         sig_b = 'p:ffffffffffffffff|p:ffffffffffffffff|p:ffffffffffffffff'
         result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
-        # Distance is way above threshold
-        assert (0, 1) not in result
+        # No position should have candidates
+        assert all(len(pos) == 0 for pos in result)
 
     def test_similar_signatures_within_threshold(self):
-        """Signatures with pHash distance <= 5 should be candidates."""
-        # These differ by 3 bits in the last hex digit
+        """Signatures with pHash distance <= 5 should be candidates in that position."""
         sig_a = 'p:0000000000000001|p:0000000000000001|p:0000000000000001'
         sig_b = 'p:0000000000000006|p:0000000000000001|p:0000000000000001'
         result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
-        assert (0, 1) in result
+        # Position 0: distance 3 → candidate. Positions 1,2: identical → candidate.
+        assert all((0, 1) in pos for pos in result)
 
     def test_missing_phash_partial(self):
         """Items with some empty segments can still be candidates from other positions."""
         sig_a = '|p:bbbb|p:cccc'
         sig_b = '|p:bbbb|p:cccc'
         result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
-        # Position 0 is empty (skipped), but positions 1 and 2 match → candidates
-        assert (0, 1) in result
+        # 3 positions returned (one per segment), position 0 is empty
+        assert len(result) == 3
+        assert len(result[0]) == 0  # position 0: empty
+        assert (0, 1) in result[1]  # position 1: match
+        assert (0, 1) in result[2]  # position 2: match
 
     def test_all_positions_empty(self):
-        """Items with all empty segments produce no candidates."""
+        """Items with all empty segments produce no candidates in any position."""
         sig_a = '||'
         sig_b = '||'
         result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
-        assert len(result) == 0
+        assert len(result) == 3  # 3 positions returned
+        assert all(len(pos) == 0 for pos in result)
 
     def test_multiple_items_grouping(self):
-        """Three similar items should produce 3 candidate pairs."""
+        """Three similar items should produce 3 candidate pairs per position."""
         base = 'p:0000000000000001|p:0000000000000001|p:0000000000000001'
         close = 'p:0000000000000000|p:0000000000000001|p:0000000000000001'
         result = _mi_hash_candidates([(0, base), (1, close), (2, base)])
-        # (0,1), (0,2), (1,2) should all be candidates
+        # 3 positions, each should have 3 pairs
         assert len(result) == 3
+        for pos in result:
+            assert len(pos) == 3
 
     def test_boundary_distance_5(self):
         """Test at exact threshold boundary: distance = 5 bits per position."""
-        # 0x0000000000000000 vs 0x000000000000001f = 5 bits difference
         sig_a = 'p:0000000000000000|p:0000000000000000|p:0000000000000000'
         sig_b = 'p:000000000000001f|p:0000000000000000|p:0000000000000000'
         result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
-        # Distance 5 at position 0, distance 0 at positions 1 and 2
-        assert (0, 1) in result
+        assert (0, 1) in result[0]  # position 0: distance 5 → candidate
+        assert (0, 1) in result[1]  # position 1: identical → candidate
+        assert (0, 1) in result[2]  # position 2: identical → candidate
 
     def test_all_positions_max_distance(self):
         """All 3 positions at max threshold (5 bits each) should still be candidates."""
-        # Each position differs by exactly 5 bits
         sig_a = 'p:0000000000000000|p:0000000000000000|p:0000000000000000'
         sig_b = 'p:000000000000001f|p:000000000000001f|p:000000000000001f'
         result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
-        # Each position processed independently, each within threshold
-        assert (0, 1) in result
+        assert all((0, 1) in pos for pos in result)
 
 
 # ---------- pick_keep_version ----------
@@ -608,24 +618,25 @@ class TestFindGroupsInPool:
         assert 'exact_duplicates_skipped' in stats
 
     def test_multi_image_sample_filter_no_false_positive(self):
-        """Two versions with same first/mid/last but different other positions
+        """Two versions with same sampled positions but different non-sampled positions
         must NOT be grouped together. This is the critical end-to-end test
         ensuring sample filter only排除, never误判."""
-        # 6 images: sample_indices = [0, 3, 5] (first/mid/last)
+        # 6 images: sample_indices = [0, 1, 3, 4, 5]
+        # Only position 2 is NOT sampled
         imgs_a = [
             _make_image(content_md5='same'),   # 0 - sampled
-            _make_image(content_md5='a1'),      # 1
-            _make_image(content_md5='a2'),      # 2
+            _make_image(content_md5='same'),   # 1 - sampled
+            _make_image(content_md5='a2'),      # 2 - NOT sampled, different
             _make_image(content_md5='same'),   # 3 - sampled
-            _make_image(content_md5='a4'),      # 4
+            _make_image(content_md5='same'),   # 4 - sampled
             _make_image(content_md5='same'),   # 5 - sampled
         ]
         imgs_b = [
             _make_image(content_md5='same'),   # 0 - sampled
-            _make_image(content_md5='b1'),      # 1 - DIFFERENT
-            _make_image(content_md5='b2'),      # 2 - DIFFERENT
+            _make_image(content_md5='same'),   # 1 - sampled
+            _make_image(content_md5='b2'),      # 2 - NOT sampled, DIFFERENT
             _make_image(content_md5='same'),   # 3 - sampled
-            _make_image(content_md5='b4'),      # 4 - DIFFERENT
+            _make_image(content_md5='same'),   # 4 - sampled
             _make_image(content_md5='same'),   # 5 - sampled
         ]
         pool = [
