@@ -10,6 +10,8 @@ from duplicate_version_detector import (
     passes_sample_filter,
     are_duplicate_versions_skip_indices,
     _version_signature,
+    _build_sample_signature,
+    _mi_hash_candidates,
     _find_groups_in_pool,
     pick_keep_version,
 )
@@ -28,12 +30,13 @@ def _make_image(content_md5='', phash='', filename='img.jpg', sequence=0, file_s
     return img
 
 
-def _make_version(folder_ctime, version_label='v1', is_latest=False):
+def _make_version(folder_ctime, version_label='v1', is_latest=False, content_hash=''):
     """Create a mock ImageVersion object."""
     v = MagicMock()
     v.folder_ctime = folder_ctime
     v.version_label = version_label
     v.is_latest = is_latest
+    v.content_hash = content_hash
     return v
 
 
@@ -347,6 +350,113 @@ class TestVersionSignature:
         assert _version_signature(imgs_a) != _version_signature(imgs_b)
 
 
+# ---------- _build_sample_signature ----------
+
+class TestBuildSampleSignature:
+    def test_single_position(self):
+        imgs = [_make_image(phash='aaaa')]
+        sig = _build_sample_signature(imgs, [0])
+        assert sig == 'p:aaaa'
+
+    def test_multiple_positions(self):
+        imgs = [_make_image(phash='aaaa'), _make_image(phash='bbbb'), _make_image(phash='cccc')]
+        sig = _build_sample_signature(imgs, [0, 1, 2])
+        assert sig == 'p:aaaa|p:bbbb|p:cccc'
+
+    def test_subset_positions(self):
+        imgs = [_make_image(phash='aaaa'), _make_image(phash='bbbb'), _make_image(phash='cccc')]
+        sig = _build_sample_signature(imgs, [0, 2])
+        assert sig == 'p:aaaa|p:cccc'
+
+    def test_missing_phash(self):
+        imgs = [_make_image(phash=''), _make_image(phash='bbbb')]
+        sig = _build_sample_signature(imgs, [0, 1])
+        assert sig == '|p:bbbb'
+
+    def test_out_of_range_index(self):
+        imgs = [_make_image(phash='aaaa')]
+        sig = _build_sample_signature(imgs, [0, 5])
+        assert sig == 'p:aaaa|'
+
+    def test_md5_fallback(self):
+        imgs = [_make_image(content_md5='md5val', phash='')]
+        sig = _build_sample_signature(imgs, [0])
+        assert sig == 'm:md5val'
+
+
+# ---------- _mi_hash_candidates ----------
+
+class TestMiHashCandidates:
+    def test_empty_input(self):
+        assert _mi_hash_candidates([]) == set()
+
+    def test_single_item(self):
+        assert _mi_hash_candidates([(0, 'p:aaaa')]) == set()
+
+    def test_identical_signatures(self):
+        """Two items with identical signatures should be candidates."""
+        sig = 'p:0000000000000001|p:0000000000000001|p:0000000000000001'
+        result = _mi_hash_candidates([(0, sig), (1, sig)])
+        assert (0, 1) in result
+
+    def test_very_different_signatures(self):
+        """Signatures with very different pHash values should NOT be candidates."""
+        sig_a = 'p:0000000000000000|p:0000000000000000|p:0000000000000000'
+        sig_b = 'p:ffffffffffffffff|p:ffffffffffffffff|p:ffffffffffffffff'
+        result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
+        # Distance is way above threshold
+        assert (0, 1) not in result
+
+    def test_similar_signatures_within_threshold(self):
+        """Signatures with pHash distance <= 5 should be candidates."""
+        # These differ by 3 bits in the last hex digit
+        sig_a = 'p:0000000000000001|p:0000000000000001|p:0000000000000001'
+        sig_b = 'p:0000000000000006|p:0000000000000001|p:0000000000000001'
+        result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
+        assert (0, 1) in result
+
+    def test_missing_phash_partial(self):
+        """Items with some empty segments can still be candidates from other positions."""
+        sig_a = '|p:bbbb|p:cccc'
+        sig_b = '|p:bbbb|p:cccc'
+        result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
+        # Position 0 is empty (skipped), but positions 1 and 2 match → candidates
+        assert (0, 1) in result
+
+    def test_all_positions_empty(self):
+        """Items with all empty segments produce no candidates."""
+        sig_a = '||'
+        sig_b = '||'
+        result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
+        assert len(result) == 0
+
+    def test_multiple_items_grouping(self):
+        """Three similar items should produce 3 candidate pairs."""
+        base = 'p:0000000000000001|p:0000000000000001|p:0000000000000001'
+        close = 'p:0000000000000000|p:0000000000000001|p:0000000000000001'
+        result = _mi_hash_candidates([(0, base), (1, close), (2, base)])
+        # (0,1), (0,2), (1,2) should all be candidates
+        assert len(result) == 3
+
+    def test_boundary_distance_5(self):
+        """Test at exact threshold boundary: distance = 5 bits per position."""
+        # 0x0000000000000000 vs 0x000000000000001f = 5 bits difference
+        sig_a = 'p:0000000000000000|p:0000000000000000|p:0000000000000000'
+        sig_b = 'p:000000000000001f|p:0000000000000000|p:0000000000000000'
+        result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
+        # Distance 5 at position 0, distance 0 at positions 1 and 2
+        assert (0, 1) in result
+
+    def test_all_positions_max_distance(self):
+        """All 3 positions at max threshold (5 bits each) should still be candidates."""
+        # Each position differs by exactly 5 bits
+        sig_a = 'p:0000000000000000|p:0000000000000000|p:0000000000000000'
+        sig_b = 'p:000000000000001f|p:000000000000001f|p:000000000000001f'
+        result = _mi_hash_candidates([(0, sig_a), (1, sig_b)])
+        # Each position processed independently, each within threshold
+        assert (0, 1) in result
+
+
 # ---------- pick_keep_version ----------
 
 class TestPickKeepVersion:
@@ -394,8 +504,8 @@ class TestFindGroupsInPool:
     def test_no_duplicates(self):
         """Different content → no groups."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='b')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='b')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
@@ -403,8 +513,8 @@ class TestFindGroupsInPool:
     def test_two_identical(self):
         """Same content → one group with 2 members."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
@@ -413,9 +523,9 @@ class TestFindGroupsInPool:
     def test_three_identical(self):
         """Three identical → one group with 3 members."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t3'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3', content_hash='h3'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
@@ -424,10 +534,10 @@ class TestFindGroupsInPool:
     def test_two_pairs(self):
         """Two separate duplicate pairs → two groups."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t3'), [_make_image(content_md5='b')], 1, 200),
-            (_make_version('t4'), [_make_image(content_md5='b')], 1, 200),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3', content_hash='h3'), [_make_image(content_md5='b')], 1, 200),
+            (_make_version('t4', content_hash='h4'), [_make_image(content_md5='b')], 1, 200),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 2
@@ -436,7 +546,7 @@ class TestFindGroupsInPool:
     def test_single_pool(self):
         """Pool with 1 item → no groups."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
@@ -445,8 +555,8 @@ class TestFindGroupsInPool:
         """Items with different signatures but matching via MD5 should be grouped.
         This happens when one has phash and the other doesn't, but MD5 matches."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='md5val', phash='phash1')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='md5val', phash='phash2')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='md5val', phash='phash1')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='md5val', phash='phash2')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         # Different signatures (p:phash1 vs p:phash2), but MD5 matches
@@ -455,28 +565,29 @@ class TestFindGroupsInPool:
     def test_multiple_images_short_circuit(self):
         """With multiple images, short-circuit on first mismatch."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a'), _make_image(content_md5='x')], 2, 100),
-            (_make_version('t2'), [_make_image(content_md5='a'), _make_image(content_md5='y')], 2, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a'), _make_image(content_md5='x')], 2, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a'), _make_image(content_md5='y')], 2, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
 
     def test_different_first_image_rejected_by_sample_filter(self):
-        """Different first image → rejected by sample filter (first is always sampled)."""
+        """Different first image → not candidates (different sample signatures),
+        so no comparison happens at all."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='b')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='b')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 0
-        assert stats['sample_filter_rejected'] >= 1
+        # Different MD5 → different sample signatures → not candidates → no comparison
         assert stats['actual_comparisons'] == 0
 
     def test_same_first_image_passes_sample_filter(self):
         """Same first image → sample filter passes → comparison happens."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
@@ -485,15 +596,16 @@ class TestFindGroupsInPool:
     def test_stats_tracking(self):
         """Verify stats are properly tracked."""
         pool = [
-            (_make_version('t1'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t2'), [_make_image(content_md5='a')], 1, 100),
-            (_make_version('t3'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3', content_hash='h3'), [_make_image(content_md5='a')], 1, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
         assert len(groups[0]) == 3
         assert 'candidate_pairs' in stats
         assert 'actual_comparisons' in stats
+        assert 'exact_duplicates_skipped' in stats
 
     def test_multi_image_sample_filter_no_false_positive(self):
         """Two versions with same first/mid/last but different other positions
@@ -517,8 +629,8 @@ class TestFindGroupsInPool:
             _make_image(content_md5='same'),   # 5 - sampled
         ]
         pool = [
-            (_make_version('t1'), imgs_a, 6, 100),
-            (_make_version('t2'), imgs_b, 6, 100),
+            (_make_version('t1', content_hash='h1'), imgs_a, 6, 100),
+            (_make_version('t2', content_hash='h2'), imgs_b, 6, 100),
         ]
         groups, stats = _find_groups_in_pool(pool)
         # Must NOT be grouped — non-sampled positions differ
@@ -545,8 +657,8 @@ class TestFindGroupsInPool:
         ]
         # Different signatures (different phash) → cross-signature path
         pool = [
-            (_make_version('t1'), imgs_a, 3, 100),
-            (_make_version('t2'), imgs_b, 3, 200),  # different file_size too
+            (_make_version('t1', content_hash='h1'), imgs_a, 3, 100),
+            (_make_version('t2', content_hash='h2'), imgs_b, 3, 200),  # different file_size too
         ]
         groups, stats = _find_groups_in_pool(pool)
         # Must be grouped — pHash distance <= 5 means are_same_image = True
@@ -560,8 +672,8 @@ class TestFindGroupsInPool:
         imgs_b = [_make_image(content_md5='a'), _make_image(content_md5='b')]
         # Same signature → first pass handles this, but verify anyway
         pool = [
-            (_make_version('t1'), imgs_a, 2, 100000),   # size_bucket = 1
-            (_make_version('t2'), imgs_b, 2, 200000),   # size_bucket = 3
+            (_make_version('t1', content_hash='h1'), imgs_a, 2, 100000),   # size_bucket = 1
+            (_make_version('t2', content_hash='h2'), imgs_b, 2, 200000),   # size_bucket = 3
         ]
         groups, stats = _find_groups_in_pool(pool)
         assert len(groups) == 1
@@ -587,10 +699,73 @@ class TestFindGroupsInPool:
             _make_image(content_md5='', phash='e0e0e0e0e0e0e0e7'),
         ]
         pool = [
-            (_make_version('t1'), imgs_a, 5, 500),
-            (_make_version('t2'), imgs_b, 5, 700),
+            (_make_version('t1', content_hash='h1'), imgs_a, 5, 500),
+            (_make_version('t2', content_hash='h2'), imgs_b, 5, 700),
         ]
         groups, stats = _find_groups_in_pool(pool)
         # Must be grouped — all images have pHash distance <= 5
         assert len(groups) == 1
         assert len(groups[0]) == 2
+
+
+# ---------- exact duplicate skipping ----------
+
+class TestExactDuplicateSkipping:
+    def test_same_content_hash_skipped(self):
+        """Versions with identical content_hash are exact duplicates and should
+        be skipped (handled by duplicate-folder feature)."""
+        pool = [
+            (_make_version('t1', content_hash='same_hash'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='same_hash'), [_make_image(content_md5='a')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 0
+        assert stats['exact_duplicates_skipped'] == 2
+
+    def test_different_content_hash_not_skipped(self):
+        """Versions with different content_hash should still be compared."""
+        pool = [
+            (_make_version('t1', content_hash='hash_a'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='hash_b'), [_make_image(content_md5='a')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 1
+        assert stats['exact_duplicates_skipped'] == 0
+
+    def test_empty_content_hash_not_skipped(self):
+        """Versions with empty content_hash should not be treated as exact duplicates."""
+        pool = [
+            (_make_version('t1', content_hash=''), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash=''), [_make_image(content_md5='a')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # Empty content_hash → not treated as exact duplicate → still compared
+        assert len(groups) == 1
+        assert stats['exact_duplicates_skipped'] == 0
+
+    def test_mixed_content_hash_groups(self):
+        """Mix of exact duplicates and perceptual duplicates."""
+        # 3 versions: t1 and t2 have same content_hash, t3 has different
+        # t1 and t3 are perceptual duplicates (same MD5)
+        pool = [
+            (_make_version('t1', content_hash='same'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='same'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3', content_hash='diff'), [_make_image(content_md5='a')], 1, 100),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        # t1 and t2 skipped (exact duplicates). t3 is unassigned but alone.
+        assert stats['exact_duplicates_skipped'] == 2
+
+    def test_multiple_duplicate_groups_same_barcode(self):
+        """Multiple duplicate groups under same barcode/type but different content_hash."""
+        # Group 1: t1, t2 with same MD5
+        # Group 2: t3, t4 with same MD5 (different from group 1)
+        pool = [
+            (_make_version('t1', content_hash='h1'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t2', content_hash='h2'), [_make_image(content_md5='a')], 1, 100),
+            (_make_version('t3', content_hash='h3'), [_make_image(content_md5='b')], 1, 200),
+            (_make_version('t4', content_hash='h4'), [_make_image(content_md5='b')], 1, 200),
+        ]
+        groups, stats = _find_groups_in_pool(pool)
+        assert len(groups) == 2
+        assert all(len(g) == 2 for g in groups)
