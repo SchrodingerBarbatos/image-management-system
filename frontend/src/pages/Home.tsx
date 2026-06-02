@@ -11,6 +11,7 @@ const ScanManager = React.lazy(() => import('../components/ScanManager'));
 const PendingList = React.lazy(() => import('../components/PendingList'));
 const BatchOperations = React.lazy(() => import('../components/BatchOperations'));
 const ExportDialog = React.lazy(() => import('../components/ExportDialog'));
+const LogDialog = React.lazy(() => import('../components/LogDialog'));
 
 const LazyFallback: React.FC = () => (
   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 48 }}>
@@ -61,6 +62,7 @@ const Home: React.FC = () => {
   const [pendingVisible, setPendingVisible] = useState(false);
   const [batchVisible, setBatchVisible] = useState(false);
   const [exportVisible, setExportVisible] = useState(false);
+  const [logVisible, setLogVisible] = useState(false);
 
   const fetchBarcodes = useCallback(() => {
     setLoading(true);
@@ -184,6 +186,7 @@ const Home: React.FC = () => {
           onExportExcel={() => setExportVisible(true)}
           onOpenBatch={() => setBatchVisible(true)}
           onOpenPending={() => setPendingVisible(true)}
+          onOpenLogManager={() => setLogVisible(true)}
           pendingCount={pendingCount}
         />
 
@@ -242,6 +245,9 @@ const Home: React.FC = () => {
       </Suspense>
       <Suspense fallback={<LazyFallback />}>
         {exportVisible && <ExportDialog visible={exportVisible} onClose={() => setExportVisible(false)} />}
+      </Suspense>
+      <Suspense fallback={<LazyFallback />}>
+        {logVisible && <LogDialog visible={logVisible} onClose={() => setLogVisible(false)} />}
       </Suspense>
 
       {deletePolling.polling && deletePolling.currentTask && (

@@ -381,6 +381,7 @@ from routes.pending import pending_bp
 from routes.batch import batch_bp
 from routes.batch_tasks import batch_tasks_bp
 from routes.rejected import rejected_bp
+from routes.settings import settings_bp
 
 app.register_blueprint(scan_bp, url_prefix='/api')
 app.register_blueprint(images_bp, url_prefix='/api')
@@ -389,6 +390,7 @@ app.register_blueprint(pending_bp, url_prefix='/api')
 app.register_blueprint(batch_bp, url_prefix='/api')
 app.register_blueprint(batch_tasks_bp, url_prefix='/api')
 app.register_blueprint(rejected_bp, url_prefix='/api/rejected-barcodes')
+app.register_blueprint(settings_bp, url_prefix='/api')
 
 
 def _get_icon_path():
@@ -485,16 +487,24 @@ def start_tray(port, open_browser_on_start=True):
     import pystray
     from PIL import Image as PILImage
     import webbrowser
+    from config import LOG_DIR
 
     # Set up file logging since --windowed suppresses console output
-    log_dir = os.path.dirname(DB_PATH)
-    log_file = os.path.join(log_dir, 'image-manager.log')
+    log_file = os.path.join(LOG_DIR, 'app.log')
     logging.basicConfig(
         filename=log_file,
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     )
     logger = logging.getLogger(__name__)
+
+    # Restore debug mode handler if it was enabled
+    from config import load_config
+    cfg = load_config()
+    if cfg.get('debug_mode', False):
+        from routes.settings import _ensure_debug_handler
+        _ensure_debug_handler()
+        logger.info("调试模式已恢复开启状态")
 
     # Cleanup old export tasks on startup
     _cleanup_exports_on_startup()
@@ -589,6 +599,12 @@ if __name__ == '__main__':
             _cleanup_exports_on_startup()
             _ensure_firewall_rule(port)
             _configure_cors(app, port)
+            # Restore debug mode handler if it was enabled
+            from config import load_config
+            cfg = load_config()
+            if cfg.get('debug_mode', False):
+                from routes.settings import _ensure_debug_handler
+                _ensure_debug_handler()
             if args.open_browser:
                 import webbrowser
                 threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()

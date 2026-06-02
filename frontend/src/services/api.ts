@@ -473,3 +473,30 @@ export const rejectedBarcodeApi = {
     api.get<RejectedBarcodeStats>('/rejected-barcodes/stats').then(r => r.data),
 };
 
+
+// ---------- Settings / Debug Mode ----------
+
+export interface LogFileInfo {
+  name: string;
+  size: number;
+  modified: number;
+}
+
+export interface LogDirInfo {
+  log_dir: string;
+  files: LogFileInfo[];
+}
+
+export const settingsApi = {
+  getDebugMode: () =>
+    api.get<{ debug_mode: boolean }>('/settings/debug-mode').then(r => r.data),
+  setDebugMode: (debugMode: boolean) =>
+    api.put<{ debug_mode: boolean; message: string }>('/settings/debug-mode', { debug_mode: debugMode }).then(r => r.data),
+  getLogDir: () =>
+    api.get<LogDirInfo>('/settings/log-dir').then(r => r.data),
+  clearLogs: () =>
+    api.post<{ cleared_count: number; failed: string[] }>('/settings/clear-logs').then(r => r.data),
+  openLogDir: () =>
+    api.post<{ ok: boolean }>('/settings/open-log-dir').then(r => r.data),
+};
+

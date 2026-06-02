@@ -398,6 +398,8 @@ def _find_groups_in_pool(pool):
     exact_duplicates_skipped = 0
     image_count = items[0][2]
 
+    _log.debug("Pool: %d versions, image_count=%d", len(pool), image_count)
+
     # --- Step 0: Skip exact content_hash duplicates ---
     ch_groups = defaultdict(list)
     for idx, (v, imgs, cnt, ts, sig, ch) in enumerate(items):
@@ -476,6 +478,7 @@ def _find_groups_in_pool(pool):
     mi_candidates = {pair for pair, hits in pair_position_hits.items()
                      if hits >= min_position_hits}
     candidate_pairs = len(mi_candidates)
+    _log.debug("MI hash: raw=%d filtered=%d (min_hits=%d)", raw_mi_candidates, candidate_pairs, min_position_hits)
 
     # Build adjacency list from filtered MI hash candidates
     adj = defaultdict(set)
@@ -543,6 +546,8 @@ def _find_groups_in_pool(pool):
         'actual_comparisons': actual_comparisons,
         'exact_duplicates_skipped': exact_duplicates_skipped,
     }
+    _log.debug("Pool result: %d groups, %d actual_comparisons, %d sample_rejected, %d exact_skipped",
+               len(groups), actual_comparisons, sample_filter_rejected, exact_duplicates_skipped)
     return groups, stats
 
 
@@ -600,6 +605,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
         return []
 
     total_groups = len(distinct_groups)
+    _log.debug("DuplicateVersionScan: processing %d distinct (barcode, image_type) groups", total_groups)
 
     # --- Diagnostics: image_type counts for ImageVersion ---
     from sqlalchemy import func
@@ -657,6 +663,8 @@ def detect_duplicate_versions(sess, progress_callback=None):
         # Load images only for this barcode/image_type group
         imgs_by_ctime = _load_images_for_group(sess, barcode, image_type)
         group_img_count = sum(len(v) for v in imgs_by_ctime.values())
+        _log.debug("Group %s/%s: %d versions, %d images, %d folders",
+                   barcode, image_type, len(vers), group_img_count, len(imgs_by_ctime))
         if group_img_count > max_images_in_group:
             max_images_in_group = group_img_count
 
@@ -682,6 +690,7 @@ def detect_duplicate_versions(sess, progress_callback=None):
                 continue
 
             total_pools += 1
+            _log.debug("  Image count %d: %d versions in pool", count, len(count_pool))
             member_lists, stats = _find_groups_in_pool(count_pool)
             total_candidate_pairs += stats['candidate_pairs']
             total_raw_mi_candidates += stats.get('raw_mi_candidates', 0)
@@ -694,6 +703,8 @@ def detect_duplicate_versions(sess, progress_callback=None):
                 members[keep_idx]['role'] = 'keep'
                 members[keep_idx]['keep_reason'] = reason
                 group_id += 1
+                _log.debug("  Duplicate group #%d: %s/%s count=%d members=%d",
+                           group_id, barcode, image_type, count, len(members))
                 all_groups.append({
                     'group_id': group_id,
                     'barcode': barcode,

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Input, Button, Space } from 'antd';
-import { SearchOutlined, ScanOutlined, ExportOutlined, WarningOutlined, ToolOutlined } from '@ant-design/icons';
+import { SearchOutlined, ScanOutlined, ExportOutlined, WarningOutlined, ToolOutlined, FileTextOutlined } from '@ant-design/icons';
 
 interface Props {
   onSearch: (barcode: string) => void;
@@ -8,10 +8,11 @@ interface Props {
   onExportExcel: () => void;
   onOpenBatch: () => void;
   onOpenPending: () => void;
+  onOpenLogManager: () => void;
   pendingCount?: number;
 }
 
-const SearchBar: React.FC<Props> = ({ onSearch, onOpenScanManager, onExportExcel, onOpenBatch, onOpenPending, pendingCount }) => {
+const SearchBar: React.FC<Props> = ({ onSearch, onOpenScanManager, onExportExcel, onOpenBatch, onOpenPending, onOpenLogManager, pendingCount }) => {
   return (
     <Space wrap style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
       <Space>
@@ -30,6 +31,7 @@ const SearchBar: React.FC<Props> = ({ onSearch, onOpenScanManager, onExportExcel
         <Button icon={<WarningOutlined />} onClick={onOpenPending} danger={!!pendingCount}>
           待确认 {pendingCount ? `(${pendingCount})` : ''}
         </Button>
+        <Button icon={<FileTextOutlined />} onClick={onOpenLogManager}>日志管理</Button>
       </Space>
     </Space>
   );
