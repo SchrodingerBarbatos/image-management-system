@@ -51,7 +51,8 @@ def generate_thumbnail(image_id, source_path):
         # Compute pHash from the full-resolution image before thumbnailing
         try:
             phash_hex = str(imagehash.phash(img))
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to generate pHash for %s: %s", source_path, e)
             phash_hex = ''
 
         # thumbnail() before convert() so JPEG draft mode can decode at reduced resolution

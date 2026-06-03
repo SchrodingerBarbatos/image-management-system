@@ -129,7 +129,7 @@ def parse_filename(filename, fuzzy_image_type='main'):
         return {
             'barcode': m.group(1),
             'image_type': fuzzy_image_type,
-            'sequence': int(m.group(3)),
+            'sequence': int(m.group(2)),
             'ext': m.group(3).lower(),
             'match_type': 'strict',
             'confirmed': True,

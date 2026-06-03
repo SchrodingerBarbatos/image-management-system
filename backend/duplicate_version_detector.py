@@ -9,6 +9,7 @@ efficiently, avoiding O(n²) all-pairs comparison.
 Exact duplicate content (identical content_hash) is skipped — that is already
 handled by the separate duplicate-folder feature.
 """
+import os
 import logging
 from collections import defaultdict
 from models import Image, ImageVersion, ScanRoot
@@ -757,6 +758,66 @@ def _load_images_for_group(sess, barcode, image_type):
     return grouped
 
 
+def _backfill_missing_phash(sess):
+    """Backfill missing phash/content_md5 for active confirmed images.
+    Also generates thumbnails as a side effect (uses generate_thumbnail).
+    Returns (success_count, fail_count) so the caller can report results."""
+    from thumbnail import generate_thumbnail
+    from scanner import _flush_hash_updates_core
+
+    candidates = sess.query(Image).filter(
+        Image.status == 'active',
+        Image.confirmed == True,
+        (Image.phash == '') | (Image.phash == None),
+    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+        ScanRoot.enabled == True,
+    ).yield_per(500)
+
+    md5_updates = {}
+    phash_updates = {}
+    success_count = 0
+    fail_count = 0
+    processed = 0
+
+    for img in candidates:
+        try:
+            file_path = img.file_path
+            if not file_path or not os.path.exists(file_path):
+                fail_count += 1
+                continue
+
+            _, md5, phash = generate_thumbnail(img.id, file_path)
+            if md5:
+                md5_updates[img.id] = md5
+            if phash:
+                phash_updates[img.id] = phash
+                success_count += 1
+            else:
+                fail_count += 1
+
+            if len(md5_updates) >= 100:
+                _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
+                md5_updates.clear()
+                phash_updates.clear()
+
+        except Exception as e:
+            _log.warning("pHash backfill: failed for image %d: %s", img.id, e)
+            fail_count += 1
+
+        processed += 1
+        if processed % 500 == 0:
+            _log.info("pHash backfill progress: %d processed, %d success, %d failed",
+                      processed, success_count, fail_count)
+
+    if md5_updates or phash_updates:
+        _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
+
+    sess.commit()
+    _log.info("pHash backfill complete: %d processed, %d success, %d failed",
+              processed, success_count, fail_count)
+    return success_count, fail_count
+
+
 def detect_duplicate_versions(sess, progress_callback=None):
     """Detect all duplicate versions across the database.
 
@@ -814,6 +875,27 @@ def detect_duplicate_versions(sess, progress_callback=None):
     ).group_by(Image.image_type).all()
     _log.info("DuplicateVersionScan diagnostics: active images with empty phash by type: %s",
               {t: c for t, c in empty_phash_counts})
+    total_empty_phash = sum(c for _, c in empty_phash_counts)
+    if total_empty_phash > 0:
+        _log.info("Auto-backfilling pHash for %d images before scan...", total_empty_phash)
+        ok, fail = _backfill_missing_phash(sess)
+        _log.info("pHash backfill done: %d success, %d failed", ok, fail)
+        # Re-query after backfill
+        empty_phash_counts = sess.query(
+            Image.image_type, func.count(Image.id)
+        ).filter(
+            Image.status == 'active',
+            Image.confirmed == True,
+            (Image.phash == '') | (Image.phash == None),
+        ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
+            ScanRoot.enabled == True,
+        ).group_by(Image.image_type).all()
+        remaining = sum(c for _, c in empty_phash_counts)
+        if remaining > 0:
+            _log.warning(
+                "After backfill, %d active images still have no pHash (files missing or unreadable).",
+                remaining,
+            )
     processed = 0
     all_groups = []
     group_id = 0
