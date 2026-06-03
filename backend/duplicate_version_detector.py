@@ -758,6 +758,76 @@ def _load_images_for_group(sess, barcode, image_type):
     return grouped
 
 
+def _ensure_phash_for_group(sess, images):
+    """Lazily compute pHash for images that are missing it.
+
+    Only called for images in groups with version_count >= 2, so pHash
+    is only computed when it will actually participate in duplicate detection.
+
+    Uses content_md5 as preferred fallback when pHash generation fails.
+    Failed images are logged and skipped (not fatal).
+
+    Args:
+        sess: SQLAlchemy session (for batch flush).
+        images: list of Image objects (modified in-place — phash attribute updated).
+
+    Returns:
+        (computed_count, failed_count)
+    """
+    from thumbnail import generate_thumbnail
+    from scanner import _flush_hash_updates_core
+
+    missing = [img for img in images if not (img.phash or '')]
+    if not missing:
+        return 0, 0
+
+    md5_updates = {}
+    phash_updates = {}
+    computed = 0
+    failed = 0
+    did_flush = False
+
+    for img in missing:
+        # Already has content_md5 — pHash is optional for exact-match fallback
+        # Still try to compute pHash for perceptual comparison
+        file_path = img.file_path
+        if not file_path or not os.path.exists(file_path):
+            _log.debug("On-demand pHash: skip image %d (file missing: %s)", img.id, file_path)
+            failed += 1
+            continue
+        try:
+            _, md5, phash = generate_thumbnail(img.id, file_path)
+            if phash:
+                img.phash = phash  # update in-memory for immediate use
+                phash_updates[img.id] = phash
+                computed += 1
+            else:
+                _log.debug("On-demand pHash: no pHash returned for image %d", img.id)
+                failed += 1
+            if md5 and not img.content_md5:
+                md5_updates[img.id] = md5
+            if len(phash_updates) + len(md5_updates) >= 100:
+                _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
+                md5_updates.clear()
+                phash_updates.clear()
+                did_flush = True
+        except Exception as e:
+            _log.warning("On-demand pHash: failed for image %d: %s", img.id, e)
+            failed += 1
+
+    if md5_updates or phash_updates:
+        _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
+        did_flush = True
+
+    # Use flush (not commit) to avoid expiring ORM objects in the identity map.
+    # The caller's transaction scope handles final commit/rollback.
+    if did_flush:
+        sess.flush()
+    _log.debug("On-demand pHash: %d computed, %d failed (out of %d missing)",
+               computed, failed, len(missing))
+    return computed, failed
+
+
 def _backfill_missing_phash(sess, total=None, progress_callback=None):
     """Backfill missing phash/content_md5 for active confirmed images.
     Also generates thumbnails as a side effect (uses generate_thumbnail).
@@ -883,43 +953,9 @@ def detect_duplicate_versions(sess, progress_callback=None):
     _log.info("DuplicateVersionScan diagnostics: ImageVersion counts by type: %s",
               {t: c for t, c in type_counts})
 
-    # --- Diagnostics: active confirmed images with empty phash by image_type ---
-    empty_phash_counts = sess.query(
-        Image.image_type, func.count(Image.id)
-    ).filter(
-        Image.status == 'active',
-        Image.confirmed == True,
-        (Image.phash == '') | (Image.phash == None),
-    ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-        ScanRoot.enabled == True,
-    ).group_by(Image.image_type).all()
-    _log.info("DuplicateVersionScan diagnostics: active images with empty phash by type: %s",
-              {t: c for t, c in empty_phash_counts})
-    total_empty_phash = sum(c for _, c in empty_phash_counts)
-    if total_empty_phash > 0:
-        _log.info("Auto-backfilling pHash for %d images before scan...", total_empty_phash)
-        ok, fail = _backfill_missing_phash(sess, total=total_empty_phash,
-                                            progress_callback=progress_callback)
-        _log.info("pHash backfill done: %d success, %d failed", ok, fail)
-        # Re-query after backfill
-        empty_phash_counts = sess.query(
-            Image.image_type, func.count(Image.id)
-        ).filter(
-            Image.status == 'active',
-            Image.confirmed == True,
-            (Image.phash == '') | (Image.phash == None),
-        ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
-            ScanRoot.enabled == True,
-        ).group_by(Image.image_type).all()
-        remaining = sum(c for _, c in empty_phash_counts)
-        if remaining > 0:
-            _log.warning(
-                "After backfill, %d active images still have no pHash (files missing or unreadable).",
-                remaining,
-            )
-    # Reset progress to scan phase baseline (may overwrite backfill final state)
-    if progress_callback:
-        progress_callback(current=0, total=total_groups)
+    # Note: pHash is computed on-demand for images in groups with >= 2 versions,
+    # not via a full-database backfill. See _ensure_phash_for_group().
+
     processed = 0
     all_groups = []
     group_id = 0
@@ -931,6 +967,8 @@ def detect_duplicate_versions(sess, progress_callback=None):
     total_actual_comparisons = 0
     total_exact_duplicates_skipped = 0
     total_strong_mi_bypassed = 0
+    total_phash_computed = 0
+    total_phash_failed = 0
     max_versions_in_group = 0
     max_images_in_group = 0
     last_progress_time = start_time
@@ -973,6 +1011,18 @@ def detect_duplicate_versions(sess, progress_callback=None):
 
         if len(version_data) < 2:
             continue
+
+        # On-demand pHash: only compute for images in this multi-version group.
+        # Single-version groups have no comparison target, so pHash is useless.
+        all_images = []
+        for _, imgs, _, _ in version_data:
+            all_images.extend(imgs)
+        computed, failed = _ensure_phash_for_group(sess, all_images)
+        total_phash_computed += computed
+        total_phash_failed += failed
+        if failed > 0:
+            _log.warning("On-demand pHash: %s/%s — %d computed, %d failed",
+                         barcode, image_type, computed, failed)
 
         # Group by image_count — only compare within same count
         by_count = defaultdict(list)
@@ -1023,13 +1073,16 @@ def detect_duplicate_versions(sess, progress_callback=None):
         "DuplicateVersionScan: versions=%d groups=%d pools=%d "
         "raw_mi_candidates=%d filtered_candidates=%d "
         "sample_rejected=%d strong_mi_bypassed=%d actual_comparisons=%d "
-        "exact_skipped=%d max_versions=%d max_imgs=%d "
+        "exact_skipped=%d on_demand_phash=%d/%d "
+        "max_versions=%d max_imgs=%d "
         "duplicate_groups=%d elapsed=%.1fs",
         total_versions, total_groups, total_pools,
         total_raw_mi_candidates, total_candidate_pairs,
         total_sample_rejected, total_strong_mi_bypassed,
         total_actual_comparisons,
-        total_exact_duplicates_skipped, max_versions_in_group,
+        total_exact_duplicates_skipped,
+        total_phash_computed, total_phash_failed,
+        max_versions_in_group,
         max_images_in_group, len(all_groups), elapsed,
     )
     _log.info("DuplicateVersionScan diagnostics: duplicate groups by type: %s",
