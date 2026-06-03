@@ -758,10 +758,15 @@ def _load_images_for_group(sess, barcode, image_type):
     return grouped
 
 
-def _backfill_missing_phash(sess):
+def _backfill_missing_phash(sess, total=None, progress_callback=None):
     """Backfill missing phash/content_md5 for active confirmed images.
     Also generates thumbnails as a side effect (uses generate_thumbnail).
-    Returns (success_count, fail_count) so the caller can report results."""
+    Returns (success_count, fail_count) so the caller can report results.
+
+    Args:
+        total: total number of images to backfill (for progress reporting).
+        progress_callback: optional callback(current=, total=) for progress updates.
+    """
     from thumbnail import generate_thumbnail
     from scanner import _flush_hash_updates_core
 
@@ -778,6 +783,10 @@ def _backfill_missing_phash(sess):
     success_count = 0
     fail_count = 0
     processed = 0
+
+    # Report initial progress so frontend shows 0/N instead of 0/0
+    if progress_callback and total:
+        progress_callback(current=0, total=total)
 
     for img in candidates:
         try:
@@ -808,11 +817,18 @@ def _backfill_missing_phash(sess):
         if processed % 500 == 0:
             _log.info("pHash backfill progress: %d processed, %d success, %d failed",
                       processed, success_count, fail_count)
+        # Report progress every 50 images to balance UI responsiveness and DB overhead
+        if progress_callback and total and processed % 50 == 0:
+            progress_callback(current=processed, total=total)
 
     if md5_updates or phash_updates:
         _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
 
     sess.commit()
+    # Mark backfill phase as complete (intentionally reports total even if some images
+    # were skipped, to signal phase completion rather than exact processed count)
+    if progress_callback and total:
+        progress_callback(current=total, total=total)
     _log.info("pHash backfill complete: %d processed, %d success, %d failed",
               processed, success_count, fail_count)
     return success_count, fail_count
@@ -855,6 +871,10 @@ def detect_duplicate_versions(sess, progress_callback=None):
     total_groups = len(distinct_groups)
     _log.debug("DuplicateVersionScan: processing %d distinct (barcode, image_type) groups", total_groups)
 
+    # Report total immediately so frontend shows 0/N instead of 0/0
+    if progress_callback:
+        progress_callback(current=0, total=total_groups)
+
     # --- Diagnostics: image_type counts for ImageVersion ---
     from sqlalchemy import func
     type_counts = sess.query(
@@ -878,7 +898,8 @@ def detect_duplicate_versions(sess, progress_callback=None):
     total_empty_phash = sum(c for _, c in empty_phash_counts)
     if total_empty_phash > 0:
         _log.info("Auto-backfilling pHash for %d images before scan...", total_empty_phash)
-        ok, fail = _backfill_missing_phash(sess)
+        ok, fail = _backfill_missing_phash(sess, total=total_empty_phash,
+                                            progress_callback=progress_callback)
         _log.info("pHash backfill done: %d success, %d failed", ok, fail)
         # Re-query after backfill
         empty_phash_counts = sess.query(
@@ -896,6 +917,9 @@ def detect_duplicate_versions(sess, progress_callback=None):
                 "After backfill, %d active images still have no pHash (files missing or unreadable).",
                 remaining,
             )
+    # Reset progress to scan phase baseline (may overwrite backfill final state)
+    if progress_callback:
+        progress_callback(current=0, total=total_groups)
     processed = 0
     all_groups = []
     group_id = 0
