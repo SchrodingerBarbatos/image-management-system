@@ -302,7 +302,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     }
   };
 
-  const handleExecuteCleanup = async () => {
+  const handleExecuteCleanup = async (deleteFiles: boolean) => {
     if (!dvTaskId || !dvResults) return;
     // Collect all clean member IDs that are not yet deleted
     const cleanIds: number[] = [];
@@ -318,7 +318,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       return;
     }
     try {
-      const task = await taskApi.createBatchDeleteDuplicateVersionsTask(dvTaskId, cleanIds);
+      const task = await taskApi.createBatchDeleteDuplicateVersionsTask(dvTaskId, cleanIds, deleteFiles);
       deletePolling.startPolling(task.id);
     } catch {
       message.error('创建清理任务失败');
@@ -625,6 +625,11 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   const lowAllChecked = lowSelectableCount > 0 && lowSelectable.every(r => lowResultSelectedIds.has(r.id));
   const lowIndeterminate = lowSelectable.some(r => lowResultSelectedIds.has(r.id)) && !lowAllChecked;
   const lowSelectedCount = lowResultSelectedIds.size;
+
+  const dvCleanCount = dvResults ? dvResults.groups.reduce(
+    (sum, g) => sum + g.members.filter(m => m.role === 'clean' && m.delete_status === 'pending').length, 0
+  ) : 0;
+  const dvKeepCount = dvResults?.summary.total_keep ?? 0;
 
   // ===== Tab items =====
   const tabItems = [
@@ -984,23 +989,34 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
               <Space>
                 <Button
                   danger
+                  loading={deleting}
+                  onClick={() => {
+                    if (!dvResults) return;
+                    openConfirm(
+                      async () => { await handleExecuteCleanup(false); },
+                      false,
+                      '确认清理重复版本',
+                      `将保留 ${dvKeepCount} 个版本，清理 ${dvCleanCount} 个重复版本（仅删除索引，文件保留）。此操作不可撤销。`,
+                    );
+                  }}
+                >
+                  仅删索引
+                </Button>
+                <Button
+                  danger
                   type="primary"
                   loading={deleting}
                   onClick={() => {
                     if (!dvResults) return;
-                    const cleanCount = dvResults.groups.reduce(
-                      (sum, g) => sum + g.members.filter(m => m.role === 'clean' && m.delete_status === 'pending').length, 0
-                    );
-                    const keepCount = dvResults.summary.total_keep;
                     openConfirm(
-                      async () => { await handleExecuteCleanup(); },
-                      false,
-                      '确认清理重复版本',
-                      `将保留 ${keepCount} 个版本，清理 ${cleanCount} 个重复版本。`,
+                      async () => { await handleExecuteCleanup(true); },
+                      true,
+                      '确认清理重复版本及文件',
+                      `将保留 ${dvKeepCount} 个版本，清理 ${dvCleanCount} 个重复版本的索引和磁盘文件。此操作不可撤销！`,
                     );
                   }}
                 >
-                  执行清理
+                  删索引和文件
                 </Button>
               </Space>
             </>
