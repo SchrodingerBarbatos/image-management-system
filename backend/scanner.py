@@ -1,7 +1,7 @@
 import re, os, hashlib, datetime, uuid, logging
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from models import session, Image, ImageVersion, ScanRoot, RejectedBarcode
+from models import session, Image, ImageVersion, ScanRoot, RejectedBarcode, DeletedFolder
 from thumbnail import generate_thumbnail, thumbnail_exists
 
 _log = logging.getLogger(__name__)
@@ -304,6 +304,15 @@ def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
     sess.flush()
 
 
+def _load_deleted_folders_set():
+    """Load all deleted (barcode, image_type, folder_ctime) tuples into a set
+    for O(1) lookup during scanning."""
+    rows = session.execute(
+        select(DeletedFolder.barcode, DeletedFolder.image_type, DeletedFolder.folder_ctime)
+    ).all()
+    return {(r.barcode, r.image_type, r.folder_ctime) for r in rows}
+
+
 def scan_root(root_id, full_scan=False, progress_callback=None, processed_offset=0,
               is_cancelled=None):
     """Scan a single scan root. If the root's allow_fuzzy toggle is on,
@@ -339,6 +348,10 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
     root_recursive = root.recursive
     use_custom_type = root.allow_fuzzy
     fuzzy_type = root.fuzzy_image_type if use_custom_type else 'main'
+
+    # Pre-load deleted folders set for O(1) lookup — skip files that were
+    # intentionally deleted by the user (all hard-delete paths record these).
+    deleted_folders = _load_deleted_folders_set()
 
     # Generate a unique scan token for leftover detection
     scan_token = uuid.uuid4().hex
@@ -468,6 +481,12 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
             if not is_valid:
                 _insert_rejected_ignore(root_id, parsed['barcode'], full_path, fname, reason)
                 rejected_count += 1
+                continue
+
+            # Check deleted_folders tracking: skip files from folders the user
+            # intentionally deleted, preventing re-add on incremental scan.
+            key = (parsed['barcode'], parsed['image_type'], folder_ctime)
+            if key in deleted_folders:
                 continue
 
             try:

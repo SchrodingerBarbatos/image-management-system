@@ -300,6 +300,20 @@ with engine.connect() as conn:
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_dvsr_task_barcode ON duplicate_version_scan_result (task_id, barcode)'))
     conn.commit()
 
+    # Migration: create deleted_folders tracking table
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS deleted_folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            barcode TEXT NOT NULL,
+            image_type TEXT NOT NULL,
+            folder_ctime TEXT NOT NULL,
+            deleted_at TEXT DEFAULT ''
+        )
+    '''))
+    conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_deleted_folder ON deleted_folders (barcode, image_type, folder_ctime)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_df_barcode_type ON deleted_folders (barcode, image_type)'))
+    conn.commit()
+
     # Mark stale running and queued tasks as interrupted on startup
     now_iso = datetime.datetime.now().isoformat()
     _running = conn.execute(text("SELECT COUNT(*) FROM batch_task WHERE status = 'running'")).fetchone()[0]

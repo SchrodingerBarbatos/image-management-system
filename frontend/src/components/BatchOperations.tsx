@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Modal, Tabs, Button, Checkbox, Table, Space, InputNumber, Tag, Divider, message, Typography, Dropdown } from 'antd';
+import { Modal, Tabs, Button, Checkbox, Table, Space, InputNumber, Tag, Divider, message, Typography } from 'antd';
 import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults, DuplicateVersionScanResults, DuplicateVersionGroup } from '../services/api';
 import { TaskList, TaskProgress } from './TaskList';
 import { useTaskPolling } from '../hooks/useTaskPolling';
@@ -24,8 +24,6 @@ const DELETE_STATUS_CONFIG: Record<string, { color: string; label: string }> = {
   deleted: { color: 'success', label: '已删除' },
   skipped: { color: 'warning', label: '已跳过' },
   failed: { color: 'error', label: '失败' },
-  restored: { color: 'blue', label: '已恢复' },
-  permanently_deleted: { color: 'red', label: '已永久删除' },
 };
 
 function fmtSize(bytes: number): string {
@@ -324,33 +322,6 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       deletePolling.startPolling(task.id);
     } catch {
       message.error('创建清理任务失败');
-    }
-  };
-
-  const handleRestoreVersions = async (resultIds: number[]) => {
-    if (!dvTaskId || resultIds.length === 0) return;
-    try {
-      const result = await taskApi.restoreDuplicateVersions(dvTaskId, resultIds);
-      message.success(`已恢复 ${result.restored_count} 张图片`);
-      loadDvResults(dvTaskId);
-    } catch {
-      message.error('恢复失败');
-    }
-  };
-
-  const handlePermanentDelete = async (resultIds: number[], deleteFiles: boolean) => {
-    if (!dvTaskId || resultIds.length === 0) return;
-    try {
-      const result = await taskApi.permanentDeleteDuplicateVersions(dvTaskId, resultIds, deleteFiles);
-      if (result.permanently_deleted_count > 0) {
-        message.success(`已永久删除 ${result.permanently_deleted_count} 个版本`);
-      }
-      if (result.failed_count > 0) {
-        message.warning(`${result.failed_count} 个版本删除失败`);
-      }
-      loadDvResults(dvTaskId);
-    } catch {
-      message.error('永久删除失败');
     }
   };
 
@@ -983,8 +954,6 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                                 title: '状态', width: 100,
                                 render: (_: unknown, m: typeof group.members[0]) => {
                                   if (m.delete_status === 'deleted') return <Tag color="success">已清理</Tag>;
-                                  if (m.delete_status === 'restored') return <Tag color="blue">已恢复</Tag>;
-                                  if (m.delete_status === 'permanently_deleted') return <Tag color="red">已永久删除</Tag>;
                                   if (m.delete_status === 'failed') return <Tag color="error">失败</Tag>;
                                   if (m.delete_status === 'skipped') return <Tag color="warning">跳过</Tag>;
                                   return <Tag>待处理</Tag>;
@@ -998,48 +967,6 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                                       <Button size="small" type="link" onClick={() => handleChangeKeep(group.group_id, m.folder_ctime)}>
                                         设为保留
                                       </Button>
-                                    )}
-                                    {m.delete_status === 'deleted' && (
-                                      <>
-                                        <Button size="small" type="link" onClick={() => handleRestoreVersions([m.id])}>
-                                          恢复
-                                        </Button>
-                                        <Dropdown
-                                          menu={{
-                                            items: [
-                                              {
-                                                key: 'index',
-                                                label: '永久删除索引',
-                                                danger: true,
-                                                onClick: () => openConfirm(
-                                                  async () => { await handlePermanentDelete([m.id], false); },
-                                                  false,
-                                                  '确认永久删除索引',
-                                                  `将永久删除 ${m.version_label}（${m.image_count} 张图片）的索引记录。此操作不可恢复！`,
-                                                  '永久删除',
-                                                ),
-                                              },
-                                              {
-                                                key: 'files',
-                                                label: '永久删除索引和文件',
-                                                danger: true,
-                                                onClick: () => openConfirm(
-                                                  async () => { await handlePermanentDelete([m.id], true); },
-                                                  true,
-                                                  '确认永久删除索引和文件',
-                                                  `将永久删除 ${m.version_label}（${m.image_count} 张图片）的索引记录和磁盘文件。此操作不可恢复！`,
-                                                  '永久删除',
-                                                ),
-                                              },
-                                            ],
-                                          }}
-                                          trigger={['click']}
-                                        >
-                                          <Button size="small" type="link" danger>
-                                            永久删除 ▾
-                                          </Button>
-                                        </Dropdown>
-                                      </>
                                     )}
                                   </Space>
                                 ),
@@ -1069,64 +996,12 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                       async () => { await handleExecuteCleanup(); },
                       false,
                       '确认清理重复版本',
-                      `将保留 ${keepCount} 个版本，清理 ${cleanCount} 个重复版本。文件不会永久删除，可通过"恢复"功能恢复。`,
+                      `将保留 ${keepCount} 个版本，清理 ${cleanCount} 个重复版本。`,
                     );
                   }}
                 >
                   执行清理
                 </Button>
-                {dvResults.summary.total_deleted > 0 && (
-                  <>
-                    <Button
-                      onClick={() => {
-                        if (!dvResults || !dvTaskId) return;
-                        const deletedIds = dvResults.groups.flatMap(g =>
-                          g.members.filter(m => m.delete_status === 'deleted').map(m => m.id)
-                        );
-                        handleRestoreVersions(deletedIds);
-                      }}
-                    >
-                      恢复全部已清理
-                    </Button>
-                    <Button
-                      danger
-                      onClick={() => {
-                        if (!dvResults) return;
-                        const deletedIds = dvResults.groups.flatMap(g =>
-                          g.members.filter(m => m.delete_status === 'deleted').map(m => m.id)
-                        );
-                        openConfirm(
-                          async () => { await handlePermanentDelete(deletedIds, false); },
-                          false,
-                          '确认永久删除索引',
-                          `将永久删除 ${deletedIds.length} 个已清理版本的索引记录。此操作不可恢复！`,
-                          '永久删除',
-                        );
-                      }}
-                    >
-                      永久删除索引
-                    </Button>
-                    <Button
-                      danger
-                      type="primary"
-                      onClick={() => {
-                        if (!dvResults) return;
-                        const deletedIds = dvResults.groups.flatMap(g =>
-                          g.members.filter(m => m.delete_status === 'deleted').map(m => m.id)
-                        );
-                        openConfirm(
-                          async () => { await handlePermanentDelete(deletedIds, true); },
-                          true,
-                          '确认永久删除索引和文件',
-                          `将永久删除 ${deletedIds.length} 个已清理版本的索引记录和磁盘文件。此操作不可恢复！`,
-                          '永久删除',
-                        );
-                      }}
-                    >
-                      永久删除索引和文件
-                    </Button>
-                  </>
-                )}
               </Space>
             </>
           )}

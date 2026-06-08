@@ -207,7 +207,7 @@ class DuplicateVersionScanResult(Base):
     is_latest = Column(Boolean, default=False)
     role = Column(Text, default='clean')  # 'keep' | 'clean' | 'user_selected'
     keep_reason = Column(Text, default='')  # reason for recommendation
-    delete_status = Column(Text, default='pending')  # 'pending' | 'deleted' | 'skipped' | 'failed' | 'restored' | 'permanently_deleted'
+    delete_status = Column(Text, default='pending')  # 'pending' | 'deleted' | 'skipped' | 'failed'
     delete_message = Column(Text, default='')
     deleted_at = Column(Text, default='')
     kept_version_ctime = Column(Text, default='')  # folder_ctime of the kept version
@@ -216,4 +216,20 @@ class DuplicateVersionScanResult(Base):
         Index('idx_dvsr_task_id', 'task_id'),
         Index('idx_dvsr_task_group', 'task_id', 'group_id'),
         Index('idx_dvsr_task_barcode', 'task_id', 'barcode'),
+    )
+
+
+class DeletedFolder(Base):
+    """Tracks deleted (barcode, image_type, folder_ctime) tuples so the scanner
+    can skip them and avoid re-adding files the user intentionally deleted."""
+    __tablename__ = 'deleted_folders'
+    id = Column(Integer, primary_key=True)
+    barcode = Column(Text, nullable=False)
+    image_type = Column(Text, nullable=False)
+    folder_ctime = Column(Text, nullable=False)
+    deleted_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
+
+    __table_args__ = (
+        UniqueConstraint('barcode', 'image_type', 'folder_ctime', name='uq_deleted_folder'),
+        Index('idx_df_barcode_type', 'barcode', 'image_type'),
     )

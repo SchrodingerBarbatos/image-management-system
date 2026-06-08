@@ -290,8 +290,20 @@ def delete_scan_root(root_id):
         Image.scan_root_id == root_id
     ).distinct().all()}
 
+    # Collect unique (barcode, image_type, folder_ctime) for deleted_folders tracking
+    deleted_folder_keys = {
+        (r.barcode, r.image_type, r.folder_ctime)
+        for r in session.query(Image.barcode, Image.image_type, Image.folder_ctime)
+        .filter(Image.scan_root_id == root_id).distinct().all()
+    }
+
     # Save path before deletion to avoid accessing expired ORM object
     root_path = root.path
+
+    # Record deleted folders BEFORE deleting images
+    from routes.batch_tasks import _record_deleted_folder
+    for bc, it, ctime in deleted_folder_keys:
+        _record_deleted_folder(session, bc, it, ctime)
 
     session.query(Image).filter(Image.scan_root_id == root_id).delete()
     session.delete(root)

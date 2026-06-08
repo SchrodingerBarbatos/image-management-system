@@ -5,10 +5,11 @@ from sqlalchemy.orm.exc import ObjectDeletedError
 
 _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 from sqlalchemy import or_, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import (
     session, Image, ImageVersion, ScanRoot,
     BatchTask, DuplicateScanResult, LowVersionScanResult,
-    DuplicateVersionScanResult,
+    DuplicateVersionScanResult, DeletedFolder,
 )
 from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
@@ -89,6 +90,22 @@ def _cleanup_orphaned_images():
 
 batch_tasks_bp = Blueprint('batch_tasks', __name__)
 _log = logging.getLogger(__name__)
+
+
+# ---------- Deleted folder tracking ----------
+
+def _record_deleted_folder(sess, barcode, image_type, folder_ctime):
+    """Insert into deleted_folders tracking table, ignoring duplicates.
+    Called after every hard-delete to prevent re-adding on next scan."""
+    stmt = sqlite_insert(DeletedFolder).values(
+        barcode=barcode,
+        image_type=image_type,
+        folder_ctime=folder_ctime,
+        deleted_at=datetime.datetime.now().isoformat(),
+    ).on_conflict_do_nothing(
+        index_elements=['barcode', 'image_type', 'folder_ctime']
+    )
+    sess.execute(stmt)
 
 
 # ---------- Duplicate scan handler ----------
@@ -359,6 +376,8 @@ def _run_batch_delete_duplicates(task_id):
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
+        if count > 0:
+            _record_deleted_folder(sess, item['barcode'], item['image_type'], item['folder_ctime'])
         if failed_items:
             failed_count += len(failed_items)
             for fi in failed_items:
@@ -435,6 +454,8 @@ def _run_batch_delete_low_versions(task_id):
 
         count, failed_items = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
         total_deleted += count
+        if count > 0:
+            _record_deleted_folder(sess, barcode, image_type, folder_ctime)
         if failed_items:
             failed_count += len(failed_items)
             for fi in failed_items:
@@ -517,6 +538,9 @@ def _run_delete_version(task_id):
             deleted_count += 1
         update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
 
+    # Record in deleted_folders tracking table to prevent re-adding on next scan
+    if deleted_count > 0:
+        _record_deleted_folder(sess, barcode, image_type, folder_ctime)
     sess.commit()
 
     # 重建版本：如果图片全部删除，ImageVersion 会被清理；部分失败时保留版本
@@ -566,6 +590,14 @@ def _run_batch_delete_images(task_id):
     barcodes = {r[0] for r in sess.query(Image.barcode).filter(
         Image.id.in_(ids)).distinct().all()}
 
+    # Collect unique (barcode, image_type, folder_ctime) before deletion
+    # for recording in deleted_folders tracking table
+    deleted_folder_keys = {
+        (r.barcode, r.image_type, r.folder_ctime)
+        for r in sess.query(Image.barcode, Image.image_type, Image.folder_ctime)
+        .filter(Image.id.in_(ids)).distinct().all()
+    }
+
     # Delete files if requested (with path safety validation)
     failed_count = 0
     delete_db_ids = ids  # 默认删除所有传入 IDs 的索引（delete_files=False 时）
@@ -593,6 +625,9 @@ def _run_batch_delete_images(task_id):
             update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
 
     # Delete database records（仅删除文件删除成功的记录）
+    # Record deleted folders BEFORE deleting to keep single-commit pattern
+    for bc, it, ctime in deleted_folder_keys:
+        _record_deleted_folder(sess, bc, it, ctime)
     deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
     sess.commit()
 
@@ -653,11 +688,10 @@ def _run_duplicate_version_scan(task_id):
 
 def _run_batch_delete_duplicate_versions(task_id):
     """Background handler for batch_delete_duplicate_versions tasks.
-    Soft-deletes by marking Image.status = 'duplicate_version'.
-    Re-validates duplicate relationships before deletion."""
+    Hard-deletes images from DB (consistent with batch_delete_duplicates and
+    batch_delete_low_versions). Records deleted folders in tracking table
+    to prevent re-adding on next scan."""
     _log.info("Starting batch_delete_duplicate_versions task %d", task_id)
-
-    from duplicate_version_detector import are_duplicate_versions, _get_ordered_images
 
     sess = _get_thread_session()
     task = sess.get(BatchTask, task_id)
@@ -672,6 +706,7 @@ def _run_batch_delete_duplicate_versions(task_id):
 
     result_ids = params.get('result_ids', [])
     scan_task_id = params.get('scan_task_id')
+    delete_files = params.get('delete_files', False)
 
     if not result_ids or not scan_task_id:
         finish_task(task_id, error_message='result_ids and scan_task_id required')
@@ -691,19 +726,12 @@ def _run_batch_delete_duplicate_versions(task_id):
         finish_task(task_id, error_message='No valid clean results found')
         return
 
-    # Load ALL group members for each referenced group to find the kept version.
-    # The submitted result_ids only contain clean members; we need the keep members too.
-    group_ids = list({r.group_id for r in results})
-    all_group_members = sess.query(DuplicateVersionScanResult).filter(
-        DuplicateVersionScanResult.task_id == scan_task_id,
-        DuplicateVersionScanResult.group_id.in_(group_ids),
-    ).all()
-
-    # Build group_id → {kept_version_ctime} lookup from all members
-    kept_by_group = {}
-    for m in all_group_members:
-        if m.role in ('keep', 'user_selected'):
-            kept_by_group[m.group_id] = m.folder_ctime
+    # Check disabled scan roots
+    items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
+    disabled_count = _check_disabled_scan_roots(items)
+    if disabled_count > 0:
+        finish_task(task_id, error_message=f'部分图片属于已禁用的扫描目录（{disabled_count}个）')
+        return
 
     affected_barcodes = set()
     deleted_image_count = 0
@@ -719,56 +747,25 @@ def _run_batch_delete_duplicate_versions(task_id):
             update_task_progress(task_id, progress=processed, current_item=r.barcode)
             continue
 
-        # Find the kept version for this group
-        kept_ctime = kept_by_group.get(r.group_id, '')
-        if not kept_ctime:
-            r.delete_status = 'skipped'
-            r.delete_message = '未找到保留版本'
-            skipped_count += 1
-            update_task_progress(task_id, progress=processed, current_item=r.barcode)
-            continue
-
-        # Fix 1: Re-validate duplicate relationship before deletion.
-        # Load current active images for both the kept version and this version,
-        # then re-run are_duplicate_versions to confirm they're still duplicates.
-        kept_imgs = _get_ordered_images(sess, r.barcode, r.image_type, kept_ctime)
-        clean_imgs = _get_ordered_images(sess, r.barcode, r.image_type, r.folder_ctime)
-
-        if not clean_imgs:
+        # Hard-delete: use same pattern as _run_batch_delete_duplicates
+        count, failed_items = _delete_folder_images(
+            r.barcode, r.image_type, r.folder_ctime, delete_files
+        )
+        if count > 0:
+            r.delete_status = 'deleted'
+            r.deleted_at = datetime.datetime.now().isoformat()
+            deleted_image_count += count
+            affected_barcodes.add(r.barcode)
+            _record_deleted_folder(sess, r.barcode, r.image_type, r.folder_ctime)
+        elif not failed_items:
             r.delete_status = 'skipped'
             r.delete_message = '已无有效图片'
             skipped_count += 1
-            update_task_progress(task_id, progress=processed, current_item=r.barcode)
-            continue
 
-        if not kept_imgs:
-            r.delete_status = 'skipped'
-            r.delete_message = '保留版本已无有效图片'
-            skipped_count += 1
-            update_task_progress(task_id, progress=processed, current_item=r.barcode)
-            continue
-
-        if not are_duplicate_versions(kept_imgs, clean_imgs):
-            r.delete_status = 'skipped'
-            r.delete_message = '数据已变更，不再是重复版本'
-            skipped_count += 1
-            update_task_progress(task_id, progress=processed, current_item=r.barcode)
-            continue
-
-        # Soft delete: mark images as 'duplicate_version'
-        try:
-            for img in clean_imgs:
-                img.status = 'duplicate_version'
-                img.updated_at = datetime.datetime.now().isoformat()
-            r.delete_status = 'deleted'
-            r.deleted_at = datetime.datetime.now().isoformat()
-            r.kept_version_ctime = kept_ctime
-            deleted_image_count += len(clean_imgs)
-            affected_barcodes.add(r.barcode)
-        except Exception as e:
-            r.delete_status = 'failed'
-            r.delete_message = str(e)
-            failed_count += 1
+        if failed_items:
+            failed_count += len(failed_items)
+            for fi in failed_items:
+                update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
 
         update_task_progress(task_id, progress=processed, current_item=r.barcode)
 
@@ -779,7 +776,7 @@ def _run_batch_delete_duplicate_versions(task_id):
         update_versions_for_barcode(bc)
 
     finish_task(task_id, result_count=deleted_image_count)
-    _log.info("batch_delete_duplicate_versions task %d done: soft-deleted %d images, skipped %d, failed %d",
+    _log.info("batch_delete_duplicate_versions task %d done: deleted %d images, skipped %d, failed %d",
               task_id, deleted_image_count, skipped_count, failed_count)
 
 
@@ -1571,164 +1568,13 @@ def change_keep_version(task_id):
     return jsonify({'ok': True})
 
 
-@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>/restore', methods=['POST'])
-def restore_duplicate_versions(task_id):
-    """Restore soft-deleted duplicate versions."""
-    task = session.get(BatchTask, task_id)
-    if not task:
-        return jsonify({'error': 'not found'}), 404
-
-    data = request.json or {}
-    result_ids = data.get('result_ids', [])
-
-    result_ids, err = _validate_result_ids(result_ids)
-    if err:
-        return err
-
-    results, err = _check_result_id_consistency(result_ids, DuplicateVersionScanResult, task_id)
-    if err:
-        return err
-
-    affected_barcodes = set()
-    restored_count = 0
-
-    for r in results:
-        if r.delete_status != 'deleted':
-            continue
-        # Restore images
-        imgs = session.query(Image).filter(
-            Image.barcode == r.barcode,
-            Image.image_type == r.image_type,
-            Image.folder_ctime == r.folder_ctime,
-            Image.status == 'duplicate_version',
-        ).all()
-        for img in imgs:
-            img.status = 'active'
-            img.updated_at = datetime.datetime.now().isoformat()
-        r.delete_status = 'restored'
-        r.delete_message = '已恢复'
-        r.deleted_at = ''
-        restored_count += len(imgs)
-        affected_barcodes.add(r.barcode)
-
-    session.commit()
-
-    for bc in affected_barcodes:
-        update_versions_for_barcode(bc)
-
-    return jsonify({
-        'restored_count': restored_count,
-        'affected_barcodes': list(affected_barcodes),
-    })
-
-
-@batch_tasks_bp.route('/batch/duplicate-version-scan/tasks/<int:task_id>/permanent-delete', methods=['POST'])
-def permanent_delete_duplicate_versions(task_id):
-    """Permanently delete soft-deleted duplicate versions (index only or index+files)."""
-    task = session.get(BatchTask, task_id)
-    if not task:
-        return jsonify({'error': 'not found'}), 404
-
-    data = request.json or {}
-    result_ids = data.get('result_ids', [])
-    delete_files = bool(data.get('delete_files', False))
-
-    result_ids, err = _validate_result_ids(result_ids)
-    if err:
-        return err
-
-    results, err = _check_result_id_consistency(result_ids, DuplicateVersionScanResult, task_id)
-    if err:
-        return err
-
-    # Only operate on soft-deleted results
-    results = [r for r in results if r.delete_status == 'deleted']
-    if not results:
-        return jsonify({'error': '没有可永久删除的结果'}), 400
-
-    affected_barcodes = set()
-    permanently_deleted_count = 0
-    failed_count = 0
-
-    # Pre-validate paths if deleting files
-    if delete_files:
-        scan_roots = {sr.id: sr.path for sr in session.query(ScanRoot).all()}
-
-    for r in results:
-        imgs = session.query(Image).filter(
-            Image.barcode == r.barcode,
-            Image.image_type == r.image_type,
-            Image.folder_ctime == r.folder_ctime,
-            Image.status == 'duplicate_version',
-        ).all()
-
-        if not imgs:
-            # No matching images — mark as permanently deleted (already gone)
-            r.delete_status = 'permanently_deleted'
-            r.delete_message = '已永久删除（索引已不存在）'
-            r.deleted_at = datetime.datetime.now().isoformat()
-            permanently_deleted_count += 1
-            affected_barcodes.add(r.barcode)
-            continue
-
-        if delete_files:
-            # Validate paths are inside scan roots
-            is_valid, error_msg = validate_image_paths(imgs, scan_roots)
-            if not is_valid:
-                r.delete_status = 'failed'
-                r.delete_message = f'路径验证失败: {error_msg}'
-                failed_count += 1
-                continue
-
-            # Per-file atomicity: delete DB row immediately after each successful file delete
-            file_errors = []
-            deleted_db_count = 0
-            for img in imgs:
-                try:
-                    os.remove(img.file_path)
-                    session.delete(img)
-                    deleted_db_count += 1
-                except FileNotFoundError:
-                    # File already gone — still clean up DB row
-                    session.delete(img)
-                    deleted_db_count += 1
-                except OSError as e:
-                    file_errors.append(f'{img.file_path}: {_classify_delete_error(img.file_path, e)}')
-
-            if file_errors:
-                r.delete_status = 'failed'
-                r.delete_message = f'部分文件删除失败: {"; ".join(file_errors)}'
-                failed_count += 1
-                continue
-        else:
-            # Index-only: delete all DB rows
-            for img in imgs:
-                session.delete(img)
-
-        r.delete_status = 'permanently_deleted'
-        r.delete_message = '已永久删除'
-        r.deleted_at = datetime.datetime.now().isoformat()
-        permanently_deleted_count += 1
-        affected_barcodes.add(r.barcode)
-
-    session.commit()
-
-    for bc in affected_barcodes:
-        update_versions_for_barcode(bc)
-
-    return jsonify({
-        'permanently_deleted_count': permanently_deleted_count,
-        'failed_count': failed_count,
-        'affected_barcodes': list(affected_barcodes),
-    })
-
-
 @batch_tasks_bp.route('/batch/delete-duplicate-versions/tasks', methods=['POST'])
 def create_batch_delete_duplicate_versions_task():
-    """Create an async task to soft-delete duplicate versions."""
+    """Create an async task to hard-delete duplicate versions."""
     data = request.json or {}
     scan_task_id = data.get('scan_task_id')
     result_ids = data.get('result_ids', [])
+    delete_files = bool(data.get('delete_files', False))
 
     if not scan_task_id:
         return jsonify({'error': 'scan_task_id required'}), 400
@@ -1740,6 +1586,7 @@ def create_batch_delete_duplicate_versions_task():
     params = {
         'scan_task_id': scan_task_id,
         'result_ids': result_ids,
+        'delete_files': delete_files,
     }
     from task_engine import create_task
     task_dict, is_new = create_task('batch_delete_duplicate_versions', params=params)
