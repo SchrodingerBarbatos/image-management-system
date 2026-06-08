@@ -251,19 +251,27 @@ def _insert_rejected_ignore(root_id, barcode, file_path, filename, reason):
     session.execute(stmt)
 
 
-def _process_thumbnail_batch(thumb_jobs):
+def _process_thumbnail_batch(thumb_jobs, progress_callback=None, is_cancelled=None):
     """Process a batch of thumbnail jobs and write back content_md5 and phash via Core update.
-    Returns dict of {image_id: md5} for successful MD5 computations."""
+    Returns dict of {image_id: md5} for successful MD5 computations.
+    Reports progress every 5 thumbnails when progress_callback is provided.
+    Checks is_cancelled between each thumbnail when provided."""
     if not thumb_jobs:
         return {}
     md5_updates = {}
     phash_updates = {}
-    for img_id, full_path in thumb_jobs:
+    total = len(thumb_jobs)
+    for i, (img_id, full_path) in enumerate(thumb_jobs):
+        if is_cancelled and is_cancelled():
+            raise ScanCancelled()
         _, md5, phash = generate_thumbnail(img_id, full_path)
         if md5:
             md5_updates[img_id] = md5
         if phash:
             phash_updates[img_id] = phash
+        # Report progress every 5 thumbnails or on the last one
+        if progress_callback and (i == 0 or (i + 1) % 5 == 0 or i + 1 == total):
+            progress_callback('thumbnails', thumbnail_total=total, thumbnail_current=i + 1)
     # Write back content_md5 and phash via Core update (lightweight, no ORM objects)
     if md5_updates or phash_updates:
         _flush_hash_updates_core(md5_updates, phash_updates)
@@ -497,16 +505,14 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
         if len(thumb_jobs) >= _THUMB_BATCH_SIZE:
             if is_cancelled and is_cancelled():
                 raise ScanCancelled()
-            _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0)
-            _process_thumbnail_batch(thumb_jobs)
+            _process_thumbnail_batch(thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
             thumb_jobs.clear()
 
     # Process remaining thumbnail jobs
     if thumb_jobs:
         if is_cancelled and is_cancelled():
             raise ScanCancelled()
-        _report('thumbnails', thumbnail_total=len(thumb_jobs), thumbnail_current=0)
-        _process_thumbnail_batch(thumb_jobs)
+        _process_thumbnail_batch(thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
         thumb_jobs.clear()
 
     # Check cancellation before leftover handling
