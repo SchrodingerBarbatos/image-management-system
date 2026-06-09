@@ -398,13 +398,15 @@ try:
             # 删除 RCN 条码（GTIN-13 前缀 200-299）的孤立 ImageVersion 记录
             result = conn.execute(text(
                 "DELETE FROM image_version WHERE "
-                "length(barcode) = 13 AND CAST(substr(barcode, 1, 3) AS INTEGER) BETWEEN 200 AND 299"
+                "length(barcode) = 13 AND CAST(substr(barcode, 1, 3) AS INTEGER) BETWEEN 200 AND 299 "
+                "AND barcode NOT IN (SELECT DISTINCT barcode FROM image)"
             ))
             rcn_deleted = result.rowcount
-            # 同时清理 rejected_barcode 中非 GTIN 条码的孤立版本
+            # 同时清理 rejected_barcode 中非 GTIN 条码的孤立版本（仅删无对应 image 记录的）
             result2 = conn.execute(text(
                 "DELETE FROM image_version WHERE barcode IN "
-                "(SELECT barcode FROM rejected_barcode)"
+                "(SELECT barcode FROM rejected_barcode) "
+                "AND barcode NOT IN (SELECT DISTINCT barcode FROM image)"
             ))
             rejected_deleted = result2.rowcount
             total_deleted = rcn_deleted + rejected_deleted
