@@ -234,7 +234,7 @@ def delete_image(img_id):
         except OSError:
             pass
     session.delete(img)
-    from routes.batch_tasks import _record_deleted_folder
+    from routes.batch import _record_deleted_folder
     _record_deleted_folder(session, barcode, image_type, folder_ctime)
     session.commit()
     update_versions_for_barcode(barcode)
@@ -336,7 +336,6 @@ def batch_delete():
     # Collect barcodes before deletion
     barcodes = {r[0] for r in session.query(Image.barcode).filter(
         Image.id.in_(ids)).distinct().all()}
-    # Collect unique (barcode, image_type, folder_ctime) for tracking
     deleted_folder_keys = {
         (r.barcode, r.image_type, r.folder_ctime)
         for r in session.query(Image.barcode, Image.image_type, Image.folder_ctime)
@@ -350,14 +349,10 @@ def batch_delete():
             except OSError:
                 pass
     deleted = session.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
-    session.commit()
-
-    # Record deleted folders to prevent re-adding on next scan
-    from routes.batch_tasks import _record_deleted_folder
+    from routes.batch import _record_deleted_folder
     for bc, it, ctime in deleted_folder_keys:
         _record_deleted_folder(session, bc, it, ctime)
-    if deleted_folder_keys:
-        session.commit()
+    session.commit()
 
     for bc in barcodes:
         update_versions_for_barcode(bc)
@@ -439,6 +434,8 @@ def delete_duplicate_images(barcode):
         session.delete(img)
         deleted += 1
 
+    from routes.batch import _record_deleted_folder
+    _record_deleted_folder(session, barcode, image_type, folder_ctime)
     session.commit()
     update_versions_for_barcode(barcode)
 
@@ -482,7 +479,7 @@ def delete_version(version_id):
 
     # Delete the version record itself
     session.delete(v)
-    from routes.batch_tasks import _record_deleted_folder
+    from routes.batch import _record_deleted_folder
     _record_deleted_folder(session, barcode, v.image_type, folder_ctime)
     session.commit()
 

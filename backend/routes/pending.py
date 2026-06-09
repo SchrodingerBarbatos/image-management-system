@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from models import session, Image, ScanRoot
+from routes.batch import _record_deleted_folder
 from versioning import update_all_versions
 
 pending_bp = Blueprint('pending', __name__)
@@ -54,7 +55,11 @@ def ignore_pending(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
+    barcode = img.barcode
+    image_type = img.image_type
+    folder_ctime = img.folder_ctime
     session.delete(img)
+    _record_deleted_folder(session, barcode, image_type, folder_ctime)
     session.commit()
     return jsonify({'message': 'ignored'})
 

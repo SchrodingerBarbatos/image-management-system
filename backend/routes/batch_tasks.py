@@ -5,15 +5,14 @@ from sqlalchemy.orm.exc import ObjectDeletedError
 
 _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 from sqlalchemy import or_, func
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import (
     session, Image, ImageVersion, ScanRoot,
     BatchTask, DuplicateScanResult, LowVersionScanResult,
-    DuplicateVersionScanResult, DeletedFolder,
+    DuplicateVersionScanResult,
 )
 from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
-from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error
+from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error, _record_deleted_folder
 
 
 def _cleanup_orphaned_images():
@@ -90,22 +89,6 @@ def _cleanup_orphaned_images():
 
 batch_tasks_bp = Blueprint('batch_tasks', __name__)
 _log = logging.getLogger(__name__)
-
-
-# ---------- Deleted folder tracking ----------
-
-def _record_deleted_folder(sess, barcode, image_type, folder_ctime):
-    """Insert into deleted_folders tracking table, ignoring duplicates.
-    Called after every hard-delete to prevent re-adding on next scan."""
-    stmt = sqlite_insert(DeletedFolder).values(
-        barcode=barcode,
-        image_type=image_type,
-        folder_ctime=folder_ctime,
-        deleted_at=datetime.datetime.now().isoformat(),
-    ).on_conflict_do_nothing(
-        index_elements=['barcode', 'image_type', 'folder_ctime']
-    )
-    sess.execute(stmt)
 
 
 # ---------- Duplicate scan handler ----------
@@ -376,8 +359,6 @@ def _run_batch_delete_duplicates(task_id):
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
-        if count > 0:
-            _record_deleted_folder(sess, item['barcode'], item['image_type'], item['folder_ctime'])
         if failed_items:
             failed_count += len(failed_items)
             for fi in failed_items:
@@ -454,8 +435,6 @@ def _run_batch_delete_low_versions(task_id):
 
         count, failed_items = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
         total_deleted += count
-        if count > 0:
-            _record_deleted_folder(sess, barcode, image_type, folder_ctime)
         if failed_items:
             failed_count += len(failed_items)
             for fi in failed_items:
@@ -589,14 +568,7 @@ def _run_batch_delete_images(task_id):
     # Collect barcodes before deletion
     barcodes = {r[0] for r in sess.query(Image.barcode).filter(
         Image.id.in_(ids)).distinct().all()}
-
-    # Collect unique (barcode, image_type, folder_ctime) before deletion
-    # for recording in deleted_folders tracking table
-    deleted_folder_keys = {
-        (r.barcode, r.image_type, r.folder_ctime)
-        for r in sess.query(Image.barcode, Image.image_type, Image.folder_ctime)
-        .filter(Image.id.in_(ids)).distinct().all()
-    }
+    delete_db_folder_keys = set()
 
     # Delete files if requested (with path safety validation)
     failed_count = 0
@@ -614,6 +586,7 @@ def _run_batch_delete_images(task_id):
             try:
                 os.remove(img.file_path)
                 delete_db_ids.append(img.id)
+                delete_db_folder_keys.add((img.barcode, img.image_type, img.folder_ctime))
             except OSError as e:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
@@ -621,12 +594,16 @@ def _run_batch_delete_images(task_id):
             update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
     else:
         # Even when not deleting files, report progress for consistency
+        delete_db_folder_keys = {
+            (r.barcode, r.image_type, r.folder_ctime)
+            for r in sess.query(Image.barcode, Image.image_type, Image.folder_ctime)
+            .filter(Image.id.in_(delete_db_ids)).distinct().all()
+        }
         for i in range(total):
             update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
 
     # Delete database records（仅删除文件删除成功的记录）
-    # Record deleted folders BEFORE deleting to keep single-commit pattern
-    for bc, it, ctime in deleted_folder_keys:
+    for bc, it, ctime in delete_db_folder_keys:
         _record_deleted_folder(sess, bc, it, ctime)
     deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
     sess.commit()
@@ -756,7 +733,6 @@ def _run_batch_delete_duplicate_versions(task_id):
             r.deleted_at = datetime.datetime.now().isoformat()
             deleted_image_count += count
             affected_barcodes.add(r.barcode)
-            _record_deleted_folder(sess, r.barcode, r.image_type, r.folder_ctime)
         elif not failed_items:
             r.delete_status = 'skipped'
             r.delete_message = '已无有效图片'

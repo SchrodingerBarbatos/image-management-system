@@ -32,6 +32,18 @@ function fmtSize(bytes: number): string {
   return `${bytes} B`;
 }
 
+type DeleteTarget = {
+  barcode: string;
+  image_type: string;
+  folder_ctime: string;
+};
+
+const toDeleteTarget = (r: DuplicateScanResultItem | LowVersionScanResultItem): DeleteTarget => ({
+  barcode: r.barcode,
+  image_type: r.image_type,
+  folder_ctime: r.folder_ctime,
+});
+
 const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => {
   const [activeTab, setActiveTab] = useState<string>('duplicates');
 
@@ -547,10 +559,12 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   const buildDupDeleteAction = (deleteFiles: boolean) => async () => {
     if (!dupTaskId || !dupResults) return;
     const idSet = new Set(dupResultSelectedIds);
-    // Get the items for the selected IDs
-    const selectedItems = dupResults.items
-      .filter(r => idSet.has(r.id))
-      .map(r => ({ barcode: r.barcode, image_type: r.image_type, folder_ctime: r.folder_ctime }));
+    const selectedItems: DeleteTarget[] = [];
+    const totalPages = Math.ceil(dupResults.total / BATCH_SIZE);
+    for (let page = 1; page <= totalPages; page++) {
+      const data = await taskApi.getDuplicateScanResults(dupTaskId, page, BATCH_SIZE);
+      data.items.filter(r => idSet.has(r.id)).forEach(r => selectedItems.push(toDeleteTarget(r)));
+    }
     if (selectedItems.length === 0) return;
     const task = await taskApi.createBatchDeleteDuplicatesTask(selectedItems, deleteFiles);
     deletePolling.startPolling(task.id);
@@ -559,10 +573,14 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   const buildLowDeleteAction = (deleteFiles: boolean) => async () => {
     if (!lowTaskId || !lowResults) return;
     const idSet = new Set(lowResultSelectedIds);
-    // Get the items for the selected IDs
-    const selectedItems = lowResults.items
-      .filter(r => idSet.has(r.id))
-      .map(r => ({ barcode: r.barcode, image_type: r.image_type, folder_ctime: r.folder_ctime }));
+    const selectedItems: DeleteTarget[] = [];
+    const totalPages = Math.ceil(lowResults.total / BATCH_SIZE);
+    for (let page = 1; page <= totalPages; page++) {
+      const data = await taskApi.getLowVersionScanResults(lowTaskId, page, BATCH_SIZE);
+      data.items
+        .filter(r => r.status_tag === 'will_delete' && idSet.has(r.id))
+        .forEach(r => selectedItems.push(toDeleteTarget(r)));
+    }
     if (selectedItems.length === 0) return;
     const task = await taskApi.createBatchDeleteLowVersionsTask(selectedItems, deleteFiles, mainThreshold, detailThreshold);
     deletePolling.startPolling(task.id);

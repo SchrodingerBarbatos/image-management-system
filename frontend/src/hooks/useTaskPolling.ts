@@ -59,10 +59,15 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
             : successMessage || `任务完成，共处理 ${task.result_count} 项`;
           message.success(msg);
           onComplete?.(task);
-        } else if (task.status === 'error') {
+        } else if (task.status === 'error' || task.status === 'cancelled' || task.status === 'interrupted') {
+          const defaultMessage = task.status === 'cancelled'
+            ? '任务已取消'
+            : task.status === 'interrupted'
+              ? '任务已中断'
+              : task.error_message || '任务失败';
           const msg = typeof errorMessage === 'function'
             ? errorMessage(task)
-            : errorMessage || task.error_message || '任务失败';
+            : errorMessage || defaultMessage;
           message.error(msg);
           onError?.(task);
         }

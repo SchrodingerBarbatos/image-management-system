@@ -1,8 +1,9 @@
-import json, os, re, logging
+import json, os, re, logging, datetime
 from collections import defaultdict
 from flask import Blueprint, request, jsonify
 from sqlalchemy import func, or_, select
-from models import session, Image, ImageVersion, ScanRoot
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from models import session, Image, ImageVersion, ScanRoot, DeletedFolder
 from versioning import update_versions_for_barcode
 from task_engine import _get_thread_session
 
@@ -25,6 +26,18 @@ def _classify_delete_error(filepath, error):
             return '文件被占用'
         return f'系统错误: {error}'
     return f'未知错误: {error}'
+
+
+def _record_deleted_folder(sess, barcode, image_type, folder_ctime):
+    stmt = sqlite_insert(DeletedFolder).values(
+        barcode=barcode,
+        image_type=image_type,
+        folder_ctime=folder_ctime,
+        deleted_at=datetime.datetime.now().isoformat(),
+    ).on_conflict_do_nothing(
+        index_elements=['barcode', 'image_type', 'folder_ctime']
+    )
+    sess.execute(stmt)
 
 
 def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
@@ -54,9 +67,13 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
             except OSError as e:
                 _log.warning("Failed to delete file: %s", img.file_path)
                 failed_items.append({'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
+        if deleted_count > 0:
+            _record_deleted_folder(sess, barcode, image_type, folder_ctime)
         return deleted_count, failed_items
     else:
         count = sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
+        if count > 0:
+            _record_deleted_folder(sess, barcode, image_type, folder_ctime)
         return count, []
 
 
@@ -153,6 +170,7 @@ def delete_images_with_validation(barcode, image_type, folder_ctime, delete_file
     for img in imgs:
         sess.delete(img)
 
+    _record_deleted_folder(sess, barcode, image_type, folder_ctime)
     return len(imgs), None
 
 

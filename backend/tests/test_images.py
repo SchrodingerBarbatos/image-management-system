@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import scoped_session, sessionmaker
 from flask import Flask
 
-from models import Base, Image, ScanRoot
+from models import Base, Image, ScanRoot, DeletedFolder
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +77,44 @@ def _make_image(sess, barcode, image_type, folder_ctime, filename="a.jpg",
     sess.add(img)
     sess.commit()
     return img
+
+
+# ===================================================================
+# delete_image deleted_folders tracking tests
+# ===================================================================
+
+
+def test_delete_image_records_deleted_folder(client, sess):
+    _make_root(sess)
+    ctime = "2024-01-01T00:00:00"
+    img = _make_image(sess, "BC_DEL_ONE", "main", ctime)
+
+    resp = client.delete(f"/api/images/{img.id}")
+
+    assert resp.status_code == 200
+    assert sess.query(Image).filter(Image.id == img.id).count() == 0
+    deleted = sess.query(DeletedFolder).filter_by(
+        barcode="BC_DEL_ONE", image_type="main", folder_ctime=ctime,
+    ).one_or_none()
+    assert deleted is not None
+
+
+def test_batch_delete_records_deleted_folders(client, sess):
+    _make_root(sess)
+    ctime1 = "2024-01-01T00:00:00"
+    ctime2 = "2024-02-01T00:00:00"
+    img1 = _make_image(sess, "BC_DEL_BATCH", "main", ctime1, filename="a.jpg")
+    img2 = _make_image(sess, "BC_DEL_BATCH", "detail", ctime2, filename="b.jpg")
+
+    resp = client.post("/api/images/batch-delete", json={"ids": [img1.id, img2.id], "delete_file": False})
+
+    assert resp.status_code == 200
+    keys = {
+        (d.barcode, d.image_type, d.folder_ctime)
+        for d in sess.query(DeletedFolder).all()
+    }
+    assert ("BC_DEL_BATCH", "main", ctime1) in keys
+    assert ("BC_DEL_BATCH", "detail", ctime2) in keys
 
 
 # ===================================================================

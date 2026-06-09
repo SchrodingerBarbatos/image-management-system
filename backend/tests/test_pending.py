@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import scoped_session, sessionmaker
 from flask import Flask
 
-from models import Base, Image, ScanRoot
+from models import Base, Image, ScanRoot, DeletedFolder
 
 
 @pytest.fixture(scope="function")
@@ -210,6 +210,20 @@ def test_pending_ignore_deletes_image(client, sess):
     assert resp.status_code == 200
     assert resp.get_json()['message'] == 'ignored'
     assert sess.get(Image, img.id) is None
+
+
+def test_pending_ignore_records_deleted_folder(client, sess):
+    _make_root(sess)
+    ctime = "2024-01-01T00:00:00"
+    img = _make_image(sess, "BC_PENDING_DEL", image_type="detail", folder_ctime=ctime, confirmed=False)
+
+    resp = client.delete(f'/api/pending/{img.id}')
+
+    assert resp.status_code == 200
+    deleted = sess.query(DeletedFolder).filter_by(
+        barcode="BC_PENDING_DEL", image_type="detail", folder_ctime=ctime,
+    ).one_or_none()
+    assert deleted is not None
 
 
 def test_pending_ignore_not_found(client, sess):

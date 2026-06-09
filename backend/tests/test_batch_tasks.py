@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import scoped_session, sessionmaker
 from flask import Flask
 
-from models import Base, Image, ImageVersion, ScanRoot, BatchTask, DuplicateScanResult, LowVersionScanResult
+from models import Base, Image, ImageVersion, ScanRoot, BatchTask, DuplicateScanResult, LowVersionScanResult, DeletedFolder
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +298,30 @@ def test_background_thread_does_not_leak_orm_objects(client, sess):
     task_id = resp.get_json()['id']
     task = _wait_for_task(client, task_id)
     assert task['status'] == 'done', f"Task ended as {task['status']}: {task.get('error_message', '')}"
+
+
+def test_batch_delete_images_task_records_deleted_folders(client, sess):
+    _make_root(sess)
+    ctime1 = "2024-01-01T00:00:00"
+    ctime2 = "2024-02-01T00:00:00"
+    img1 = _make_image(sess, "BC_TASK_DEL", "main", ctime1, filename="a.jpg")
+    img2 = _make_image(sess, "BC_TASK_DEL", "detail", ctime2, filename="b.jpg")
+
+    resp = client.post("/api/images/batch-delete-task", json={
+        "ids": [img1.id, img2.id],
+        "delete_files": False,
+    })
+    assert resp.status_code == 201
+    task = _wait_for_task(client, resp.get_json()["id"])
+
+    assert task["status"] == "done"
+    assert task["result_count"] == 2
+    keys = {
+        (d.barcode, d.image_type, d.folder_ctime)
+        for d in sess.query(DeletedFolder).all()
+    }
+    assert ("BC_TASK_DEL", "main", ctime1) in keys
+    assert ("BC_TASK_DEL", "detail", ctime2) in keys
 
 
 # ===================================================================

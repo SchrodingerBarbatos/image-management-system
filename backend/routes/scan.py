@@ -301,7 +301,7 @@ def delete_scan_root(root_id):
     root_path = root.path
 
     # Record deleted folders BEFORE deleting images
-    from routes.batch_tasks import _record_deleted_folder
+    from routes.batch import _record_deleted_folder
     for bc, it, ctime in deleted_folder_keys:
         _record_deleted_folder(session, bc, it, ctime)
 
