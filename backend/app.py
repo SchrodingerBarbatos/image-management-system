@@ -388,6 +388,43 @@ except Exception as e:
     import logging
     logging.getLogger(__name__).warning("GTIN 迁移跳过: %s", e)
 
+# Migration: clean orphaned RCN ImageVersion records (once only)
+try:
+    with engine.connect() as conn:
+        already_cleaned = conn.execute(text(
+            "SELECT COUNT(*) FROM scan_log WHERE action = 'rcn_version_cleanup'"
+        )).fetchone()[0]
+        if not already_cleaned:
+            # 删除 RCN 条码（GTIN-13 前缀 200-299）的孤立 ImageVersion 记录
+            result = conn.execute(text(
+                "DELETE FROM image_version WHERE "
+                "length(barcode) = 13 AND CAST(substr(barcode, 1, 3) AS INTEGER) BETWEEN 200 AND 299"
+            ))
+            rcn_deleted = result.rowcount
+            # 同时清理 rejected_barcode 中非 GTIN 条码的孤立版本
+            result2 = conn.execute(text(
+                "DELETE FROM image_version WHERE barcode IN "
+                "(SELECT barcode FROM rejected_barcode)"
+            ))
+            rejected_deleted = result2.rowcount
+            total_deleted = rcn_deleted + rejected_deleted
+            conn.execute(text(
+                "INSERT INTO scan_log (action, status, message, created_at) "
+                "VALUES ('rcn_version_cleanup', 'done', :msg, :now)"
+            ), {
+                'msg': f'清理完成: 删除 {rcn_deleted} 条 RCN 版本 + {rejected_deleted} 条 rejected 版本',
+                'now': datetime.datetime.now().isoformat(),
+            })
+            conn.commit()
+            if total_deleted:
+                import logging
+                logging.getLogger(__name__).info(
+                    "RCN 版本清理完成: 删除 %d 条 RCN + %d 条 rejected 孤立版本记录",
+                    rcn_deleted, rejected_deleted)
+except Exception as e:
+    import logging
+    logging.getLogger(__name__).warning("RCN 版本清理跳过: %s", e)
+
 from routes.scan import scan_bp
 from routes.images import images_bp
 from routes.export import export_bp
