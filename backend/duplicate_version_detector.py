@@ -935,6 +935,10 @@ def detect_duplicate_versions(sess, progress_callback=None):
         ImageVersion.barcode, ImageVersion.image_type
     ).distinct().all()
 
+    # 过滤 RCN 条码，不纳入重复版本扫描结果
+    from scanner import validate_business_gtin
+    distinct_groups = [(bc, t) for bc, t in distinct_groups if validate_business_gtin(bc)[0]]
+
     if not distinct_groups:
         return []
 

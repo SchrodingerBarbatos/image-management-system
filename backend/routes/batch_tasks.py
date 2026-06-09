@@ -77,8 +77,12 @@ def _cleanup_orphaned_images():
 
     sess.commit()
 
-    # 重新计算版本
+    # 重新计算版本（RCN 条码直接删除残留版本，不重建）
+    from scanner import validate_business_gtin
     for bc in affected_barcodes:
+        if not validate_business_gtin(bc)[0]:
+            sess.query(ImageVersion).filter(ImageVersion.barcode == bc).delete()
+            continue
         update_versions_for_barcode(bc)
 
     _log.info("Cleanup done: %d images, %d versions removed", len(orphaned_images), cleaned_versions)
@@ -127,6 +131,10 @@ def _run_duplicate_scan(task_id):
             except ObjectDeletedError:
                 _log.warning("ImageVersion %d deleted during scan, skipping", v.id)
                 continue
+
+    # 过滤 RCN 条码，不纳入重复扫描结果
+    from scanner import validate_business_gtin
+    dup_map = {k: v for k, v in dup_map.items() if validate_business_gtin(k[0])[0]}
 
     total = len(dup_map)
     update_task_progress(task_id, progress=0, total=total)
@@ -223,6 +231,9 @@ def _run_low_version_scan(task_id):
         detail_threshold = 0
 
     versions = sess.query(ImageVersion).all()
+    # 过滤 RCN 条码，不纳入低版本扫描结果
+    from scanner import validate_business_gtin
+    versions = [v for v in versions if validate_business_gtin(v.barcode)[0]]
     total = len(versions)
     update_task_progress(task_id, progress=0, total=total)
 

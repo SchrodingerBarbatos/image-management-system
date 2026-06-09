@@ -95,6 +95,15 @@ def update_versions_for_barcode(barcode):
 
 
 def _do_update_versions_for_barcode(barcode):
+    # RCN 条码不应有版本记录：删除残留版本后跳过
+    from scanner import validate_business_gtin
+    is_valid, _ = validate_business_gtin(barcode)
+    if not is_valid:
+        deleted = session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
+        if deleted:
+            session.commit()
+        return
+
     images = session.query(Image).filter(
         Image.barcode == barcode, Image.confirmed == True, Image.status == 'active'
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(

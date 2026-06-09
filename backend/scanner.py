@@ -32,6 +32,9 @@ def validate_business_gtin(barcode: str) -> tuple[bool, str]:
     Returns:
         (is_valid, reason)
     """
+    if not barcode.isdigit():
+        return True, ""
+
     length = len(barcode)
 
     # GTIN-13: 前3位为 GS1 Prefix
