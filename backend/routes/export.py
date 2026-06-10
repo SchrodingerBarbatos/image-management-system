@@ -105,14 +105,12 @@ def _col_letter_to_idx(s):
         idx = idx * 26 + (ord(c) - ord('A') + 1)
     return idx - 1
 
-def _build_zip(task_id, img_data, flat):
+def _build_zip(task_id, img_data, flat, export_type='all'):
     """Build ZIP file in a background thread, updating task progress.
 
     img_data: list of (file_path, barcode, image_type, sequence, ext) tuples — plain
     data so the thread doesn't need access to the request-scoped session.
-
-    When exporting detail images: barcodes with no detail images but with main
-    images get ALL their main images written as detail images in the ZIP.
+    export_type: 'main', 'detail', or 'all'. Controls naming and fallback.
     """
     from models import session as sess, ExportTask
     try:
@@ -140,50 +138,69 @@ def _build_zip(task_id, img_data, flat):
         task.zip_path = zip_path
         sess.commit()
 
-        # Group by barcode: {barcode: {"main": [...], "detail": [...]}}
-        grouped = {}
-        for fp, bc, it, seq, ex in img_data:
-            grouped.setdefault(bc, {'main': [], 'detail': []})
-            if it in ('main', 'detail'):
-                grouped[bc][it].append((fp, seq, ex))
-            else:
-                grouped[bc]['detail'].append((fp, seq, ex))
-
         written = 0
-        fallback_barcodes = []
         progress = 0
+        fallback_barcodes = []
+
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
-            for barcode, groups in grouped.items():
-                if groups['detail']:
-                    # Has detail images → export real detail images
-                    items = groups['detail']
-                elif groups['main']:
-                    # No detail images but has main → fallback: write ALL main as detail
-                    items = groups['main']
-                    fallback_barcodes.append(barcode)
-                else:
-                    items = []
-                for file_path, sequence, ext in items:
+
+            if export_type == 'main':
+                # --- main only: all main images as main ---
+                for file_path, barcode, image_type, sequence, ext in img_data:
+                    if image_type != 'main':
+                        continue
                     if os.path.exists(file_path):
-                        display_name = f"{barcode}_详情图_{sequence}.{ext}"
-                        arcname = display_name if flat else f"详情图/{display_name}"
+                        display_name = f"{barcode}_{sequence}.{ext}"
+                        arcname = display_name if flat else f"主图/{display_name}"
                         zf.write(file_path, arcname)
                         written += 1
                     progress += 1
                     if progress % 100 == 0:
                         task.progress = progress
                         sess.commit()
-            # Also export main images as main — only for barcodes that already have detail
-            # (barcodes without detail had their main images written as detail fallback above)
-            for barcode, groups in grouped.items():
-                if not groups['detail']:
-                    continue  # main images already written as detail fallback
-                for file_path, sequence, ext in groups['main']:
-                    if os.path.exists(file_path):
+
+            elif export_type == 'detail':
+                # --- detail with fallback: group by barcode ---
+                grouped = {}
+                for fp, bc, it, seq, ex in img_data:
+                    grouped.setdefault(bc, {'main': [], 'detail': []})
+                    if it == 'detail':
+                        grouped[bc]['detail'].append((fp, seq, ex))
+                    elif it == 'main':
+                        grouped[bc]['main'].append((fp, seq, ex))
+                for barcode, groups in grouped.items():
+                    if groups['detail']:
+                        items = groups['detail']
+                    elif groups['main']:
+                        items = groups['main']
+                        fallback_barcodes.append(barcode)
+                    else:
+                        items = []
+                    for file_path, sequence, ext in items:
+                        if os.path.exists(file_path):
+                            display_name = f"{barcode}_详情图_{sequence}.{ext}"
+                            arcname = display_name if flat else f"详情图/{display_name}"
+                            zf.write(file_path, arcname)
+                            written += 1
+                        progress += 1
+                        if progress % 100 == 0:
+                            task.progress = progress
+                            sess.commit()
+
+            else:
+                # --- all: main as main, detail as detail, no fallback ---
+                for file_path, barcode, image_type, sequence, ext in img_data:
+                    if not os.path.exists(file_path):
+                        progress += 1
+                        continue
+                    if image_type == 'main':
                         display_name = f"{barcode}_{sequence}.{ext}"
                         arcname = display_name if flat else f"主图/{display_name}"
-                        zf.write(file_path, arcname)
-                        written += 1
+                    else:
+                        display_name = f"{barcode}_详情图_{sequence}.{ext}"
+                        arcname = display_name if flat else f"详情图/{display_name}"
+                    zf.write(file_path, arcname)
+                    written += 1
                     progress += 1
                     if progress % 100 == 0:
                         task.progress = progress
@@ -384,7 +401,7 @@ def generate_zip():
 
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
 
-    threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
+    threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
 
     return jsonify({'task_id': task.id, 'total_images': len(imgs), 'total_barcodes': len(matched_barcodes), 'excluded_barcodes': excluded_barcodes})
 

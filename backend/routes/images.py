@@ -404,7 +404,7 @@ def batch_export():
     import threading
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
 
-    threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
+    threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
 
     return jsonify({'task_id': task.id, 'total': len(imgs), 'scanroot_excluded': scanroot_excluded, 'version_filtered': version_filtered})
 
