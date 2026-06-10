@@ -369,7 +369,8 @@ def batch_export():
     q = session.query(Image).filter(Image.id.in_(ids)).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
-    if image_type and image_type != 'all':
+    # When exporting detail images, fetch main+detail so _build_zip can use main as fallback
+    if image_type and image_type not in ('all', 'detail'):
         q = q.filter(Image.image_type == image_type)
     imgs = q.all()
 
@@ -377,13 +378,17 @@ def batch_export():
     scanroot_excluded = len(ids) - len(imgs)
     barcodes_in = list(set(img.barcode for img in imgs))
     if barcodes_in:
-        # Lazy import to avoid circular dependency (routes.export imports from models)
         from routes.export import filter_to_single_version
         imgs = filter_to_single_version(imgs, barcodes_in, session)
     version_filtered = len(ids) - scanroot_excluded - len(imgs)
 
     from routes.export import _compute_barcode_counts, _export_lock
     barcode_counts = _compute_barcode_counts(imgs)
+    # When exporting a specific type, zero out the other type for the report
+    if image_type in ('main', 'detail'):
+        other = 'detail' if image_type == 'main' else 'main'
+        for bc in barcode_counts:
+            barcode_counts[bc][other] = 0
 
     # Concurrency guard: same lock + running check as /export/zip
     with _export_lock:

@@ -348,7 +348,8 @@ def generate_zip():
     q_base = session.query(Image).filter(Image.confirmed == True).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
-    if image_type and image_type != 'all':
+    # When exporting detail images, fetch main+detail so _build_zip can use main as fallback
+    if image_type and image_type not in ('all', 'detail'):
         q_base = q_base.filter(Image.image_type == image_type)
 
     imgs = []
@@ -364,6 +365,12 @@ def generate_zip():
 
     # Compute per-barcode match counts (include all barcodes, even unmatched)
     barcode_counts = _compute_barcode_counts(imgs, barcodes)
+    # When exporting a specific type, zero out the other type so the report
+    # only reflects what was requested (e.g. detail export shows detail=5, main=0)
+    if image_type in ('main', 'detail'):
+        other = 'detail' if image_type == 'main' else 'main'
+        for bc in barcode_counts:
+            barcode_counts[bc][other] = 0
 
     # Concurrency guard: check + create + commit must be atomic
     with _export_lock:
