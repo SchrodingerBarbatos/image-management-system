@@ -1,8 +1,8 @@
 """Tests for detail-image fallback logic in ZIP export.
 
-When exporting detail images, barcodes that have no detail images but do have
-main images should get one main image written as a fallback detail image in the
-ZIP. Matching statistics (barcode_counts) must remain truthful — detail count
+When exporting images, barcodes that have no detail images but do have main
+images get ALL their main images written as detail images in the ZIP.
+Matching statistics (barcode_counts) must remain truthful — detail count
 stays at 0 for those barcodes.
 """
 
@@ -68,43 +68,57 @@ def _make_task(session):
     return task
 
 
-def _run_build_zip(task_id, img_data, flat, main_img_data=None, upload_dir=None):
+def _run_build_zip(task_id, img_data, flat, upload_dir=None):
     """Call _build_zip with UPLOAD_DIR temporarily overridden."""
     import routes.export as exp_mod
     old = exp_mod.UPLOAD_DIR
     exp_mod.UPLOAD_DIR = upload_dir
     try:
         from routes.export import _build_zip
-        _build_zip(task_id, img_data, flat, main_img_data=main_img_data)
+        _build_zip(task_id, img_data, flat)
     finally:
         exp_mod.UPLOAD_DIR = old
 
 
+def _zip_names(zip_path):
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        return zf.namelist()
+
+
 # ---------------------------------------------------------------------------
-# Scenario 1: barcode has only main images → fallback detail image in ZIP
+# Scenario 1: barcode has only main images → ALL written as detail in ZIP
 # ---------------------------------------------------------------------------
 
 def test_fallback_when_no_detail_images(db, images_dir):
-    """A barcode with main images but no detail images should get one main
-    image written as a fallback detail image in the ZIP."""
+    """A barcode with main images but no detail images should get ALL main
+    images written as detail images in the ZIP."""
     sr = ScanRoot(path="/fake", enabled=True)
     db.add(sr); db.commit()
 
-    file_a = _create_image_file(images_dir, "A_main.jpg")
-    img_data = [(file_a, "A", "main", 1, "jpg")]
-    main_img_data = [(file_a, "A", "main", 1, "jpg")]
+    f1 = _create_image_file(images_dir, "A_1.jpg")
+    f2 = _create_image_file(images_dir, "A_2.jpg")
+    f3 = _create_image_file(images_dir, "A_3.jpg")
+
+    # img_data: only main images (as if image_type='all' and no detail images exist)
+    img_data = [
+        (f1, "A", "main", 1, "jpg"),
+        (f2, "A", "main", 2, "jpg"),
+        (f3, "A", "main", 3, "jpg"),
+    ]
 
     task = _make_task(db)
     task_id = task.id
-    _run_build_zip(task_id, img_data, flat=False, main_img_data=main_img_data,
-                   upload_dir=images_dir)
+    _run_build_zip(task_id, img_data, flat=False, upload_dir=images_dir)
 
-    zip_path = os.path.join(images_dir, f"export_{task_id}.zip")
-    assert os.path.exists(zip_path)
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-        assert any("详情图" in n for n in names), f"Expected detail folder, got: {names}"
-        assert any("A_详情图_1.jpg" in n for n in names), f"Expected fallback file, got: {names}"
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    # All 3 main images should appear as detail images
+    assert len(names) == 3
+    detail_names = sorted([n for n in names if "详情图" in n])
+    assert detail_names == [
+        "详情图/A_详情图_1.jpg",
+        "详情图/A_详情图_2.jpg",
+        "详情图/A_详情图_3.jpg",
+    ]
 
     db.expire_all()
     assert db.get(ExportTask, task_id).status == "done"
@@ -119,21 +133,26 @@ def test_no_fallback_when_detail_images_exist(db, images_dir):
     sr = ScanRoot(path="/fake", enabled=True)
     db.add(sr); db.commit()
 
-    file_d = _create_image_file(images_dir, "B_detail.jpg")
+    file_d1 = _create_image_file(images_dir, "B_detail_1.jpg")
+    file_d2 = _create_image_file(images_dir, "B_detail_2.jpg")
     file_m = _create_image_file(images_dir, "B_main.jpg")
-    img_data = [(file_d, "B", "detail", 1, "jpg")]
-    main_img_data = [(file_m, "B", "main", 1, "jpg")]
+
+    img_data = [
+        (file_d1, "B", "detail", 1, "jpg"),
+        (file_d2, "B", "detail", 2, "jpg"),
+        (file_m, "B", "main", 1, "jpg"),
+    ]
 
     task = _make_task(db)
     task_id = task.id
-    _run_build_zip(task_id, img_data, flat=False, main_img_data=main_img_data,
-                   upload_dir=images_dir)
+    _run_build_zip(task_id, img_data, flat=False, upload_dir=images_dir)
 
-    zip_path = os.path.join(images_dir, f"export_{task_id}.zip")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-        assert len(names) == 1, f"Expected exactly 1 file, got: {names}"
-        assert "B_详情图_1.jpg" in names[0]
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    # 2 real detail images + 1 main image (as main, not fallback)
+    assert len(names) == 3
+    assert any("B_详情图_1.jpg" in n for n in names)
+    assert any("B_详情图_2.jpg" in n for n in names)
+    assert any("B_1.jpg" in n and "详情图" not in n for n in names)
 
 
 # ---------------------------------------------------------------------------
@@ -146,77 +165,27 @@ def test_mixed_barcodes_partial_fallback(db, images_dir):
     sr = ScanRoot(path="/fake", enabled=True)
     db.add(sr); db.commit()
 
-    file_a = _create_image_file(images_dir, "A_detail.jpg")
-    file_b = _create_image_file(images_dir, "B_main.jpg")
-    img_data = [(file_a, "A", "detail", 1, "jpg")]
-    main_img_data = [(file_b, "B", "main", 1, "jpg")]
+    f_a_detail = _create_image_file(images_dir, "A_detail.jpg")
+    f_b_main = _create_image_file(images_dir, "B_main.jpg")
+
+    img_data = [
+        (f_a_detail, "A", "detail", 1, "jpg"),
+        (f_b_main, "B", "main", 1, "jpg"),
+    ]
 
     task = _make_task(db)
     task_id = task.id
-    _run_build_zip(task_id, img_data, flat=False, main_img_data=main_img_data,
-                   upload_dir=images_dir)
+    _run_build_zip(task_id, img_data, flat=False, upload_dir=images_dir)
 
-    zip_path = os.path.join(images_dir, f"export_{task_id}.zip")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-        assert len(names) == 2, f"Expected 2 files, got: {names}"
-        assert any("A_详情图_1.jpg" in n for n in names)
-        assert any("B_详情图_1.jpg" in n for n in names)
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert len(names) == 2
+    assert any("A_详情图_1.jpg" in n for n in names)
+    # B's main image should appear as detail (fallback)
+    assert any("B_详情图_1.jpg" in n for n in names)
 
 
 # ---------------------------------------------------------------------------
-# Scenario 4: no main_img_data → normal behavior, no fallback
-# ---------------------------------------------------------------------------
-
-def test_no_fallback_when_main_img_data_is_none(db, images_dir):
-    """When main_img_data is None (exporting main images or all), no fallback."""
-    sr = ScanRoot(path="/fake", enabled=True)
-    db.add(sr); db.commit()
-
-    file_m = _create_image_file(images_dir, "C_main.jpg")
-    img_data = [(file_m, "C", "main", 1, "jpg")]
-
-    task = _make_task(db)
-    task_id = task.id
-    _run_build_zip(task_id, img_data, flat=False, main_img_data=None,
-                   upload_dir=images_dir)
-
-    zip_path = os.path.join(images_dir, f"export_{task_id}.zip")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-        assert len(names) == 1
-        assert "C_1.jpg" in names[0]
-        assert "详情图" not in names[0]
-
-
-# ---------------------------------------------------------------------------
-# Scenario 5: main image file deleted from disk → fallback skipped
-# ---------------------------------------------------------------------------
-
-def test_fallback_skips_missing_files(db, images_dir):
-    """Fallback should skip main images whose files no longer exist on disk."""
-    sr = ScanRoot(path="/fake", enabled=True)
-    db.add(sr); db.commit()
-
-    nonexistent = os.path.join(images_dir, "DELETED_main.jpg")
-    img_data = []
-    main_img_data = [(nonexistent, "D", "main", 1, "jpg")]
-
-    task = _make_task(db)
-    task_id = task.id
-    _run_build_zip(task_id, img_data, flat=False, main_img_data=main_img_data,
-                   upload_dir=images_dir)
-
-    zip_path = os.path.join(images_dir, f"export_{task_id}.zip")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        assert len(zf.namelist()) == 0
-
-    db.expire_all()
-    assert db.get(ExportTask, task_id).status == "failed"
-
-
-# ---------------------------------------------------------------------------
-# Scenario 6: flat mode — fallback files at ZIP root
+# Scenario 4: flat mode — fallback files at ZIP root
 # ---------------------------------------------------------------------------
 
 def test_fallback_flat_mode(db, images_dir):
@@ -224,20 +193,74 @@ def test_fallback_flat_mode(db, images_dir):
     sr = ScanRoot(path="/fake", enabled=True)
     db.add(sr); db.commit()
 
-    file_m = _create_image_file(images_dir, "E_main.jpg")
-    img_data = []
-    main_img_data = [(file_m, "E", "main", 1, "jpg")]
+    f1 = _create_image_file(images_dir, "E_1.jpg")
+    f2 = _create_image_file(images_dir, "E_2.jpg")
+
+    img_data = [
+        (f1, "E", "main", 1, "jpg"),
+        (f2, "E", "main", 2, "jpg"),
+    ]
 
     task = _make_task(db)
     task_id = task.id
-    _run_build_zip(task_id, img_data, flat=True, main_img_data=main_img_data,
-                   upload_dir=images_dir)
+    _run_build_zip(task_id, img_data, flat=True, upload_dir=images_dir)
 
-    zip_path = os.path.join(images_dir, f"export_{task_id}.zip")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-        assert len(names) == 1
-        assert names[0] == "E_详情图_1.jpg"
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert len(names) == 2
+    assert sorted(names) == ["E_详情图_1.jpg", "E_详情图_2.jpg"]
+
+
+# ---------------------------------------------------------------------------
+# Scenario 5: main image file deleted from disk → skipped gracefully
+# ---------------------------------------------------------------------------
+
+def test_fallback_skips_missing_files(db, images_dir):
+    """Fallback should skip main images whose files no longer exist on disk."""
+    sr = ScanRoot(path="/fake", enabled=True)
+    db.add(sr); db.commit()
+
+    nonexistent = os.path.join(images_dir, "DELETED.jpg")
+    img_data = [(nonexistent, "D", "main", 1, "jpg")]
+
+    task = _make_task(db)
+    task_id = task.id
+    _run_build_zip(task_id, img_data, flat=False, upload_dir=images_dir)
+
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert len(names) == 0
+
+    db.expire_all()
+    assert db.get(ExportTask, task_id).status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6: barcode with both types — detail takes priority
+# ---------------------------------------------------------------------------
+
+def test_detail_takes_priority_over_main(db, images_dir):
+    """When a barcode has both detail and main images, real detail images
+    are exported (not the main images as fallback)."""
+    sr = ScanRoot(path="/fake", enabled=True)
+    db.add(sr); db.commit()
+
+    f_d = _create_image_file(images_dir, "F_detail.jpg")
+    f_m = _create_image_file(images_dir, "F_main.jpg")
+
+    img_data = [
+        (f_d, "F", "detail", 1, "jpg"),
+        (f_m, "F", "main", 1, "jpg"),
+    ]
+
+    task = _make_task(db)
+    task_id = task.id
+    _run_build_zip(task_id, img_data, flat=False, upload_dir=images_dir)
+
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert len(names) == 2
+    # Detail image appears as detail
+    assert any("F_详情图_1.jpg" in n for n in names)
+    # Main image appears as main (NOT as fallback detail)
+    assert any("F_1.jpg" in n and "详情图" not in n for n in names)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +281,26 @@ def test_barcode_counts_not_affected_by_fallback():
     counts = _compute_barcode_counts(imgs, ["A", "B"])
 
     assert counts["A"]["main"] == 3
-    assert counts["A"]["detail"] == 0
+    assert counts["A"]["detail"] == 0  # truthful: no detail images exist
     assert counts["B"]["main"] == 0
     assert counts["B"]["detail"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8: empty img_data → empty ZIP
+# ---------------------------------------------------------------------------
+
+def test_empty_img_data_creates_empty_zip(db, images_dir):
+    """When img_data is empty, an empty ZIP should be created."""
+    sr = ScanRoot(path="/fake", enabled=True)
+    db.add(sr); db.commit()
+
+    task = _make_task(db)
+    task_id = task.id
+    _run_build_zip(task_id, [], flat=False, upload_dir=images_dir)
+
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert len(names) == 0
+
+    db.expire_all()
+    assert db.get(ExportTask, task_id).status == "done"

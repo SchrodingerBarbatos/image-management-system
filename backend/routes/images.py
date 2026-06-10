@@ -399,11 +399,7 @@ def batch_export():
     import threading
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
 
-    # When exporting detail images, query main images as fallback for barcodes with no detail images
-    from routes.export import _query_fallback_main_images
-    main_img_data = _query_fallback_main_images(barcodes_in, session) if image_type == 'detail' else None
-
-    threading.Thread(target=_build_zip, args=(task.id, img_data, flat, main_img_data), daemon=True).start()
+    threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
 
     return jsonify({'task_id': task.id, 'total': len(imgs), 'scanroot_excluded': scanroot_excluded, 'version_filtered': version_filtered})
 
