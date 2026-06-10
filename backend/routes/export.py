@@ -86,6 +86,25 @@ def _compute_barcode_counts(imgs, all_barcodes=None):
             counts[img.barcode][img.image_type] += 1
     return counts
 
+
+def _query_fallback_main_images(barcodes, session):
+    """Query main images as fallback for barcodes with no detail images.
+
+    Returns a list of (file_path, barcode, image_type, sequence, ext) tuples,
+    or None if no fallback images found. Only used when image_type='detail'.
+    """
+    from models import Image, ScanRoot
+    if not barcodes:
+        return None
+    q_main = session.query(Image).filter(Image.confirmed == True).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(ScanRoot.enabled == True, Image.image_type == 'main')
+    main_imgs = _chunked_in_query(Image.barcode, barcodes, q_main)
+    main_imgs = filter_to_single_version(main_imgs, barcodes, session)
+    if not main_imgs:
+        return None
+    return [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in main_imgs]
+
 def _col_letter(idx):
     """Convert 0-based column index to Excel column letter(s). 0->A, 25->Z, 26->AA."""
     result = ''
@@ -105,11 +124,13 @@ def _col_letter_to_idx(s):
         idx = idx * 26 + (ord(c) - ord('A') + 1)
     return idx - 1
 
-def _build_zip(task_id, img_data, flat):
+def _build_zip(task_id, img_data, flat, main_img_data=None):
     """Build ZIP file in a background thread, updating task progress.
 
     img_data: list of (file_path, barcode, image_type, sequence, ext) tuples — plain
     data so the thread doesn't need access to the request-scoped session.
+    main_img_data: optional fallback main images for barcodes with no detail images.
+                    Same tuple format. Only used when exporting detail images.
     """
     from models import session as sess, ExportTask
     try:
@@ -118,7 +139,8 @@ def _build_zip(task_id, img_data, flat):
             _log.warning("_build_zip: task %s not found (may have been deleted)", task_id)
             return
         total = len(img_data)
-        if total == 0:
+        has_fallback = bool(main_img_data)
+        if total == 0 and not has_fallback:
             task.status = 'done'
             task.total_images = 0
             task.progress = 0
@@ -160,6 +182,30 @@ def _build_zip(task_id, img_data, flat):
                 task.progress = i + 1
                 if (i + 1) % 100 == 0:
                     sess.commit()
+
+            # Detail image fallback: use main image for barcodes with no detail images
+            if main_img_data:
+                detail_barcodes_in_zip = {barcode for _, barcode, img_type, _, _ in img_data if img_type == 'detail'}
+                main_by_barcode = {}
+                for fp, bc, it, seq, ex in main_img_data:
+                    if bc not in detail_barcodes_in_zip:
+                        main_by_barcode.setdefault(bc, []).append((fp, seq, ex))
+                fallback_count = 0
+                for barcode, candidates in main_by_barcode.items():
+                    file_path, sequence, ext = candidates[0]
+                    if os.path.exists(file_path):
+                        display_name = f"{barcode}_详情图_{sequence}.{ext}"
+                        if flat:
+                            arcname = display_name
+                        else:
+                            arcname = f"详情图/{display_name}"
+                        zf.write(file_path, arcname)
+                        written += 1
+                        fallback_count += 1
+                if fallback_count > 0:
+                    _log.info("_build_zip task %s: %d barcodes used main image as detail fallback", task_id, fallback_count)
+                    # Update total_images to reflect actual ZIP contents (real + fallback)
+                    task.total_images = written
 
         if written == 0:
             _log.warning("_build_zip task %s: all %d files missing from disk", task_id, total)
@@ -343,7 +389,11 @@ def generate_zip():
         session.commit()
 
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
-    threading.Thread(target=_build_zip, args=(task.id, img_data, flat), daemon=True).start()
+
+    # When exporting detail images, query main images as fallback for barcodes with no detail images
+    main_img_data = _query_fallback_main_images(barcodes, session) if image_type == 'detail' else None
+
+    threading.Thread(target=_build_zip, args=(task.id, img_data, flat, main_img_data), daemon=True).start()
 
     return jsonify({'task_id': task.id, 'total_images': len(imgs), 'total_barcodes': len(matched_barcodes), 'excluded_barcodes': excluded_barcodes})
 
