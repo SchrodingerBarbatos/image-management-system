@@ -510,18 +510,29 @@ def delete_duplicate_images(barcode):
         return jsonify({'error': 'no duplicate images found'}), 404
 
     deleted = 0
+    failed_items = []
     for img in imgs:
         if delete_file:
-            safe_remove_image_file(img, session)  # non-blocking; logged on failure
+            ok, reason = safe_remove_image_file(img, session)
+            if not ok:
+                failed_items.append({'id': img.id, 'file_path': img.file_path, 'reason': reason})
+                continue
         session.delete(img)
         deleted += 1
 
     from routes.batch import _record_deleted_folder
-    _record_deleted_folder(session, barcode, image_type, folder_ctime)
+    if deleted > 0:
+        _record_deleted_folder(session, barcode, image_type, folder_ctime)
     session.commit()
-    update_versions_for_barcode(barcode)
 
-    return jsonify({'message': f'deleted {deleted} duplicate images', 'deleted': deleted})
+    if deleted > 0:
+        update_versions_for_barcode(barcode)
+
+    return jsonify({
+        'deleted': deleted,
+        'file_deleted': delete_file,
+        'failed_items': failed_items,
+    })
 
 
 def _image_to_dict(img):
@@ -545,27 +556,38 @@ def delete_version(version_id):
     barcode = v.barcode
     folder_ctime = v.folder_ctime
 
-    # Delete all images belonging to this version
+    # Delete images belonging to this version
     imgs = session.query(Image).filter(
         Image.barcode == barcode,
         Image.folder_ctime == folder_ctime,
         Image.image_type == v.image_type,
     ).all()
+    deleted = 0
+    failed_items = []
     for img in imgs:
         if delete_file:
-            safe_remove_image_file(img, session)  # non-blocking; logged on failure
+            ok, reason = safe_remove_image_file(img, session)
+            if not ok:
+                failed_items.append({'id': img.id, 'file_path': img.file_path, 'reason': reason})
+                continue
         session.delete(img)
+        deleted += 1
 
-    # Delete the version record itself
-    session.delete(v)
     from routes.batch import _record_deleted_folder
-    _record_deleted_folder(session, barcode, v.image_type, folder_ctime)
+    if deleted > 0:
+        _record_deleted_folder(session, barcode, v.image_type, folder_ctime)
     session.commit()
 
-    # Re-sequence remaining versions for this barcode
-    update_versions_for_barcode(barcode)
+    # update_versions_for_barcode 会根据剩余图片自动重建或删除 ImageVersion，
+    # 无需手动 delete(v)。
+    if deleted > 0:
+        update_versions_for_barcode(barcode)
 
-    return jsonify({'message': f'deleted version and {len(imgs)} images'})
+    return jsonify({
+        'deleted': deleted,
+        'file_deleted': delete_file,
+        'failed_items': failed_items,
+    })
 
 @images_bp.route('/barcode-settings/<barcode>', methods=['GET'])
 def get_barcode_setting(barcode):

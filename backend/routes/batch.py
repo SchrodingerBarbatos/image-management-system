@@ -328,24 +328,34 @@ def delete_duplicates():
 
     affected_barcodes = set()
     total_deleted = 0
+    all_failed_items = []
+    deleted_item_count = 0
 
     for item in items:
-        count, _failed = _delete_folder_images(
+        count, failed_items = _delete_folder_images(
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
-        affected_barcodes.add(item['barcode'])
+        if count > 0:
+            affected_barcodes.add(item['barcode'])
+            deleted_item_count += 1
+        if failed_items:
+            all_failed_items.extend(failed_items)
 
     session.commit()
 
     for bc in affected_barcodes:
         update_versions_for_barcode(bc)
 
-    return jsonify({
+    result = {
         'deleted_image_count': total_deleted,
-        'deleted_item_count': len(items),
+        'deleted_item_count': deleted_item_count,
         'affected_barcodes': list(affected_barcodes),
-    })
+    }
+    if all_failed_items:
+        result['failed_items'] = all_failed_items
+        result['failed_count'] = len(all_failed_items)
+    return jsonify(result)
 
 
 @batch_bp.route('/batch/low-versions', methods=['GET'])
@@ -476,21 +486,31 @@ def delete_low_versions():
 
     affected_barcodes = set()
     total_deleted = 0
+    all_failed_items = []
+    deleted_item_count = 0
 
     for item in items:
-        count, _failed = _delete_folder_images(
+        count, failed_items = _delete_folder_images(
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
-        affected_barcodes.add(item['barcode'])
+        if count > 0:
+            affected_barcodes.add(item['barcode'])
+            deleted_item_count += 1
+        if failed_items:
+            all_failed_items.extend(failed_items)
 
     session.commit()
 
     for bc in affected_barcodes:
         update_versions_for_barcode(bc)
 
-    return jsonify({
+    result = {
         'deleted_image_count': total_deleted,
-        'deleted_item_count': len(items),
+        'deleted_item_count': deleted_item_count,
         'affected_barcodes': list(affected_barcodes),
-    })
+    }
+    if all_failed_items:
+        result['failed_items'] = all_failed_items
+        result['failed_count'] = len(all_failed_items)
+    return jsonify(result)

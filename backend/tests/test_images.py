@@ -592,3 +592,86 @@ def test_batch_delete_all_fail_returns_zero(client, sess, tmp_path):
     assert sess.get(Image, img.id) is not None
     # No deleted_folders written
     assert sess.query(DeletedFolder).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# delete_duplicate_images: file outside root must not delete DB
+# ---------------------------------------------------------------------------
+
+
+def test_delete_duplicate_images_file_outside_root(client, sess, tmp_path):
+    """delete_file=true with file outside scan_root: DB preserved, failed_items returned."""
+    import os
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    _make_root(sess, root_id=1, path=root_dir)
+
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "dup.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+
+    ctime = "2024-01-01T00:00:00"
+    img = _make_image(sess, "BC_DUP", "main", ctime, filename="dup.jpg", scan_root_id=1)
+    img.file_path = outside
+    sess.commit()
+
+    resp = client.delete(
+        f'/api/barcodes/BC_DUP/duplicate-images?folder_ctime={ctime}&image_type=main&delete_file=true'
+    )
+    data = resp.get_json()
+    assert resp.status_code == 200
+    assert data['deleted'] == 0
+    assert len(data['failed_items']) == 1
+    assert data['failed_items'][0]['id'] == img.id
+
+    # DB record preserved
+    assert sess.get(Image, img.id) is not None
+    # No deleted_folders written
+    assert sess.query(DeletedFolder).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# delete_version: file outside root must not delete DB
+# ---------------------------------------------------------------------------
+
+
+def test_delete_version_file_outside_root(client, sess, tmp_path):
+    """delete_file=true with file outside scan_root: version images preserved."""
+    import os
+    from models import ImageVersion
+
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    _make_root(sess, root_id=1, path=root_dir)
+
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "ver.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+
+    ctime = "2024-01-01T00:00:00"
+    img = _make_image(sess, "BC_VER", "main", ctime, filename="ver.jpg", scan_root_id=1)
+    img.file_path = outside
+    sess.commit()
+
+    v = ImageVersion(
+        barcode="BC_VER", image_type="main", folder_ctime=ctime,
+        version_label="v1", is_latest=True, duplicate_mtimes='',
+        content_hash="hash1",
+    )
+    sess.add(v)
+    sess.commit()
+
+    resp = client.delete(f'/api/versions/{v.id}?delete_file=true')
+    data = resp.get_json()
+    assert resp.status_code == 200
+    assert data['deleted'] == 0
+    assert len(data['failed_items']) == 1
+
+    # DB image preserved
+    assert sess.get(Image, img.id) is not None
+    # No deleted_folders written
+    assert sess.query(DeletedFolder).count() == 0

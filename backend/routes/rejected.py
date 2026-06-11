@@ -9,6 +9,28 @@ from sqlalchemy.orm import aliased
 rejected_bp = Blueprint('rejected', __name__)
 
 
+def safe_remove_rejected_file(rejected, sess):
+    """Safely remove a rejected barcode file with root/path validation.
+    Returns (True, None) on success, (False, reason) on failure."""
+    root = sess.get(ScanRoot, rejected.scan_root_id)
+    if not root:
+        return False, f'找不到扫描目录 (scan_root_id={rejected.scan_root_id})'
+    real_file = os.path.realpath(rejected.file_path)
+    real_root = os.path.realpath(root.path)
+    try:
+        if os.path.commonpath([real_file, real_root]) != real_root:
+            return False, '文件路径不在所属扫描目录下'
+    except ValueError:
+        return False, '文件路径与扫描目录不在同一驱动器'
+    try:
+        os.remove(rejected.file_path)
+        return True, None
+    except FileNotFoundError:
+        return True, None
+    except OSError as e:
+        return False, f'系统删除失败: {e}'
+
+
 @rejected_bp.route('', methods=['GET'])
 def list_rejected():
     """查询被拒绝的条码记录。"""
@@ -65,22 +87,14 @@ def delete_rejected(id):
     if not rejected:
         return jsonify({'error': '记录不存在'}), 404
 
-    # 尝试删除文件
-    deleted_file = False
-    try:
-        if os.path.exists(rejected.file_path):
-            os.remove(rejected.file_path)
-            deleted_file = True
-    except OSError:
-        pass
+    ok, reason = safe_remove_rejected_file(rejected, session)
+    if not ok:
+        return jsonify({'error': f'文件删除失败，已取消数据库删除: {reason}'}), 403
 
     session.delete(rejected)
     session.commit()
 
-    return jsonify({
-        'message': '已删除',
-        'deleted_file': deleted_file,
-    })
+    return jsonify({'message': '已删除'})
 
 
 @rejected_bp.route('/delete-batch', methods=['POST'])
@@ -94,7 +108,7 @@ def delete_batch():
     if not isinstance(ids, list):
         return jsonify({'error': 'ids 必须是列表'}), 400
 
-    failed_files = []
+    failed_items = []
     deleted_count = 0
 
     for id in ids:
@@ -102,22 +116,19 @@ def delete_batch():
         if not rejected:
             continue
 
-        # 尝试删除文件
-        try:
-            if os.path.exists(rejected.file_path):
-                os.remove(rejected.file_path)
-        except OSError:
-            failed_files.append(rejected.file_path)
-
-        session.delete(rejected)
-        deleted_count += 1
+        ok, reason = safe_remove_rejected_file(rejected, session)
+        if ok:
+            session.delete(rejected)
+            deleted_count += 1
+        else:
+            failed_items.append({'id': rejected.id, 'file_path': rejected.file_path, 'reason': reason})
 
     session.commit()
 
     return jsonify({
         'message': f'已删除 {deleted_count} 条记录',
         'deleted_count': deleted_count,
-        'failed_files': failed_files,
+        'failed_items': failed_items,
     })
 
 
@@ -137,23 +148,25 @@ def delete_all():
     if 'end_date' in data and data['end_date']:
         query = query.filter(RejectedBarcode.created_at <= data['end_date'] + 'T23:59:59')
 
-    # 先取文件路径，再删数据库记录，最后删文件（保证数据库一致性）
-    file_paths = [fp for (fp,) in query.with_entities(RejectedBarcode.file_path).all()]
-    deleted_count = query.delete(synchronize_session='fetch')
-    session.commit()
+    # 先逐条安全删文件，成功后删 DB，失败保留 DB
+    rejected_items = query.all()
+    deleted_count = 0
+    failed_items = []
 
-    failed_files = []
-    for fp in file_paths:
-        try:
-            if os.path.exists(fp):
-                os.remove(fp)
-        except OSError:
-            failed_files.append(fp)
+    for rejected in rejected_items:
+        ok, reason = safe_remove_rejected_file(rejected, session)
+        if ok:
+            session.delete(rejected)
+            deleted_count += 1
+        else:
+            failed_items.append({'id': rejected.id, 'file_path': rejected.file_path, 'reason': reason})
+
+    session.commit()
 
     return jsonify({
         'message': f'已删除 {deleted_count} 条记录',
         'deleted_count': deleted_count,
-        'failed_files': failed_files,
+        'failed_items': failed_items,
     })
 
 

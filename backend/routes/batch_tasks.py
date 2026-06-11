@@ -411,11 +411,12 @@ def _run_batch_delete_duplicates(task_id):
             item['barcode'], item['image_type'], item['folder_ctime'], delete_files
         )
         total_deleted += count
+        if count > 0:
+            affected_barcodes.add(item['barcode'])
         if failed_items:
             failed_count += len(failed_items)
             for fi in failed_items:
                 update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
-        affected_barcodes.add(item['barcode'])
         update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
 
     sess.commit()
@@ -487,11 +488,12 @@ def _run_batch_delete_low_versions(task_id):
 
         count, failed_items = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
         total_deleted += count
+        if count > 0:
+            affected_barcodes.add(barcode)
         if failed_items:
             failed_count += len(failed_items)
             for fi in failed_items:
                 update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
-        affected_barcodes.add(barcode)
         update_task_progress(task_id, progress=i + 1, current_item=barcode)
 
     sess.commit()
@@ -617,9 +619,7 @@ def _run_batch_delete_images(task_id):
         finish_task(task_id, error_message=f'部分图片属于已禁用的扫描目录（{len(disabled_ids)}个）')
         return
 
-    # Collect barcodes before deletion
-    barcodes = {r[0] for r in sess.query(Image.barcode).filter(
-        Image.id.in_(ids)).distinct().all()}
+    # Collect barcodes from the IDs that will actually be DB-deleted
     delete_db_folder_keys = set()
 
     # Delete files if requested (with path safety validation)
@@ -647,13 +647,24 @@ def _run_batch_delete_images(task_id):
             update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
     else:
         # Even when not deleting files, report progress for consistency
+        for i in range(total):
+            update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
+
+    if not delete_db_ids:
+        sess.commit()
+        finish_task(task_id, result_count=0)
+        _log.info("batch_delete_images task %d done: 0 images deleted (all failed)", task_id)
+        return
+
+    # Collect barcodes and folder keys from the IDs that will actually be DB-deleted
+    barcodes = {r[0] for r in sess.query(Image.barcode).filter(
+        Image.id.in_(delete_db_ids)).distinct().all()}
+    if not delete_files:
         delete_db_folder_keys = {
             (r.barcode, r.image_type, r.folder_ctime)
             for r in sess.query(Image.barcode, Image.image_type, Image.folder_ctime)
             .filter(Image.id.in_(delete_db_ids)).distinct().all()
         }
-        for i in range(total):
-            update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
 
     # Delete database records（仅删除文件删除成功的记录）
     for bc, it, ctime in delete_db_folder_keys:

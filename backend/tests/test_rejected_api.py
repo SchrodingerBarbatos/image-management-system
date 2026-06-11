@@ -182,6 +182,125 @@ def test_delete_batch_rejected_barcodes(client, sess):
     assert len(remaining) == 0
 
 
+# ---------------------------------------------------------------------------
+# 安全校验：文件路径不在 scan_root 下时，保留 DB 记录
+# ---------------------------------------------------------------------------
+
+
+def test_delete_rejected_file_outside_root(client, sess, tmp_path):
+    """单删：文件路径不在 scan_root 下时返回 403，DB 记录保留。"""
+    import os
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    sr = ScanRoot(path=root_dir, enabled=True, recursive=False)
+    sess.add(sr)
+    sess.commit()
+
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "bad.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+
+    rejected = RejectedBarcode(
+        barcode="12345678", file_path=outside,
+        filename="bad.jpg", reason="长度不符合", scan_root_id=sr.id,
+    )
+    sess.add(rejected)
+    sess.commit()
+
+    resp = client.delete(f'/api/rejected-barcodes/{rejected.id}')
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert '文件删除失败' in data['error']
+
+    # DB preserved
+    assert sess.get(RejectedBarcode, rejected.id) is not None
+
+
+def test_delete_batch_rejected_mixed(client, sess, tmp_path):
+    """批删：混合 inside/outside 路径，成功项删 DB，失败项保留。"""
+    import os
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    sr = ScanRoot(path=root_dir, enabled=True, recursive=False)
+    sess.add(sr)
+    sess.commit()
+
+    # Inside root — will succeed (file doesn't exist, but path is inside root → FileNotFoundError → ok)
+    inside = root_dir + os.sep + "good.jpg"
+    rej_ok = RejectedBarcode(
+        barcode="111", file_path=inside,
+        filename="good.jpg", reason="r", scan_root_id=sr.id,
+    )
+
+    # Outside root — will fail
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "bad.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+    rej_bad = RejectedBarcode(
+        barcode="222", file_path=outside,
+        filename="bad.jpg", reason="r", scan_root_id=sr.id,
+    )
+
+    sess.add_all([rej_ok, rej_bad])
+    sess.commit()
+
+    resp = client.post(
+        '/api/rejected-barcodes/delete-batch',
+        json={'ids': [rej_ok.id, rej_bad.id]},
+    )
+    data = resp.get_json()
+    assert resp.status_code == 200
+    assert data['deleted_count'] == 1
+    assert len(data['failed_items']) == 1
+    assert data['failed_items'][0]['id'] == rej_bad.id
+
+    # Success item DB deleted, failed item DB preserved
+    assert sess.get(RejectedBarcode, rej_ok.id) is None
+    assert sess.get(RejectedBarcode, rej_bad.id) is not None
+
+
+def test_delete_all_rejected_mixed(client, sess, tmp_path):
+    """全删：混合路径，成功项删 DB，失败项保留。"""
+    import os
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    sr = ScanRoot(path=root_dir, enabled=True, recursive=False)
+    sess.add(sr)
+    sess.commit()
+
+    inside = root_dir + os.sep + "good.jpg"
+    rej_ok = RejectedBarcode(
+        barcode="111", file_path=inside,
+        filename="good.jpg", reason="r", scan_root_id=sr.id,
+    )
+
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "bad.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+    rej_bad = RejectedBarcode(
+        barcode="222", file_path=outside,
+        filename="bad.jpg", reason="r", scan_root_id=sr.id,
+    )
+
+    sess.add_all([rej_ok, rej_bad])
+    sess.commit()
+
+    resp = client.post('/api/rejected-barcodes/delete-all', json={})
+    data = resp.get_json()
+    assert resp.status_code == 200
+    assert data['deleted_count'] == 1
+    assert len(data['failed_items']) == 1
+
+    assert sess.get(RejectedBarcode, rej_ok.id) is None
+    assert sess.get(RejectedBarcode, rej_bad.id) is not None
+
+
 def test_delete_batch_validation(client, sess):
     """测试批量删除的输入验证。"""
     # 没有ids字段
