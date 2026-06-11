@@ -504,3 +504,91 @@ def test_scan_root_ids_deduped(scan_client, sess):
     # but NOT 400 (validation error).
     resp = scan_client.post('/api/scan', json={'root_ids': [1, 1, 1]})
     assert resp.status_code != 400
+
+
+# ---------------------------------------------------------------------------
+# batch_delete consistency: failed items must not pollute deleted_folders / versions
+# ---------------------------------------------------------------------------
+
+
+def test_batch_delete_partial_failure_consistency(client, sess, tmp_path):
+    """delete_file=true with mixed inside/outside paths: only successes write deleted_folders."""
+    import os
+    from models import DeletedFolder
+
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    _make_root(sess, root_id=1, path=root_dir)
+
+    # Image INSIDE root — should succeed
+    inside = root_dir + os.sep + "good.jpg"
+    with open(inside, 'w') as f:
+        f.write('x')
+    img_ok = _make_image(sess, "BC_OK", "main", "2024-01-01T00:00:00",
+                         filename="good.jpg", scan_root_id=1)
+    img_ok.file_path = inside
+    sess.commit()
+
+    # Image OUTSIDE root — should fail
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "bad.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+    img_bad = _make_image(sess, "BC_BAD", "main", "2024-01-01T00:00:00",
+                          filename="bad.jpg", scan_root_id=1)
+    img_bad.file_path = outside
+    sess.commit()
+
+    resp = client.post('/api/images/batch-delete', json={
+        'ids': [img_ok.id, img_bad.id],
+        'delete_file': True,
+    })
+    data = resp.get_json()
+    assert data['deleted'] == 1
+    assert len(data['failed_items']) == 1
+    assert data['failed_items'][0]['id'] == img_bad.id
+
+    # Failed item DB record still exists
+    assert sess.get(Image, img_bad.id) is not None
+    # Success item DB record is gone
+    assert sess.get(Image, img_ok.id) is None
+
+    # deleted_folders only contains the success item's barcode, not the failed one
+    df = sess.query(DeletedFolder).all()
+    recorded_barcodes = {r.barcode for r in df}
+    assert 'BC_OK' in recorded_barcodes
+    assert 'BC_BAD' not in recorded_barcodes
+
+
+def test_batch_delete_all_fail_returns_zero(client, sess, tmp_path):
+    """delete_file=true when ALL files are outside root: deleted=0, no side effects."""
+    import os
+    from models import DeletedFolder
+
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    _make_root(sess, root_id=1, path=root_dir)
+
+    outside_dir = str(tmp_path / "evil")
+    os.makedirs(outside_dir)
+    outside = outside_dir + os.sep + "bad.jpg"
+    with open(outside, 'w') as f:
+        f.write('x')
+    img = _make_image(sess, "BC_FAIL", "main", "2024-01-01T00:00:00",
+                      filename="bad.jpg", scan_root_id=1)
+    img.file_path = outside
+    sess.commit()
+
+    resp = client.post('/api/images/batch-delete', json={
+        'ids': [img.id],
+        'delete_file': True,
+    })
+    data = resp.get_json()
+    assert data['deleted'] == 0
+    assert len(data['failed_items']) == 1
+
+    # DB record preserved
+    assert sess.get(Image, img.id) is not None
+    # No deleted_folders written
+    assert sess.query(DeletedFolder).count() == 0

@@ -387,13 +387,6 @@ def batch_delete():
         }), 403
 
     # Collect barcodes before deletion
-    barcodes = {r[0] for r in session.query(Image.barcode).filter(
-        Image.id.in_(ids)).distinct().all()}
-    deleted_folder_keys = {
-        (r.barcode, r.image_type, r.folder_ctime)
-        for r in session.query(Image.barcode, Image.image_type, Image.folder_ctime)
-        .filter(Image.id.in_(ids)).distinct().all()
-    }
     if delete_file:
         imgs = session.query(Image).filter(Image.id.in_(ids)).all()
         ok_ids = []
@@ -404,11 +397,26 @@ def batch_delete():
                 ok_ids.append(img.id)
             else:
                 failed_items.append({'id': img.id, 'file_path': img.file_path, 'reason': reason})
-        # Only delete DB records for files that were successfully removed
         delete_ids = ok_ids
     else:
         delete_ids = ids
         failed_items = []
+
+    if not delete_ids:
+        # Nothing to delete — skip DB delete, deleted_folders, version update
+        return jsonify({
+            'message': 'deleted 0 images', 'deleted': 0,
+            'file_deleted': delete_file, 'failed_items': failed_items,
+        })
+
+    # Collect barcodes and folder keys ONLY from images that will actually be deleted
+    barcodes = {r[0] for r in session.query(Image.barcode).filter(
+        Image.id.in_(delete_ids)).distinct().all()}
+    deleted_folder_keys = {
+        (r.barcode, r.image_type, r.folder_ctime)
+        for r in session.query(Image.barcode, Image.image_type, Image.folder_ctime)
+        .filter(Image.id.in_(delete_ids)).distinct().all()
+    }
 
     deleted = session.query(Image).filter(Image.id.in_(delete_ids)).delete(synchronize_session='fetch')
     from routes.batch import _record_deleted_folder
