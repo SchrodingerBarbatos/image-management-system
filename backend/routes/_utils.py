@@ -49,35 +49,36 @@ def safe_remove_image_file(img, sess):
         sess: SQLAlchemy session to look up the ScanRoot.
 
     Returns:
-        True if the file was successfully removed (or was already absent).
-        False if deletion was refused (path outside root) or failed.
+        (True, None) on success (file removed or already absent).
+        (False, reason_string) if deletion was refused or failed.
     """
     from models import ScanRoot
 
     root = sess.get(ScanRoot, img.scan_root_id)
     if not root:
-        _log.warning("safe_remove: no ScanRoot for id=%s, refusing to delete %s",
-                     img.scan_root_id, img.file_path)
-        return False
+        reason = f'找不到扫描目录 (scan_root_id={img.scan_root_id})'
+        _log.warning("safe_remove: %s, refusing to delete %s", reason, img.file_path)
+        return False, reason
 
     real_file = os.path.realpath(img.file_path)
     real_root = os.path.realpath(root.path)
     try:
         if os.path.commonpath([real_file, real_root]) != real_root:
-            _log.warning("safe_remove: path %s is outside root %s, refusing",
-                         img.file_path, root.path)
-            return False
+            reason = '文件路径不在所属扫描目录下'
+            _log.warning("safe_remove: %s — file=%s root=%s", reason, img.file_path, root.path)
+            return False, reason
     except ValueError:
         # Different drives on Windows → commonpath raises ValueError
-        _log.warning("safe_remove: path %s and root %s on different drives, refusing",
-                     img.file_path, root.path)
-        return False
+        reason = '文件路径与扫描目录不在同一驱动器'
+        _log.warning("safe_remove: %s — file=%s root=%s", reason, img.file_path, root.path)
+        return False, reason
 
     try:
         os.remove(img.file_path)
-        return True
+        return True, None
     except FileNotFoundError:
-        return True  # already gone — not an error
+        return True, None  # already gone — not an error
     except OSError as e:
-        _log.warning("safe_remove: failed to delete %s: %s", img.file_path, e)
-        return False
+        reason = f'系统删除失败: {e}'
+        _log.warning("safe_remove: %s — %s", reason, img.file_path)
+        return False, reason

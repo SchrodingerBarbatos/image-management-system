@@ -178,7 +178,13 @@ def list_images():
         q = q.filter(Image.image_type == image_type)
     scan_root_id = request.args.get('scan_root_id')
     if scan_root_id:
-        q = q.filter(Image.scan_root_id == int(scan_root_id))
+        try:
+            scan_root_id = int(scan_root_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'scan_root_id 必须为正整数'}), 400
+        if scan_root_id < 1:
+            return jsonify({'error': 'scan_root_id 必须为正整数'}), 400
+        q = q.filter(Image.scan_root_id == scan_root_id)
     confirmed = request.args.get('confirmed')
     if confirmed is not None:
         q = q.filter(Image.confirmed == (confirmed == 'true'))
@@ -188,9 +194,10 @@ def list_images():
     col = getattr(Image, sort)
     order = col.desc() if request.args.get('order') == 'desc' else col.asc()
     q = q.order_by(order)
-    page = int(request.args.get('page', 1))
-    # Cap page_size to prevent accidental large queries
-    page_size = min(int(request.args.get('page_size', 50)), _MAX_PAGE_SIZE)
+    try:
+        page, page_size = parse_pagination(default_page_size=50, max_page_size=_MAX_PAGE_SIZE)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
     return jsonify({
@@ -272,7 +279,9 @@ def delete_image(img_id):
     folder_ctime = img.folder_ctime
     image_type = img.image_type
     if delete_file:
-        safe_remove_image_file(img, session)
+        ok, reason = safe_remove_image_file(img, session)
+        if not ok:
+            return jsonify({'error': f'文件删除失败，已取消数据库删除: {reason}'}), 403
     session.delete(img)
     from routes.batch import _record_deleted_folder
     _record_deleted_folder(session, barcode, image_type, folder_ctime)
@@ -387,9 +396,21 @@ def batch_delete():
     }
     if delete_file:
         imgs = session.query(Image).filter(Image.id.in_(ids)).all()
+        ok_ids = []
+        failed_items = []
         for img in imgs:
-            safe_remove_image_file(img, session)
-    deleted = session.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
+            ok, reason = safe_remove_image_file(img, session)
+            if ok:
+                ok_ids.append(img.id)
+            else:
+                failed_items.append({'id': img.id, 'file_path': img.file_path, 'reason': reason})
+        # Only delete DB records for files that were successfully removed
+        delete_ids = ok_ids
+    else:
+        delete_ids = ids
+        failed_items = []
+
+    deleted = session.query(Image).filter(Image.id.in_(delete_ids)).delete(synchronize_session='fetch')
     from routes.batch import _record_deleted_folder
     for bc, it, ctime in deleted_folder_keys:
         _record_deleted_folder(session, bc, it, ctime)
@@ -397,7 +418,12 @@ def batch_delete():
 
     for bc in barcodes:
         update_versions_for_barcode(bc)
-    return jsonify({'message': f'deleted {deleted} images', 'deleted': deleted})
+    return jsonify({
+        'message': f'deleted {deleted} images',
+        'deleted': deleted,
+        'file_deleted': delete_file,
+        'failed_items': failed_items,
+    })
 
 @images_bp.route('/images/batch-export', methods=['POST'])
 def batch_export():
@@ -478,7 +504,7 @@ def delete_duplicate_images(barcode):
     deleted = 0
     for img in imgs:
         if delete_file:
-            safe_remove_image_file(img, session)
+            safe_remove_image_file(img, session)  # non-blocking; logged on failure
         session.delete(img)
         deleted += 1
 
@@ -519,7 +545,7 @@ def delete_version(version_id):
     ).all()
     for img in imgs:
         if delete_file:
-            safe_remove_image_file(img, session)
+            safe_remove_image_file(img, session)  # non-blocking; logged on failure
         session.delete(img)
 
     # Delete the version record itself

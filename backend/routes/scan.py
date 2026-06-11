@@ -344,8 +344,26 @@ def trigger_scan():
     root_ids = data.get('root_ids')
     scan_mode = data.get('scan_mode', 'full')
 
-    if not root_ids:
-        return jsonify({'error': '请指定要扫描的目录'}), 400
+    # Validate root_ids
+    if not isinstance(root_ids, list) or not root_ids:
+        return jsonify({'error': 'root_ids 必须为非空数组'}), 400
+    clean_ids = []
+    seen = set()
+    for rid in root_ids:
+        try:
+            rid = int(rid)
+        except (ValueError, TypeError):
+            return jsonify({'error': f'root_ids 包含非法值: {rid}'}), 400
+        if rid < 1:
+            return jsonify({'error': f'root_ids 包含非法值: {rid}'}), 400
+        if rid not in seen:
+            seen.add(rid)
+            clean_ids.append(rid)
+    root_ids = clean_ids
+
+    # Validate scan_mode
+    if scan_mode not in ('full', 'incremental'):
+        return jsonify({'error': 'scan_mode 必须为 full 或 incremental'}), 400
 
     roots = session.query(ScanRoot).filter(ScanRoot.id.in_(root_ids)).all()
     if not roots:

@@ -357,3 +357,150 @@ def test_is_root_enabled_missing_root(sess, monkeypatch):
     ri._invalidate_root_cache()
 
     assert ri._is_root_enabled(9999) is False
+
+
+# ---------------------------------------------------------------------------
+# Pagination validation tests
+# ---------------------------------------------------------------------------
+
+
+def test_list_images_page_abc_returns_400(client, sess):
+    _make_root(sess)
+    _make_image(sess, "BC1", "main", "2024-01-01T00:00:00")
+    resp = client.get('/api/images?page=abc')
+    assert resp.status_code == 400
+    assert 'page' in resp.get_json()['error']
+
+
+def test_list_images_page_zero_returns_400(client, sess):
+    _make_root(sess)
+    _make_image(sess, "BC1", "main", "2024-01-01T00:00:00")
+    resp = client.get('/api/images?page=0')
+    assert resp.status_code == 400
+    assert 'page' in resp.get_json()['error']
+
+
+def test_list_images_page_size_9999_returns_400(client, sess):
+    _make_root(sess)
+    _make_image(sess, "BC1", "main", "2024-01-01T00:00:00")
+    resp = client.get('/api/images?page_size=9999')
+    assert resp.status_code == 400
+    assert 'page_size' in resp.get_json()['error']
+
+
+def test_list_images_scan_root_id_abc_returns_400(client, sess):
+    _make_root(sess)
+    _make_image(sess, "BC1", "main", "2024-01-01T00:00:00")
+    resp = client.get('/api/images?scan_root_id=abc')
+    assert resp.status_code == 400
+    assert 'scan_root_id' in resp.get_json()['error']
+
+
+def test_list_images_scan_root_id_negative_returns_400(client, sess):
+    _make_root(sess)
+    _make_image(sess, "BC1", "main", "2024-01-01T00:00:00")
+    resp = client.get('/api/images?scan_root_id=-1')
+    assert resp.status_code == 400
+    assert 'scan_root_id' in resp.get_json()['error']
+
+
+def test_list_images_valid_params_returns_200(client, sess):
+    _make_root(sess)
+    _make_image(sess, "BC1", "main", "2024-01-01T00:00:00")
+    resp = client.get('/api/images?page=1&page_size=10')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['page'] == 1
+    assert data['page_size'] == 10
+
+
+# ---------------------------------------------------------------------------
+# delete_file path-safety tests
+# ---------------------------------------------------------------------------
+
+
+def test_delete_image_file_outside_root_preserves_db(client, sess, tmp_path):
+    """When delete_file=true and path is outside scan root, DB record is preserved."""
+    import os
+    root_dir = str(tmp_path / "photos")
+    os.makedirs(root_dir)
+    _make_root(sess, root_id=1, path=root_dir)
+    # Create image with path OUTSIDE the scan root
+    outside = str(tmp_path / "outside" / "evil.jpg")
+    os.makedirs(os.path.dirname(outside))
+    img = _make_image(sess, "BC1", "main", "2024-01-01T00:00:00",
+                      filename="evil.jpg", scan_root_id=1)
+    # Manually set file_path to outside location
+    img.file_path = outside
+    sess.commit()
+
+    resp = client.delete(f'/api/images/{img.id}?delete_file=true')
+    assert resp.status_code == 403
+    assert '文件删除失败' in resp.get_json()['error']
+    # DB record must still exist
+    assert sess.get(Image, img.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# POST /api/scan validation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="function")
+def scan_client(sess, monkeypatch):
+    """Flask test client with scan blueprint registered."""
+    import routes.scan as scan_mod
+    monkeypatch.setattr(scan_mod, "session", sess)
+
+    app = Flask(__name__)
+    app.register_blueprint(scan_mod.scan_bp, url_prefix='/api')
+    app.config['TESTING'] = True
+    return app.test_client()
+
+
+def test_scan_root_ids_not_list_returns_400(scan_client):
+    resp = scan_client.post('/api/scan', json={'root_ids': 'not-a-list'})
+    assert resp.status_code == 400
+    assert 'root_ids' in resp.get_json()['error']
+
+
+def test_scan_root_ids_empty_list_returns_400(scan_client):
+    resp = scan_client.post('/api/scan', json={'root_ids': []})
+    assert resp.status_code == 400
+    assert 'root_ids' in resp.get_json()['error']
+
+
+def test_scan_root_ids_missing_returns_400(scan_client):
+    resp = scan_client.post('/api/scan', json={})
+    assert resp.status_code == 400
+
+
+def test_scan_root_ids_non_int_returns_400(scan_client):
+    resp = scan_client.post('/api/scan', json={'root_ids': [1, 'abc', 3]})
+    assert resp.status_code == 400
+    assert '非法值' in resp.get_json()['error']
+
+
+def test_scan_root_ids_negative_returns_400(scan_client):
+    resp = scan_client.post('/api/scan', json={'root_ids': [-1]})
+    assert resp.status_code == 400
+    assert '非法值' in resp.get_json()['error']
+
+
+def test_scan_mode_invalid_returns_400(scan_client, sess):
+    _make_root(sess, root_id=1)
+    resp = scan_client.post('/api/scan', json={'root_ids': [1], 'scan_mode': 'invalid'})
+    assert resp.status_code == 400
+    assert 'scan_mode' in resp.get_json()['error']
+
+
+def test_scan_root_ids_deduped(scan_client, sess):
+    """Duplicate root_ids are accepted (deduped internally) without 400."""
+    import routes.scan as scan_mod
+    _make_root(sess, root_id=1)
+
+    # The validation layer should accept [1, 1, 1] and not return 400.
+    # It may return 200/202 (scan started) or 409 (another scan running),
+    # but NOT 400 (validation error).
+    resp = scan_client.post('/api/scan', json={'root_ids': [1, 1, 1]})
+    assert resp.status_code != 400

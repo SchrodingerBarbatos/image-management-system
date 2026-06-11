@@ -185,7 +185,9 @@ def test_safe_remove_deletes_file_inside_root(sess, tmp_path):
     _make_root(sess, root_id=1, path=str(root_dir))
     img = _make_image(sess, img_id=1, file_path=str(test_file), scan_root_id=1)
 
-    assert safe_remove_image_file(img, sess) is True
+    ok, reason = safe_remove_image_file(img, sess)
+    assert ok is True
+    assert reason is None
     assert not test_file.exists()
 
 
@@ -203,7 +205,9 @@ def test_safe_remove_refuses_file_outside_root(sess, tmp_path):
     _make_root(sess, root_id=1, path=str(root_dir))
     img = _make_image(sess, img_id=1, file_path=str(victim), scan_root_id=1)
 
-    assert safe_remove_image_file(img, sess) is False
+    ok, reason = safe_remove_image_file(img, sess)
+    assert ok is False
+    assert '不在' in reason or '驱动器' in reason
     assert victim.exists()  # file NOT deleted
 
 
@@ -218,7 +222,9 @@ def test_safe_remove_returns_true_for_missing_file(sess, tmp_path):
     _make_root(sess, root_id=1, path=str(root_dir))
     img = _make_image(sess, img_id=1, file_path=str(missing), scan_root_id=1)
 
-    assert safe_remove_image_file(img, sess) is True
+    ok, reason = safe_remove_image_file(img, sess)
+    assert ok is True
+    assert reason is None
 
 
 def test_safe_remove_refuses_when_root_not_found(sess, tmp_path):
@@ -230,5 +236,7 @@ def test_safe_remove_refuses_when_root_not_found(sess, tmp_path):
 
     img = _make_image(sess, img_id=1, file_path=str(test_file), scan_root_id=999)
 
-    assert safe_remove_image_file(img, sess) is False
+    ok, reason = safe_remove_image_file(img, sess)
+    assert ok is False
+    assert '找不到' in reason
     assert test_file.exists()

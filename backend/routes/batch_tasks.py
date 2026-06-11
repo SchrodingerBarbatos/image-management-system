@@ -556,13 +556,14 @@ def _run_delete_version(task_id):
     from routes._utils import safe_remove_image_file
     for i, img in enumerate(imgs):
         if delete_files:
-            if safe_remove_image_file(img, sess):
+            ok, reason = safe_remove_image_file(img, sess)
+            if ok:
                 sess.delete(img)
                 deleted_count += 1
             else:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
-                    failed_item={'file': img.file_path, 'reason': '路径校验失败或删除失败'})
+                    failed_item={'file': img.file_path, 'reason': reason or '删除失败'})
         else:
             sess.delete(img)
             deleted_count += 1
@@ -635,13 +636,14 @@ def _run_batch_delete_images(task_id):
         from routes._utils import safe_remove_image_file
         delete_db_ids = []
         for i, img in enumerate(imgs):
-            if safe_remove_image_file(img, sess):
+            ok, reason = safe_remove_image_file(img, sess)
+            if ok:
                 delete_db_ids.append(img.id)
                 delete_db_folder_keys.add((img.barcode, img.image_type, img.folder_ctime))
             else:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
-                    failed_item={'file': img.file_path, 'reason': '路径校验失败或删除失败'})
+                    failed_item={'file': img.file_path, 'reason': reason or '删除失败'})
             update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
     else:
         # Even when not deleting files, report progress for consistency

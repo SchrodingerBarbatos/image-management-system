@@ -62,12 +62,13 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
         failed_items = []
         deleted_count = 0
         for img in imgs:
-            if safe_remove_image_file(img, sess):
+            ok, reason = safe_remove_image_file(img, sess)
+            if ok:
                 sess.delete(img)
                 deleted_count += 1
             else:
-                _log.warning("Refused or failed to delete file: %s", img.file_path)
-                failed_items.append({'file': img.file_path, 'reason': '路径校验失败或删除失败'})
+                _log.warning("Refused or failed to delete file: %s — %s", img.file_path, reason)
+                failed_items.append({'file': img.file_path, 'reason': reason or '删除失败'})
         if deleted_count > 0:
             _record_deleted_folder(sess, barcode, image_type, folder_ctime)
         return deleted_count, failed_items
@@ -160,8 +161,9 @@ def delete_images_with_validation(barcode, image_type, folder_ctime, delete_file
     if delete_files:
         from routes._utils import safe_remove_image_file
         for img in imgs:
-            if not safe_remove_image_file(img, sess):
-                file_errors.append(f'{img.file_path}: 路径校验失败或删除失败')
+            ok, reason = safe_remove_image_file(img, sess)
+            if not ok:
+                file_errors.append(f'{img.file_path}: {reason or "删除失败"}')
 
     if file_errors:
         return 0, f'文件删除失败: {"; ".join(file_errors)}'
