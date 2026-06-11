@@ -58,16 +58,16 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     )
     if delete_files:
         imgs = sess.query(Image).filter(Image.id.in_(match_ids)).all()
+        from routes._utils import safe_remove_image_file
         failed_items = []
         deleted_count = 0
         for img in imgs:
-            try:
-                os.remove(img.file_path)
+            if safe_remove_image_file(img, sess):
                 sess.delete(img)
                 deleted_count += 1
-            except OSError as e:
-                _log.warning("Failed to delete file: %s", img.file_path)
-                failed_items.append({'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
+            else:
+                _log.warning("Refused or failed to delete file: %s", img.file_path)
+                failed_items.append({'file': img.file_path, 'reason': '路径校验失败或删除失败'})
         if deleted_count > 0:
             _record_deleted_folder(sess, barcode, image_type, folder_ctime)
         return deleted_count, failed_items
@@ -158,11 +158,10 @@ def delete_images_with_validation(barcode, image_type, folder_ctime, delete_file
     # Phase 2: 删除文件（best-effort，无法回滚）
     file_errors = []
     if delete_files:
+        from routes._utils import safe_remove_image_file
         for img in imgs:
-            try:
-                os.remove(img.file_path)
-            except OSError as e:
-                file_errors.append(f'{img.file_path}: {e}')
+            if not safe_remove_image_file(img, sess):
+                file_errors.append(f'{img.file_path}: 路径校验失败或删除失败')
 
     if file_errors:
         return 0, f'文件删除失败: {"; ".join(file_errors)}'

@@ -12,8 +12,11 @@ rejected_bp = Blueprint('rejected', __name__)
 @rejected_bp.route('', methods=['GET'])
 def list_rejected():
     """查询被拒绝的条码记录。"""
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', 20, type=int)
+    from routes._utils import parse_pagination
+    try:
+        page, page_size = parse_pagination(default_page_size=20, max_page_size=500)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     barcode = request.args.get('barcode', type=str)
     scan_root_id = request.args.get('scan_root_id', type=int)
     start_date = request.args.get('start_date', type=str)

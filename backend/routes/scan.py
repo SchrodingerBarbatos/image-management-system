@@ -157,7 +157,7 @@ def _run_scan(root_ids, scan_mode, job_ready_event=None):
 
     except ScanCancelled:
         elapsed = round((datetime.datetime.now() - started_at).total_seconds())
-        session.rollback()  # 回滚阶段 2 的未提交扫描数据
+        session.rollback()  # 仅回滚当前未提交事务，已通过分段 commit 保存的扫描结果不受影响
         with _scan_lock:
             job = _scan_jobs.get(job_id)
             if job:

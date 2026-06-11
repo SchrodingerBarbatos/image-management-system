@@ -5,6 +5,7 @@ from config import UPLOAD_DIR
 from thumbnail import thumbnail_exists, generate_thumbnail, get_thumbnail_path
 from versioning import update_versions_for_barcode
 from db_retry import with_sqlite_lock_retry
+from routes._utils import parse_pagination, safe_remove_image_file
 from datetime import datetime
 
 images_bp = Blueprint('images', __name__)
@@ -113,8 +114,10 @@ def list_barcodes():
     q = q.order_by(desc(sort_col) if reverse else asc(sort_col))
 
     # Paginate — cap page_size to prevent accidental large queries
-    page = int(request.args.get('page', 1))
-    page_size = min(int(request.args.get('page_size', 50)), _MAX_PAGE_SIZE)
+    try:
+        page, page_size = parse_pagination(default_page_size=50, max_page_size=_MAX_PAGE_SIZE)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     rows = q.offset((page - 1) * page_size).limit(page_size).all()
 
     return jsonify({
@@ -269,10 +272,7 @@ def delete_image(img_id):
     folder_ctime = img.folder_ctime
     image_type = img.image_type
     if delete_file:
-        try:
-            os.remove(img.file_path)
-        except OSError:
-            pass
+        safe_remove_image_file(img, session)
     session.delete(img)
     from routes.batch import _record_deleted_folder
     _record_deleted_folder(session, barcode, image_type, folder_ctime)
@@ -388,10 +388,7 @@ def batch_delete():
     if delete_file:
         imgs = session.query(Image).filter(Image.id.in_(ids)).all()
         for img in imgs:
-            try:
-                os.remove(img.file_path)
-            except OSError:
-                pass
+            safe_remove_image_file(img, session)
     deleted = session.query(Image).filter(Image.id.in_(ids)).delete(synchronize_session='fetch')
     from routes.batch import _record_deleted_folder
     for bc, it, ctime in deleted_folder_keys:
@@ -481,10 +478,7 @@ def delete_duplicate_images(barcode):
     deleted = 0
     for img in imgs:
         if delete_file:
-            try:
-                os.remove(img.file_path)
-            except OSError:
-                pass
+            safe_remove_image_file(img, session)
         session.delete(img)
         deleted += 1
 
@@ -525,10 +519,7 @@ def delete_version(version_id):
     ).all()
     for img in imgs:
         if delete_file:
-            try:
-                os.remove(img.file_path)
-            except OSError:
-                pass
+            safe_remove_image_file(img, session)
         session.delete(img)
 
     # Delete the version record itself

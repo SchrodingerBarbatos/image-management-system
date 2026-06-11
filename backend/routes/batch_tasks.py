@@ -14,6 +14,7 @@ from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
 from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error, _record_deleted_folder
 from db_retry import with_sqlite_lock_retry
+from routes._utils import parse_pagination
 
 
 def _cleanup_orphaned_images():
@@ -552,17 +553,16 @@ def _run_delete_version(task_id):
 
     deleted_count = 0
     failed_count = 0
-    from routes.batch import _classify_delete_error
+    from routes._utils import safe_remove_image_file
     for i, img in enumerate(imgs):
         if delete_files:
-            try:
-                os.remove(img.file_path)
+            if safe_remove_image_file(img, sess):
                 sess.delete(img)
                 deleted_count += 1
-            except OSError as e:
+            else:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
-                    failed_item={'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
+                    failed_item={'file': img.file_path, 'reason': '路径校验失败或删除失败'})
         else:
             sess.delete(img)
             deleted_count += 1
@@ -627,21 +627,21 @@ def _run_batch_delete_images(task_id):
     if delete_files:
         imgs = sess.query(Image).filter(Image.id.in_(ids)).all()
         scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
-        from routes.batch import validate_image_paths, _classify_delete_error
+        from routes.batch import validate_image_paths
         is_valid, error_msg = validate_image_paths(imgs, scan_roots)
         if not is_valid:
             finish_task(task_id, error_message=f'路径安全验证失败: {error_msg}')
             return
+        from routes._utils import safe_remove_image_file
         delete_db_ids = []
         for i, img in enumerate(imgs):
-            try:
-                os.remove(img.file_path)
+            if safe_remove_image_file(img, sess):
                 delete_db_ids.append(img.id)
                 delete_db_folder_keys.add((img.barcode, img.image_type, img.folder_ctime))
-            except OSError as e:
+            else:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
-                    failed_item={'file': img.file_path, 'reason': _classify_delete_error(img.file_path, e)})
+                    failed_item={'file': img.file_path, 'reason': '路径校验失败或删除失败'})
             update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
     else:
         # Even when not deleting files, report progress for consistency
@@ -978,10 +978,10 @@ def get_duplicate_scan_results(task_id):
     task = session.get(BatchTask, task_id)
     if not task:
         return jsonify({'error': 'not found'}), 404
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', 100, type=int)
-    page = max(1, page)
-    page_size = max(1, min(500, page_size))
+    try:
+        page, page_size = parse_pagination(default_page_size=100)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     total = session.query(DuplicateScanResult).filter(
         DuplicateScanResult.task_id == task_id,
@@ -1185,10 +1185,10 @@ def get_low_version_scan_results(task_id):
     if not task:
         return jsonify({'error': 'not found'}), 404
 
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', 100, type=int)
-    page = max(1, page)
-    page_size = max(1, min(500, page_size))
+    try:
+        page, page_size = parse_pagination(default_page_size=100)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     # Optional filters
     status_tag = request.args.get('status_tag')

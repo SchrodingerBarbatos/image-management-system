@@ -13,6 +13,14 @@ _export_lock = threading.Lock()
 _IN_CHUNK_SIZE = 500
 
 
+def _safe_remove(path):
+    """Remove a file, silently ignoring errors (e.g. file not found)."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _chunked_in_query(column, values, query_base, chunk_size=_IN_CHUNK_SIZE):
     """Execute a query with a potentially large IN clause by splitting into chunks.
     Returns the concatenated results of all chunks."""
@@ -242,11 +250,9 @@ def upload_excel():
     if not file:
         return jsonify({'error': 'file required'}), 400
 
-    # Validate extension
     if not file.filename or not file.filename.lower().endswith('.xlsx'):
         return jsonify({'error': '只允许 .xlsx 文件'}), 400
 
-    # Size limit: 10 MB
     file.seek(0, 2)
     size = file.tell()
     file.seek(0)
@@ -257,40 +263,56 @@ def upload_excel():
     upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
     file.save(upload_path)
 
+    # Parse workbook — delegate to helper so we can guarantee cleanup.
+    data, error = _parse_excel(upload_path)
+    if error:
+        _safe_remove(upload_path)
+        return jsonify({'error': error}), 400
+
+    return jsonify({**data, 'upload_id': upload_id})
+
+
+def _parse_excel(upload_path):
+    """Parse an xlsx file and return (data_dict, error_string).
+
+    Returns ({columns, sheets, sheet_columns}, None) on success,
+    or (None, error_message) on failure.  Caller is responsible for
+    cleaning up upload_path on error.
+    """
+    wb = None
     try:
         wb = load_workbook(upload_path, read_only=True)
     except Exception:
-        return jsonify({'error': '无法解析 Excel 文件，请确认文件格式正确'}), 400
+        return None, '无法解析 Excel 文件，请确认文件格式正确'
 
-    sheet_names = wb.sheetnames
-    if not sheet_names:
-        wb.close()
-        return jsonify({'error': 'Excel 文件中没有工作表'}), 400
+    try:
+        sheet_names = wb.sheetnames
+        if not sheet_names:
+            return None, 'Excel 文件中没有工作表'
 
-    sheet_columns = {}
-    for sname in sheet_names:
-        ws = wb[sname]
-        row = next(ws.iter_rows(min_row=1, max_row=1), None)
-        if row is None:
-            sheet_columns[sname] = []
-        else:
-            headers = [str(cell.value) for cell in row]
-            if not headers or all(h == 'None' for h in headers):
+        sheet_columns = {}
+        for sname in sheet_names:
+            ws = wb[sname]
+            row = next(ws.iter_rows(min_row=1, max_row=1), None)
+            if row is None:
                 sheet_columns[sname] = []
             else:
-                sheet_columns[sname] = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
-    wb.close()
+                headers = [str(cell.value) for cell in row]
+                if not headers or all(h == 'None' for h in headers):
+                    sheet_columns[sname] = []
+                else:
+                    sheet_columns[sname] = [f'{_col_letter(i)}-{h}' for i, h in enumerate(headers)]
+    finally:
+        wb.close()
 
     if not sheet_columns or all(v == [] for v in sheet_columns.values()):
-        return jsonify({'error': '所有工作表的表头均为空，请检查 Excel 文件'}), 400
+        return None, '所有工作表的表头均为空，请检查 Excel 文件'
 
-    first_sheet = sheet_names[0] if sheet_names else ''
-    return jsonify({
-        'columns': sheet_columns.get(first_sheet, []),
+    return {
+        'columns': sheet_columns.get(sheet_names[0], []),
         'sheets': sheet_names,
         'sheet_columns': sheet_columns,
-        'upload_id': upload_id,
-    })
+    }, None
 
 
 @export_bp.route('/export/zip', methods=['POST'])
