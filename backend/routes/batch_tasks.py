@@ -576,8 +576,9 @@ def _run_delete_version(task_id):
         _record_deleted_folder(sess, barcode, image_type, folder_ctime)
     sess.commit()
 
-    # 重建版本：如果图片全部删除，ImageVersion 会被清理；部分失败时保留版本
-    update_versions_for_barcode(barcode)
+    # 重建版本：只有实际删除了图片才更新版本
+    if deleted_count > 0:
+        update_versions_for_barcode(barcode)
 
     finish_task(task_id, result_count=deleted_count)
     _log.info("delete_version task %d done: deleted %d images", task_id, deleted_count)
