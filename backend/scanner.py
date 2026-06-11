@@ -530,12 +530,20 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
             _process_thumbnail_batch(thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
             thumb_jobs.clear()
 
+        # Segment commit: persist this directory's results before moving on.
+        # Shortens write-lock hold time, prevents WAL bloat, and preserves
+        # progress if the process crashes mid-scan.
+        session.commit()
+
     # Process remaining thumbnail jobs
     if thumb_jobs:
         if is_cancelled and is_cancelled():
             raise ScanCancelled()
         _process_thumbnail_batch(thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
         thumb_jobs.clear()
+
+    # Commit remaining thumbnails and any last-directory data before leftover handling
+    session.commit()
 
     # Check cancellation before leftover handling
     if is_cancelled and is_cancelled():

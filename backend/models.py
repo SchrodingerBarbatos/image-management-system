@@ -7,8 +7,22 @@ engine = create_engine(f'sqlite:///{DB_PATH}', connect_args={'check_same_thread'
 
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_conn, _):
-    dbapi_conn.execute("PRAGMA journal_mode=WAL")
-    dbapi_conn.execute("PRAGMA busy_timeout=5000")
+    cur = dbapi_conn.cursor()
+    try:
+        # WAL: 允许读写并发，单写者模型下显著降低 'database is locked'
+        cur.execute("PRAGMA journal_mode=WAL")
+        # 写锁竞争时最长等待 15s 再报 locked（原 5s，给后台任务+请求线程更多缓冲）
+        cur.execute("PRAGMA busy_timeout=15000")
+        # WAL 模式下 NORMAL 是官方推荐：断电最多丢失最后几个事务，绝不损坏库，写入显著加速
+        cur.execute("PRAGMA synchronous=NORMAL")
+        # 64MB 页缓存（负值=KB）
+        cur.execute("PRAGMA cache_size=-65536")
+        # 临时表/索引放内存
+        cur.execute("PRAGMA temp_store=MEMORY")
+        # 256MB 内存映射读，减少大表查询的 syscall
+        cur.execute("PRAGMA mmap_size=268435456")
+    finally:
+        cur.close()
 session_factory = sessionmaker(bind=engine)
 session = scoped_session(session_factory)
 

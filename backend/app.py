@@ -581,7 +581,7 @@ def start_tray(port, open_browser_on_start=True):
     stop_event = threading.Event()
 
     flask_thread = threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', debug=False, port=port, use_reloader=False),
+        target=lambda: __import__('waitress').serve(app, host='0.0.0.0', port=port, threads=8),
         daemon=True,
     )
     flask_thread.start()
@@ -661,4 +661,9 @@ if __name__ == '__main__':
             if args.open_browser:
                 import webbrowser
                 threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()
-            app.run(host='0.0.0.0', debug=args.debug, port=port)
+            if args.debug:
+                # Flask dev server for debug mode (reloader + debugger)
+                app.run(host='0.0.0.0', debug=True, port=port)
+            else:
+                import waitress
+                waitress.serve(app, host='0.0.0.0', port=port, threads=8)

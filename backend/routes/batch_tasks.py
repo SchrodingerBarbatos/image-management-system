@@ -13,6 +13,7 @@ from models import (
 from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
 from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error, _record_deleted_folder
+from db_retry import with_sqlite_lock_retry
 
 
 def _cleanup_orphaned_images():
@@ -301,10 +302,49 @@ def _run_low_version_scan(task_id):
     _log.info("low_version_scan task %d done: %d results", task_id, len(results))
 
 
-# Register handler at import time
+# Register handler at import time — wrap with lock-retry to protect
+# long-running transactions from transient 'database is locked' errors.
 from task_engine import register_handler
-register_handler('duplicate_scan', _run_duplicate_scan)
-register_handler('low_version_scan', _run_low_version_scan)
+
+_TERMINAL_STATUSES = frozenset({'done', 'error', 'interrupted', 'cancelled'})
+
+
+def _wrap_retry(fn):
+    """Wrap a task handler with SQLite lock retry.
+    Uses _get_thread_session() at call time (not decoration time)
+    so the retry decorator can rollback the correct session.
+    Before retrying, checks if the task is already in a terminal state
+    to avoid re-running completed/errored tasks."""
+    def wrapper(task_id):
+        import time as _time
+        from db_retry import _is_sqlite_locked, _DEFAULT_MAX_ATTEMPTS, _DEFAULT_DELAY
+        for attempt in range(1, _DEFAULT_MAX_ATTEMPTS + 1):
+            try:
+                return fn(task_id)
+            except Exception as e:
+                if not _is_sqlite_locked(e) or attempt == _DEFAULT_MAX_ATTEMPTS:
+                    raise
+                # Guard: don't retry if the task already reached a terminal state
+                # (e.g. finish_task committed successfully but a later lock error occurred)
+                sess = _get_thread_session()
+                try:
+                    sess.rollback()
+                    task = sess.get(BatchTask, task_id)
+                    if task and task.status in _TERMINAL_STATUSES:
+                        _log.info("_wrap_retry(%s): task %d already in terminal state '%s', skipping retry",
+                                  fn.__name__, task_id, task.status)
+                        return
+                except Exception:
+                    pass
+                _log.warning("%s: SQLite locked, retry %d/%d (delay=%.1fs)",
+                             fn.__name__, attempt, _DEFAULT_MAX_ATTEMPTS, _DEFAULT_DELAY)
+                _time.sleep(_DEFAULT_DELAY)
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
+
+register_handler('duplicate_scan', _wrap_retry(_run_duplicate_scan))
+register_handler('low_version_scan', _wrap_retry(_run_low_version_scan))
 
 
 # ---------- Async delete handlers ----------
@@ -856,13 +896,13 @@ def _run_hash_backfill(task_id):
               task_id, success_count, fail_count, total)
 
 
-register_handler('batch_delete_duplicates', _run_batch_delete_duplicates)
-register_handler('batch_delete_low_versions', _run_batch_delete_low_versions)
-register_handler('delete_version', _run_delete_version)
-register_handler('batch_delete_images', _run_batch_delete_images)
-register_handler('duplicate_version_scan', _run_duplicate_version_scan)
-register_handler('batch_delete_duplicate_versions', _run_batch_delete_duplicate_versions)
-register_handler('hash_backfill', _run_hash_backfill)
+register_handler('batch_delete_duplicates', _wrap_retry(_run_batch_delete_duplicates))
+register_handler('batch_delete_low_versions', _wrap_retry(_run_batch_delete_low_versions))
+register_handler('delete_version', _wrap_retry(_run_delete_version))
+register_handler('batch_delete_images', _wrap_retry(_run_batch_delete_images))
+register_handler('duplicate_version_scan', _wrap_retry(_run_duplicate_version_scan))
+register_handler('batch_delete_duplicate_versions', _wrap_retry(_run_batch_delete_duplicate_versions))
+register_handler('hash_backfill', _wrap_retry(_run_hash_backfill))
 
 
 # ---------- Common task routes ----------

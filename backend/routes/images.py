@@ -1,14 +1,61 @@
-import os, zipfile, time, json, re
+import os, zipfile, time, json, re, threading
 from flask import Blueprint, request, jsonify, send_file
 from models import session, Image, ImageVersion, ExportTask, BarcodeSetting, ScanRoot
 from config import UPLOAD_DIR
 from thumbnail import thumbnail_exists, generate_thumbnail, get_thumbnail_path
 from versioning import update_versions_for_barcode
+from db_retry import with_sqlite_lock_retry
 from datetime import datetime
 
 images_bp = Blueprint('images', __name__)
 
 _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
+
+# Per-image locks to prevent concurrent thumbnail generation for the same image.
+# Concurrent generates cause PermissionError on Windows (writes to the same file)
+# and unnecessary duplicate work.
+_thumb_gen_locks: dict[int, threading.Lock] = {}
+_thumb_gen_locks_guard = threading.Lock()
+
+# TTL cache for ScanRoot.enabled — these rarely change, but every thumbnail/file
+# request needs to check them.  Avoids one ScanRoot query per image request.
+_sr_enabled_cache: dict[int, tuple[bool, float]] = {}
+_SR_CACHE_TTL = 30.0  # seconds
+
+
+def _is_root_enabled(root_id: int) -> bool:
+    """Check ScanRoot.enabled with a short TTL cache to avoid N+1 queries."""
+    now = time.monotonic()
+    cached = _sr_enabled_cache.get(root_id)
+    if cached is not None:
+        enabled, ts = cached
+        if now - ts < _SR_CACHE_TTL:
+            return enabled
+    root = session.get(ScanRoot, root_id)
+    if not root:
+        _sr_enabled_cache[root_id] = (False, now)
+        return False
+    enabled = root.enabled
+    _sr_enabled_cache[root_id] = (enabled, now)
+    return enabled
+
+
+def _invalidate_root_cache(root_id: int | None = None):
+    """Invalidate the ScanRoot.enabled cache. Called after ScanRoot changes."""
+    if root_id is not None:
+        _sr_enabled_cache.pop(root_id, None)
+    else:
+        _sr_enabled_cache.clear()
+
+
+def _get_thumb_lock(img_id: int) -> threading.Lock:
+    """Return a per-image lock, creating one if this image_id hasn't been seen."""
+    with _thumb_gen_locks_guard:
+        lock = _thumb_gen_locks.get(img_id)
+        if lock is None:
+            lock = threading.Lock()
+            _thumb_gen_locks[img_id] = lock
+        return lock
 
 _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
                    'file_size', 'folder_path', 'folder_ctime', 'created_at', 'updated_at'}
@@ -30,31 +77,24 @@ def list_barcodes():
     if barcode_filter:
         filters.append(Image.barcode.like(f'%{barcode_filter}%'))
 
-    # Subquery for main version counts per barcode
-    main_vc_sub = session.query(
+    # Single subquery for both main+detail version counts (was 2 subqueries + 2 outerjoins)
+    ver_sub = session.query(
         ImageVersion.barcode,
-        func.count(ImageVersion.id).label('vc')
-    ).filter(ImageVersion.image_type == 'main').group_by(ImageVersion.barcode).subquery()
-
-    # Subquery for detail version counts per barcode
-    detail_vc_sub = session.query(
-        ImageVersion.barcode,
-        func.count(ImageVersion.id).label('vc')
-    ).filter(ImageVersion.image_type == 'detail').group_by(ImageVersion.barcode).subquery()
+        func.sum(case((ImageVersion.image_type == 'main', 1), else_=0)).label('main_vc'),
+        func.sum(case((ImageVersion.image_type == 'detail', 1), else_=0)).label('detail_vc'),
+    ).group_by(ImageVersion.barcode).subquery()
 
     # Main aggregation query
     q = session.query(
         Image.barcode,
         func.sum(case((Image.image_type == 'main', 1), else_=0)).label('main_count'),
         func.sum(case((Image.image_type == 'detail', 1), else_=0)).label('detail_count'),
-        func.coalesce(main_vc_sub.c.vc, 0).label('main_versions'),
-        func.coalesce(detail_vc_sub.c.vc, 0).label('detail_versions'),
+        func.coalesce(ver_sub.c.main_vc, 0).label('main_versions'),
+        func.coalesce(ver_sub.c.detail_vc, 0).label('detail_versions'),
     ).filter(*filters).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).outerjoin(
-        main_vc_sub, Image.barcode == main_vc_sub.c.barcode
-    ).outerjoin(
-        detail_vc_sub, Image.barcode == detail_vc_sub.c.barcode
+        ver_sub, Image.barcode == ver_sub.c.barcode
     ).group_by(Image.barcode)
 
     # Count distinct barcodes for total
@@ -245,10 +285,7 @@ def serve_file(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
-    root = session.get(ScanRoot, img.scan_root_id)
-    if not root:
-        return jsonify({'error': 'not found'}), 404
-    if not root.enabled:
+    if not _is_root_enabled(img.scan_root_id):
         return jsonify({'error': 'scan root is disabled'}), 403
     if not os.path.exists(img.file_path):
         img.status = 'broken'
@@ -261,10 +298,7 @@ def serve_thumbnail(img_id):
     img = session.get(Image, img_id)
     if not img:
         return jsonify({'error': 'not found'}), 404
-    root = session.get(ScanRoot, img.scan_root_id)
-    if not root:
-        return jsonify({'error': 'not found'}), 404
-    if not root.enabled:
+    if not _is_root_enabled(img.scan_root_id):
         return jsonify({'error': 'scan root is disabled'}), 403
     if not os.path.exists(img.file_path):
         img.status = 'broken'
@@ -273,18 +307,28 @@ def serve_thumbnail(img_id):
 
     thumb_path = get_thumbnail_path(img_id)
     if not thumbnail_exists(img_id):
-        ok, md5, phash = generate_thumbnail(img_id, img.file_path)
-        if not ok:
-            return jsonify({'error': 'thumbnail generation failed'}), 500
-        changed = False
-        if md5 and not img.content_md5:
-            img.content_md5 = md5
-            changed = True
-        if phash and not img.phash:
-            img.phash = phash
-            changed = True
-        if changed:
-            session.commit()
+        # Serialize concurrent requests for the same image's thumbnail.
+        # First waiter generates; subsequent waiters find the file already exists.
+        lock = _get_thumb_lock(img_id)
+        with lock:
+            # Re-check inside lock: another thread may have generated it
+            if not thumbnail_exists(img_id):
+                ok, md5, phash = generate_thumbnail(img_id, img.file_path)
+                if not ok:
+                    return jsonify({'error': 'thumbnail generation failed'}), 500
+                changed = False
+                if md5 and not img.content_md5:
+                    img.content_md5 = md5
+                    changed = True
+                if phash and not img.phash:
+                    img.phash = phash
+                    changed = True
+                if changed:
+                    session.commit()
+        # Evict lock entry: thumbnail now exists on disk, so future requests
+        # skip this entire block. Prevents unbounded growth of _thumb_gen_locks.
+        with _thumb_gen_locks_guard:
+            _thumb_gen_locks.pop(img_id, None)
 
     # HTTP caching: use thumbnail file's mtime as ETag / Last-Modified
     try:

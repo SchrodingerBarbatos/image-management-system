@@ -6,6 +6,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import session, Image, ImageVersion, ScanRoot, DeletedFolder
 from versioning import update_versions_for_barcode
 from task_engine import _get_thread_session
+from db_retry import with_sqlite_lock_retry
 
 _log = logging.getLogger(__name__)
 
@@ -272,6 +273,7 @@ def list_duplicates():
 
 
 @batch_bp.route('/batch/delete-duplicates', methods=['POST'])
+@with_sqlite_lock_retry()
 def delete_duplicates():
     """删除指定的重复文件夹"""
     data = request.json
@@ -409,6 +411,7 @@ def list_low_versions():
 
 
 @batch_bp.route('/batch/delete-low-versions', methods=['POST'])
+@with_sqlite_lock_retry()
 def delete_low_versions():
     """删除指定的低版本。必须传入与预览时相同的阈值以重新验证。"""
     data = request.json

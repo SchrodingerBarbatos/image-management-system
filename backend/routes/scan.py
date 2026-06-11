@@ -270,6 +270,9 @@ def update_scan_root(root_id):
     if 'fuzzy_image_type' in data:
         root.fuzzy_image_type = data['fuzzy_image_type']
     session.commit()
+    # Invalidate ScanRoot.enabled TTL cache so the change takes effect immediately
+    from routes.images import _invalidate_root_cache
+    _invalidate_root_cache(root_id)
     if enabled_changed:
         update_all_versions()
     return jsonify({
@@ -308,6 +311,9 @@ def delete_scan_root(root_id):
     session.query(Image).filter(Image.scan_root_id == root_id).delete()
     session.delete(root)
     session.commit()
+    # Invalidate ScanRoot.enabled TTL cache — root is deleted, don't serve stale data
+    from routes.images import _invalidate_root_cache
+    _invalidate_root_cache(root_id)
 
     # Rebuild versions for affected barcodes to clean up orphan ImageVersion records
     for bc in affected_barcodes:

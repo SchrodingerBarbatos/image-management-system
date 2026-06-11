@@ -271,3 +271,89 @@ def test_update_unrelated_field_no_version_rebuild(client, sess):
     data = resp.get_json()
     assert data['image_type'] == 'main'
     assert data['confirmed'] == True
+
+
+# ---------------------------------------------------------------------------
+# ScanRoot.enabled TTL cache tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_root_enabled_caches(sess, monkeypatch):
+    """_is_root_enabled returns cached value within TTL window."""
+    import routes.images as ri
+    monkeypatch.setattr(ri, "session", sess)
+
+    _make_root(sess, root_id=10, enabled=True)
+    # Clear any stale cache
+    ri._invalidate_root_cache()
+
+    assert ri._is_root_enabled(10) is True
+
+    # Change root to disabled in DB — cache should still return True
+    root = sess.get(ScanRoot, 10)
+    root.enabled = False
+    sess.commit()
+
+    assert ri._is_root_enabled(10) is True  # stale cache hit
+
+
+def test_invalidate_root_cache_forces_db_read(sess, monkeypatch):
+    """_invalidate_root_cache clears the cache so next call reads DB."""
+    import routes.images as ri
+    monkeypatch.setattr(ri, "session", sess)
+
+    _make_root(sess, root_id=11, enabled=True)
+    ri._invalidate_root_cache()
+
+    assert ri._is_root_enabled(11) is True
+
+    # Disable root in DB
+    root = sess.get(ScanRoot, 11)
+    root.enabled = False
+    sess.commit()
+
+    # Cache is stale — still returns True
+    assert ri._is_root_enabled(11) is True
+
+    # Invalidate specific root
+    ri._invalidate_root_cache(11)
+
+    # Now reads DB — returns False
+    assert ri._is_root_enabled(11) is False
+
+
+def test_invalidate_all_roots(sess, monkeypatch):
+    """_invalidate_root_cache() with no args clears entire cache."""
+    import routes.images as ri
+    monkeypatch.setattr(ri, "session", sess)
+
+    _make_root(sess, root_id=20, enabled=True)
+    _make_root(sess, root_id=21, enabled=True)
+    ri._invalidate_root_cache()
+
+    ri._is_root_enabled(20)
+    ri._is_root_enabled(21)
+
+    # Disable both in DB
+    sess.get(ScanRoot, 20).enabled = False
+    sess.get(ScanRoot, 21).enabled = False
+    sess.commit()
+
+    # Stale cache
+    assert ri._is_root_enabled(20) is True
+    assert ri._is_root_enabled(21) is True
+
+    # Clear all
+    ri._invalidate_root_cache()
+
+    assert ri._is_root_enabled(20) is False
+    assert ri._is_root_enabled(21) is False
+
+
+def test_is_root_enabled_missing_root(sess, monkeypatch):
+    """_is_root_enabled returns False for non-existent root and caches it."""
+    import routes.images as ri
+    monkeypatch.setattr(ri, "session", sess)
+    ri._invalidate_root_cache()
+
+    assert ri._is_root_enabled(9999) is False
