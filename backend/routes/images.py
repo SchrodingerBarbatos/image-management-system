@@ -369,7 +369,8 @@ def batch_export():
     q = session.query(Image).filter(Image.id.in_(ids)).join(
         ScanRoot, Image.scan_root_id == ScanRoot.id
     ).filter(ScanRoot.enabled == True)
-    # When exporting detail images, fetch main+detail so _build_zip can use main as fallback
+    # No type filter for 'all' or 'detail' — detail exports need main images
+    # available as the fallback source (see _plan_zip_entries in routes.export)
     if image_type and image_type not in ('all', 'detail'):
         q = q.filter(Image.image_type == image_type)
     imgs = q.all()
@@ -400,13 +401,16 @@ def batch_export():
         session.add(task)
         session.commit()
 
-    from routes.export import _build_zip
+    from routes.export import _build_zip, _plan_zip_entries
     import threading
     img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
+    # Accurate entry count for the sync response — detail exports may rename
+    # main images as fallback, so the ZIP entry count can differ from len(imgs)
+    planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
 
     threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
 
-    return jsonify({'task_id': task.id, 'total': len(imgs), 'scanroot_excluded': scanroot_excluded, 'version_filtered': version_filtered})
+    return jsonify({'task_id': task.id, 'total': len(planned_entries), 'scanroot_excluded': scanroot_excluded, 'version_filtered': version_filtered})
 
 @images_bp.route('/barcodes/<barcode>/duplicate-images', methods=['DELETE'])
 def delete_duplicate_images(barcode):

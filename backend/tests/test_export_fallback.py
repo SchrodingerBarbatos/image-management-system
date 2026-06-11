@@ -4,8 +4,11 @@ _build_zip export_type parameter controls behavior:
 - 'main': only main images, named as main
 - 'detail': detail images with main-as-detail fallback for barcodes with no detail
 - 'all': main as main, detail as detail, no fallback
+
+Also covers the /api/images/batch-export route with image_type set.
 """
 
+import json
 import os
 import tempfile
 import zipfile
@@ -320,3 +323,200 @@ def test_barcode_counts_not_affected_by_fallback():
     assert counts["A"]["detail"] == 0
     assert counts["B"]["main"] == 0
     assert counts["B"]["detail"] == 2
+
+
+# ===========================================================================
+# _plan_zip_entries — planned count must match what _build_zip writes
+# ===========================================================================
+
+def test_plan_entries_detail_fallback_count():
+    from routes.export import _plan_zip_entries
+
+    img_data = [
+        ("/fake/a_d.jpg", "A", "detail", 1, "jpg"),
+        ("/fake/a_m.jpg", "A", "main", 1, "jpg"),
+        ("/fake/b_m1.jpg", "B", "main", 1, "jpg"),
+        ("/fake/b_m2.jpg", "B", "main", 2, "jpg"),
+    ]
+    entries, fallback = _plan_zip_entries(img_data, flat=True, export_type='detail')
+    # A has real detail (1), B falls back to its 2 mains
+    assert sorted(n for _, n in entries) == [
+        "A_详情图_1.jpg", "B_详情图_1.jpg", "B_详情图_2.jpg",
+    ]
+    assert fallback == ["B"]
+
+
+def test_plan_entries_main_excludes_detail():
+    from routes.export import _plan_zip_entries
+
+    img_data = [
+        ("/fake/a_m.jpg", "A", "main", 1, "jpg"),
+        ("/fake/a_d.jpg", "A", "detail", 1, "jpg"),
+    ]
+    entries, fallback = _plan_zip_entries(img_data, flat=True, export_type='main')
+    assert [n for _, n in entries] == ["A_1.jpg"]
+    assert fallback == []
+
+
+# ===========================================================================
+# /api/images/batch-export route with image_type (route-level)
+# ===========================================================================
+
+class _SyncThread:
+    """Stand-in for threading.Thread that runs the target synchronously,
+    keeping all DB access on the test's SQLite connection."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+
+class _BuildRecorder:
+    """Records _build_zip calls; keeps the real function for replay."""
+
+    def __init__(self, real):
+        self.real = real
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+    def replay(self, idx, upload_dir):
+        """Run the real _build_zip with the recorded args under upload_dir."""
+        import routes.export as exp_mod
+        (args, kwargs) = self.calls[idx]
+        old = exp_mod.UPLOAD_DIR
+        exp_mod.UPLOAD_DIR = upload_dir
+        try:
+            self.real(*args, **kwargs)
+        finally:
+            exp_mod.UPLOAD_DIR = old
+        return args
+
+
+@pytest.fixture()
+def captured_builds(monkeypatch):
+    """Replace _build_zip with a recorder; tests replay the real build later."""
+    import routes.export as exp_mod
+    recorder = _BuildRecorder(exp_mod._build_zip)
+    monkeypatch.setattr(exp_mod, "_build_zip", recorder)
+    return recorder
+
+
+@pytest.fixture()
+def client(db, monkeypatch, captured_builds):
+    import threading
+    import routes.images
+    from flask import Flask
+
+    monkeypatch.setattr(routes.images, "session", db)
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+
+    app = Flask(__name__)
+    app.register_blueprint(routes.images.images_bp, url_prefix="/api")
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def _add_image(db, images_dir, barcode, image_type, seq, scan_root_id):
+    filename = f"{barcode}_{image_type}_{seq}.jpg"
+    path = _create_image_file(images_dir, filename)
+    img = Image(
+        barcode=barcode, image_type=image_type,
+        folder_ctime="2024-01-01T00:00:00",
+        filename=filename, ext="jpg", file_path=path, file_size=104,
+        md5_hash="abc", content_md5="abc", confirmed=True, status="active",
+        scan_root_id=scan_root_id, sequence=seq,
+    )
+    db.add(img)
+    db.commit()
+    return img
+
+
+def test_batch_export_detail_route_fallback(client, db, images_dir, captured_builds):
+    """image_type='detail': query fetches main+detail, fallback fills barcodes
+    without detail, response total matches actual ZIP entries, report stays truthful."""
+    sr = ScanRoot(path="/fake", enabled=True)
+    db.add(sr); db.commit()
+
+    imgs = [
+        _add_image(db, images_dir, "A", "main", 1, sr.id),
+        _add_image(db, images_dir, "A", "detail", 1, sr.id),
+        _add_image(db, images_dir, "A", "detail", 2, sr.id),
+        _add_image(db, images_dir, "B", "main", 1, sr.id),
+        _add_image(db, images_dir, "B", "main", 2, sr.id),
+    ]
+
+    resp = client.post("/api/images/batch-export", json={
+        "ids": [i.id for i in imgs], "image_type": "detail", "flat": False,
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # A -> 2 real detail, B -> 2 main as fallback = 4 ZIP entries
+    assert body["total"] == 4
+    assert body["scanroot_excluded"] == 0
+    assert body["version_filtered"] == 0
+
+    # Report counts reflect real data types (main zeroed for detail export)
+    task = db.get(ExportTask, body["task_id"])
+    counts = json.loads(task.barcode_data)
+    assert counts["A"] == {"main": 0, "detail": 2}
+    assert counts["B"] == {"main": 0, "detail": 0}
+
+    # Replay the real build with the captured args -> fallback lands in ZIP
+    args = captured_builds.replay(0, upload_dir=images_dir)
+    task_id, img_data, flat, export_type = args
+    assert export_type == "detail"
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert names == [
+        "详情图/A_详情图_1.jpg",
+        "详情图/A_详情图_2.jpg",
+        "详情图/B_详情图_1.jpg",
+        "详情图/B_详情图_2.jpg",
+    ]
+    db.expire_all()
+    done = db.get(ExportTask, task_id)
+    assert done.status == "done"
+    assert done.total_images == 4
+
+
+def test_batch_export_main_route_no_fallback(client, db, images_dir, captured_builds):
+    """image_type='main': type filter applies, no fallback, total == main count."""
+    sr = ScanRoot(path="/fake", enabled=True)
+    db.add(sr); db.commit()
+
+    m = _add_image(db, images_dir, "C", "main", 1, sr.id)
+    d = _add_image(db, images_dir, "C", "detail", 1, sr.id)
+
+    resp = client.post("/api/images/batch-export", json={
+        "ids": [m.id, d.id], "image_type": "main", "flat": False,
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 1
+
+    args = captured_builds.replay(0, upload_dir=images_dir)
+    task_id, img_data, flat, export_type = args
+    assert export_type == "main"
+    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    assert names == ["主图/C_1.jpg"]
+
+
+def test_batch_export_default_all(client, db, images_dir, captured_builds):
+    """No image_type: export_type defaults to 'all', no fallback."""
+    sr = ScanRoot(path="/fake", enabled=True)
+    db.add(sr); db.commit()
+
+    m = _add_image(db, images_dir, "D", "main", 1, sr.id)
+
+    resp = client.post("/api/images/batch-export", json={"ids": [m.id]})
+    assert resp.status_code == 200
+    assert resp.get_json()["total"] == 1
+
+    (args, _kw) = captured_builds.calls[0]
+    assert args[3] == "all"
