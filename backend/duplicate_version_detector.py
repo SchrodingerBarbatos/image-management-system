@@ -522,12 +522,8 @@ def _find_groups_in_pool(pool):
     strong_mi_bypassed = 0
     image_count = items[0][2]
 
-    # Pre-comparison image list logging for debug (target barcode)
-    # TODO: remove hardcoded barcode probe after debugging 6901294179608 issue
     sample_barcode = getattr(items[0][0], 'barcode', '')
     sample_image_type = getattr(items[0][0], 'image_type', '')
-    if sample_barcode == '6901294179608' and sample_image_type == 'detail':
-        _log_version_images(sample_barcode, sample_image_type, pool)
 
     _log.debug("Pool: %d versions, image_count=%d", len(pool), image_count)
 

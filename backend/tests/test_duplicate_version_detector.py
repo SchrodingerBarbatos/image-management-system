@@ -138,6 +138,30 @@ class TestAreDuplicateVersions:
         b = [_make_image(content_md5='a'), _make_image(content_md5='y')]
         assert are_duplicate_versions(a, b) is False
 
+
+def test_find_groups_in_pool_has_no_barcode_specific_debug_probe(monkeypatch):
+    calls = []
+
+    def _record(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr("duplicate_version_detector._log_version_images", _record)
+
+    v1 = _make_version("2024-01-01T00:00:00", content_hash="h1")
+    v1.barcode = "6901294179608"
+    v1.image_type = "detail"
+    v2 = _make_version("2024-02-01T00:00:00", content_hash="h2")
+    v2.barcode = "6901294179608"
+    v2.image_type = "detail"
+    pool = [
+        (v1, [_make_image(content_md5="a")], 1, 100),
+        (v2, [_make_image(content_md5="b")], 1, 100),
+    ]
+
+    _find_groups_in_pool(pool)
+
+    assert calls == []
+
     def test_empty_lists(self):
         assert are_duplicate_versions([], []) is True
 

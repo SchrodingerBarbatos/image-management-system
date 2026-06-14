@@ -87,6 +87,21 @@ def groups_are_identical(imgs1, imgs2):
     return True
 
 
+def _expunge_image_version_objects():
+    """Remove cached ImageVersion instances before recreating rows.
+
+    SQLite may reuse the same primary keys for the rebuilt versions, so stale
+    ORM identities must be dropped first to avoid identity-map replacement
+    warnings during flush.
+    """
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, ImageVersion):
+            try:
+                session.expunge(obj)
+            except Exception:
+                pass
+
+
 
 def _do_update_versions_for_barcode(barcode):
     # RCN 条码不应有版本记录：删除残留版本后跳过
@@ -155,6 +170,8 @@ def _do_update_versions_for_barcode(barcode):
 
     # Delete old versions for this barcode
     session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
+    session.flush()
+    _expunge_image_version_objects()
 
     # Create new versions per image_type
     for img_type, vers in versions_by_type.items():

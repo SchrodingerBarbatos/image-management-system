@@ -4,7 +4,9 @@ Uses in-memory SQLite and Flask test client.
 """
 
 import pytest
+import warnings
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import SAWarning
 from sqlalchemy.orm import scoped_session, sessionmaker
 from flask import Flask
 
@@ -208,7 +210,9 @@ def test_update_image_type_triggers_version_rebuild(client, sess):
     sess.commit()
 
     # Change image_type from main to detail
-    resp = client.put(f'/api/images/{img.id}', json={'image_type': 'detail'})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SAWarning)
+        resp = client.put(f'/api/images/{img.id}', json={'image_type': 'detail'})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data['image_type'] == 'detail'
@@ -448,9 +452,51 @@ def test_delete_image_file_outside_root_preserves_db(client, sess, tmp_path):
 
 @pytest.fixture(scope="function")
 def scan_client(sess, monkeypatch):
-    """Flask test client with scan blueprint registered."""
+    """Flask test client with scan blueprint registered.
+
+    Validation tests do not need a real background scan. Stub the worker so
+    the in-memory SQLite database stays on one thread and later tests do not
+    inherit leaked thread exceptions.
+    """
     import routes.scan as scan_mod
     monkeypatch.setattr(scan_mod, "session", sess)
+    scan_mod._scan_jobs.clear()
+    scan_mod._scan_cancel_flags.clear()
+
+    def _fake_run_scan(root_ids, scan_mode, job_ready_event=None):
+        with scan_mod._scan_lock:
+            scan_mod._scan_jobs["test-job"] = {
+                "status": "running",
+                "phase": "starting",
+                "current_root_path": "",
+                "current_root_index": 0,
+                "total_roots": len(root_ids),
+                "current_file": "",
+                "current_dir": "",
+                "added": 0,
+                "skipped": 0,
+                "broken_cleaned": 0,
+                "broken_new": 0,
+                "rejected": 0,
+                "thumbnail_total": 0,
+                "thumbnail_current": 0,
+                "total_files": 0,
+                "processed_files": 0,
+                "percent": 0,
+                "eta_seconds": 0,
+                "speed": 0,
+                "counted_files": 0,
+                "counting_current_dir": "",
+                "counting_root_index": 0,
+                "counting_total_roots": len(root_ids),
+                "error": None,
+                "elapsed_seconds": 0,
+                "started_at": "2026-01-01T00:00:00",
+            }
+        if job_ready_event:
+            job_ready_event.set()
+
+    monkeypatch.setattr(scan_mod, "_run_scan", _fake_run_scan)
 
     app = Flask(__name__)
     app.register_blueprint(scan_mod.scan_bp, url_prefix='/api')
