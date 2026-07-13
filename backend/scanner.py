@@ -309,12 +309,18 @@ def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
     sess.flush()
 
 
-def _load_deleted_folders_set():
-    """Load all deleted (barcode, image_type, folder_ctime) tuples into a set
-    for O(1) lookup during scanning."""
-    rows = session.execute(
-        select(DeletedFolder.barcode, DeletedFolder.image_type, DeletedFolder.folder_ctime)
-    ).all()
+def _load_deleted_folders_set(scan_root_id=None):
+    """Load deleted (barcode, image_type, folder_ctime) tuples into a set.
+
+    When scan_root_id is provided, include both that root's rows and legacy
+    rows with scan_root_id=0 (pre-root-scoped blacklist).
+    """
+    q = select(DeletedFolder.barcode, DeletedFolder.image_type, DeletedFolder.folder_ctime)
+    if scan_root_id is not None:
+        q = q.where(
+            (DeletedFolder.scan_root_id == scan_root_id) | (DeletedFolder.scan_root_id == 0)
+        )
+    rows = session.execute(q).all()
     return {(r.barcode, r.image_type, r.folder_ctime) for r in rows}
 
 
@@ -356,7 +362,8 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
 
     # Pre-load deleted folders set for O(1) lookup — skip files that were
     # intentionally deleted by the user (all hard-delete paths record these).
-    deleted_folders = _load_deleted_folders_set()
+    # Scoped to this scan root (+ legacy root_id=0) so roots do not cross-blacklist.
+    deleted_folders = _load_deleted_folders_set(root_id)
 
     # Generate a unique scan token for leftover detection
     scan_token = uuid.uuid4().hex

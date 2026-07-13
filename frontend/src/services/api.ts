@@ -390,8 +390,16 @@ export const taskApi = {
   // Async delete tasks
   createBatchDeleteDuplicatesTask: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean) =>
     api.post<BatchTaskInfo>('/batch/delete-duplicates/tasks', { items, delete_files: deleteFiles }).then(r => r.data),
-  createBatchDeleteLowVersionsTask: (items: { barcode: string; image_type: string; folder_ctime: string }[], deleteFiles: boolean, mainThreshold: number, detailThreshold: number) =>
-    api.post<BatchTaskInfo>('/batch/delete-low-versions/tasks', { items, delete_files: deleteFiles, main_threshold: mainThreshold, detail_threshold: detailThreshold }).then(r => r.data),
+  createBatchDeleteLowVersionsTask: (
+    items: { barcode: string; image_type: string; folder_ctime: string }[],
+    deleteFiles: boolean,
+    scanTaskId?: number | null,
+  ) =>
+    api.post<BatchTaskInfo>('/batch/delete-low-versions/tasks', {
+      items,
+      delete_files: deleteFiles,
+      scan_task_id: scanTaskId ?? undefined,
+    }).then(r => r.data),
   createDeleteVersionTask: (versionId: number, deleteFiles: boolean) =>
     api.post<BatchTaskInfo>(`/versions/${versionId}/delete-task`, { delete_files: deleteFiles }).then(r => r.data),
   createBatchDeleteImagesTask: (ids: number[], deleteFiles: boolean) =>

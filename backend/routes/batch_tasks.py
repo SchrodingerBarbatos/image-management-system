@@ -312,10 +312,12 @@ _TERMINAL_STATUSES = frozenset({'done', 'error', 'interrupted', 'cancelled'})
 
 def _wrap_retry(fn):
     """Wrap a task handler with SQLite lock retry.
-    Uses _get_thread_session() at call time (not decoration time)
-    so the retry decorator can rollback the correct session.
-    Before retrying, checks if the task is already in a terminal state
-    to avoid re-running completed/errored tasks."""
+
+    IMPORTANT: mid-handler update_task_progress() commits the thread session.
+    Re-running a destructive handler after progress > 0 can skip version rebuild
+    (deletes already committed, second pass deletes 0). Only retry when
+    progress is still 0 (no committed work yet).
+    """
     def wrapper(task_id):
         import time as _time
         from db_retry import _is_sqlite_locked, _DEFAULT_MAX_ATTEMPTS, _DEFAULT_DELAY
@@ -325,20 +327,33 @@ def _wrap_retry(fn):
             except Exception as e:
                 if not _is_sqlite_locked(e) or attempt == _DEFAULT_MAX_ATTEMPTS:
                     raise
-                # Guard: don't retry if the task already reached a terminal state
-                # (e.g. finish_task committed successfully but a later lock error occurred)
                 sess = _get_thread_session()
                 try:
                     sess.rollback()
-                    task = sess.get(BatchTask, task_id)
-                    if task and task.status in _TERMINAL_STATUSES:
-                        _log.info("_wrap_retry(%s): task %d already in terminal state '%s', skipping retry",
-                                  fn.__name__, task_id, task.status)
-                        return
                 except Exception:
                     pass
-                _log.warning("%s: SQLite locked, retry %d/%d (delay=%.1fs)",
-                             fn.__name__, attempt, _DEFAULT_MAX_ATTEMPTS, _DEFAULT_DELAY)
+                try:
+                    task = sess.get(BatchTask, task_id)
+                except Exception:
+                    task = None
+                if task and task.status in _TERMINAL_STATUSES:
+                    _log.info(
+                        "_wrap_retry(%s): task %d already in terminal state '%s', skipping retry",
+                        fn.__name__, task_id, task.status,
+                    )
+                    return
+                # Already committed partial work via progress updates — do NOT re-run
+                if task and (task.progress or 0) > 0:
+                    _log.error(
+                        "_wrap_retry(%s): task %d has progress=%s after lock error; "
+                        "refusing full re-run to avoid lost version rebuild",
+                        fn.__name__, task_id, task.progress,
+                    )
+                    raise
+                _log.warning(
+                    "%s: SQLite locked, retry %d/%d (delay=%.1fs)",
+                    fn.__name__, attempt, _DEFAULT_MAX_ATTEMPTS, _DEFAULT_DELAY,
+                )
                 _time.sleep(_DEFAULT_DELAY)
     wrapper.__name__ = fn.__name__
     wrapper.__doc__ = fn.__doc__
@@ -543,42 +558,16 @@ def _run_delete_version(task_id):
         finish_task(task_id, error_message='该版本属于已禁用的扫描目录，无法删除')
         return
 
-    # Same filters as _delete_folder_images: active + confirmed + enabled root
-    imgs = sess.query(Image).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id
-    ).filter(
-        Image.barcode == barcode,
-        Image.folder_ctime == folder_ctime,
-        Image.image_type == image_type,
-        Image.status == 'active',
-        Image.confirmed == True,
-        ScanRoot.enabled == True,
-    ).all()
-
-    total = len(imgs)
-    update_task_progress(task_id, progress=0, total=total)
-
-    deleted_count = 0
-    failed_count = 0
-    from routes._utils import safe_remove_image_file
-    for i, img in enumerate(imgs):
-        if delete_files:
-            ok, reason = safe_remove_image_file(img, sess)
-            if ok:
-                sess.delete(img)
-                deleted_count += 1
-            else:
-                failed_count += 1
-                update_task_progress(task_id, failed_count=failed_count,
-                    failed_item={'file': img.file_path, 'reason': reason or '删除失败'})
-        else:
-            sess.delete(img)
-            deleted_count += 1
-        update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
-
-    # Only blacklist folder when no Image rows remain for this key
-    if deleted_count > 0:
-        _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
+    # Use shared folder-delete helper for identical filters/semantics as other paths
+    # (progress is coarse: one step for the whole version folder)
+    update_task_progress(task_id, progress=0, total=1, current_item=barcode)
+    deleted_count, failed_items = _delete_folder_images(
+        barcode, image_type, folder_ctime, delete_files,
+    )
+    failed_count = len(failed_items)
+    for fi in failed_items:
+        update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
+    update_task_progress(task_id, progress=1, current_item=barcode)
     sess.commit()
 
     # 重建版本：只有实际删除了图片才更新版本
@@ -626,7 +615,8 @@ def _run_batch_delete_images(task_id):
         return
 
     # Collect barcodes from the IDs that will actually be DB-deleted
-    delete_db_folder_keys = set()
+    # key (bc, type, ctime) -> set of scan_root_ids
+    delete_db_folder_roots: dict = {}
 
     # Delete files if requested (with path safety validation)
     failed_count = 0
@@ -645,7 +635,8 @@ def _run_batch_delete_images(task_id):
             ok, reason = safe_remove_image_file(img, sess)
             if ok:
                 delete_db_ids.append(img.id)
-                delete_db_folder_keys.add((img.barcode, img.image_type, img.folder_ctime))
+                key = (img.barcode, img.image_type, img.folder_ctime)
+                delete_db_folder_roots.setdefault(key, set()).add(img.scan_root_id)
             else:
                 failed_count += 1
                 update_task_progress(task_id, failed_count=failed_count,
@@ -663,19 +654,19 @@ def _run_batch_delete_images(task_id):
         return
 
     # Collect barcodes and folder keys from the IDs that will actually be DB-deleted
-    barcodes = {r[0] for r in sess.query(Image.barcode).filter(
-        Image.id.in_(delete_db_ids)).distinct().all()}
+    rows = sess.query(
+        Image.barcode, Image.image_type, Image.folder_ctime, Image.scan_root_id,
+    ).filter(Image.id.in_(delete_db_ids)).all()
+    barcodes = {r.barcode for r in rows}
     if not delete_files:
-        delete_db_folder_keys = {
-            (r.barcode, r.image_type, r.folder_ctime)
-            for r in sess.query(Image.barcode, Image.image_type, Image.folder_ctime)
-            .filter(Image.id.in_(delete_db_ids)).distinct().all()
-        }
+        for r in rows:
+            key = (r.barcode, r.image_type, r.folder_ctime)
+            delete_db_folder_roots.setdefault(key, set()).add(r.scan_root_id)
 
     # Delete database records（仅删除文件删除成功的记录）
     deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
-    for bc, it, ctime in delete_db_folder_keys:
-        _maybe_record_deleted_folder(sess, bc, it, ctime)
+    for (bc, it, ctime), root_ids in delete_db_folder_roots.items():
+        _maybe_record_deleted_folder(sess, bc, it, ctime, root_ids)
     sess.commit()
 
     # Re-sequence remaining versions
@@ -1401,15 +1392,45 @@ def create_batch_delete_duplicates_task():
 
 @batch_tasks_bp.route('/batch/delete-low-versions/tasks', methods=['POST'])
 def create_batch_delete_low_versions_task():
-    """Create an async task to delete low version folders."""
+    """Create an async task to delete low version folders.
+
+    Prefer scan_task_id so thresholds come from the original low-version scan
+    params_json (not live form values). Explicit main/detail_threshold still
+    accepted as fallback for legacy callers.
+    """
     data = request.json or {}
     items = data.get('items', [])
     delete_files = data.get('delete_files', False)
     main_threshold = data.get('main_threshold', 0)
     detail_threshold = data.get('detail_threshold', 0)
+    scan_task_id = data.get('scan_task_id')
 
     if not items:
         return jsonify({'error': 'items required'}), 400
+
+    # Prefer thresholds from the scan task that produced the selection
+    if scan_task_id is not None:
+        if not isinstance(scan_task_id, int) or scan_task_id < 1:
+            return jsonify({'error': 'scan_task_id must be a positive integer'}), 400
+        scan_task = session.get(BatchTask, scan_task_id)
+        if not scan_task:
+            return jsonify({'error': 'scan_task_id not found'}), 404
+        if scan_task.task_type != 'low_version_scan':
+            return jsonify({'error': 'scan_task_id is not a low_version_scan task'}), 400
+        try:
+            scan_params = json.loads(scan_task.params_json) if scan_task.params_json else {}
+        except (json.JSONDecodeError, TypeError):
+            scan_params = {}
+        if 'main_threshold' in scan_params:
+            main_threshold = scan_params.get('main_threshold', 0)
+        if 'detail_threshold' in scan_params:
+            detail_threshold = scan_params.get('detail_threshold', 0)
+        # If a type was disabled at scan time, treat its threshold as 0
+        if scan_params.get('main_enabled') is False:
+            main_threshold = 0
+        if scan_params.get('detail_enabled') is False:
+            detail_threshold = 0
+
     if not isinstance(main_threshold, int) or not isinstance(detail_threshold, int):
         return jsonify({'error': 'main_threshold and detail_threshold must be integers'}), 400
 
@@ -1428,6 +1449,7 @@ def create_batch_delete_low_versions_task():
         'delete_files': delete_files,
         'main_threshold': main_threshold,
         'detail_threshold': detail_threshold,
+        'scan_task_id': scan_task_id,
     }
     from task_engine import create_task
     task_dict, is_new = create_task('batch_delete_low_versions', params=params)

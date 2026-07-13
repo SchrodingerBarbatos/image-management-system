@@ -29,43 +29,62 @@ def _classify_delete_error(filepath, error):
     return f'未知错误: {error}'
 
 
-def _record_deleted_folder(sess, barcode, image_type, folder_ctime):
-    """Unconditionally insert a deleted_folders row (caller must ensure the folder is empty)."""
+def _record_deleted_folder(sess, barcode, image_type, folder_ctime, scan_root_id=0):
+    """Unconditionally insert a deleted_folders row (caller must ensure the folder is empty for this root)."""
     stmt = sqlite_insert(DeletedFolder).values(
         barcode=barcode,
         image_type=image_type,
         folder_ctime=folder_ctime,
+        scan_root_id=int(scan_root_id or 0),
         deleted_at=datetime.datetime.now().isoformat(),
     ).on_conflict_do_nothing(
-        index_elements=['barcode', 'image_type', 'folder_ctime']
+        index_elements=['barcode', 'image_type', 'folder_ctime', 'scan_root_id']
     )
     sess.execute(stmt)
 
 
-def _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime):
-    """Record deleted_folders only when no Image rows remain for this folder key.
+def _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime, scan_root_ids=None):
+    """Record deleted_folders only when no Image rows remain for this folder key per root.
 
     Partial deletes must not blacklist a folder while sibling images still exist;
     otherwise the scanner permanently skips re-adding restored/sibling files.
+    Roots are recorded separately so one scan root cannot blacklist another.
     """
     sess.flush()
-    remaining = sess.query(Image.id).filter(
-        Image.barcode == barcode,
-        Image.image_type == image_type,
-        Image.folder_ctime == folder_ctime,
-    ).count()
-    if remaining == 0:
-        _record_deleted_folder(sess, barcode, image_type, folder_ctime)
-        return True
-    return False
+    if scan_root_ids is None:
+        # Infer roots that currently have zero remaining rows for the key from
+        # any historical perspective: if global remaining is 0, record as legacy root 0
+        remaining = sess.query(Image.id).filter(
+            Image.barcode == barcode,
+            Image.image_type == image_type,
+            Image.folder_ctime == folder_ctime,
+        ).count()
+        if remaining == 0:
+            _record_deleted_folder(sess, barcode, image_type, folder_ctime, 0)
+            return True
+        return False
+
+    recorded = False
+    for root_id in {int(r) for r in scan_root_ids if r is not None}:
+        remaining = sess.query(Image.id).filter(
+            Image.barcode == barcode,
+            Image.image_type == image_type,
+            Image.folder_ctime == folder_ctime,
+            Image.scan_root_id == root_id,
+        ).count()
+        if remaining == 0:
+            _record_deleted_folder(sess, barcode, image_type, folder_ctime, root_id)
+            recorded = True
+    return recorded
 
 
-def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
+def _delete_folder_images(barcode, image_type, folder_ctime, delete_files, sess=None):
     """删除指定条码+类型+文件夹下 active+confirmed+enabled 的图片，返回删除数量。
     过滤条件与扫描端点一致，确保预览和实际操作匹配。
-    使用 thread-local session 以支持后台任务调用。
-    仅当该 folder key 下已无任何 Image 行时才写入 deleted_folders。"""
-    sess = _get_thread_session()
+    sess: optional; defaults to thread-local session for background tasks.
+    仅当该 folder key + scan_root 下已无任何 Image 行时才写入 deleted_folders。"""
+    if sess is None:
+        sess = _get_thread_session()
     # Subquery to get matching image IDs (join with ScanRoot for enabled check)
     match_ids = select(Image.id).where(
         Image.barcode == barcode,
@@ -81,21 +100,31 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
         from routes._utils import safe_remove_image_file
         failed_items = []
         deleted_count = 0
+        deleted_root_ids = set()
         for img in imgs:
             ok, reason = safe_remove_image_file(img, sess)
             if ok:
+                deleted_root_ids.add(img.scan_root_id)
                 sess.delete(img)
                 deleted_count += 1
             else:
                 _log.warning("Refused or failed to delete file: %s — %s", img.file_path, reason)
-                failed_items.append({'file': img.file_path, 'reason': reason or '删除失败'})
+                failed_items.append({
+                    'id': img.id, 'file': img.file_path, 'file_path': img.file_path,
+                    'reason': reason or '删除失败',
+                })
         if deleted_count > 0:
-            _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
+            _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime, deleted_root_ids)
         return deleted_count, failed_items
     else:
-        count = sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
+        imgs = sess.query(Image).filter(Image.id.in_(match_ids)).all()
+        deleted_root_ids = {img.scan_root_id for img in imgs}
+        count = 0
+        for img in imgs:
+            sess.delete(img)
+            count += 1
         if count > 0:
-            _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
+            _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime, deleted_root_ids)
         return count, []
 
 
@@ -174,22 +203,27 @@ def delete_images_with_validation(barcode, image_type, folder_ctime, delete_file
 
     failed_msgs = []
     deleted_count = 0
+    deleted_root_ids = set()
     if delete_files:
         from routes._utils import safe_remove_image_file
         for img in imgs:
             ok, reason = safe_remove_image_file(img, sess)
             if ok:
+                deleted_root_ids.add(img.scan_root_id)
                 sess.delete(img)
                 deleted_count += 1
             else:
                 failed_msgs.append(f'{img.file_path}: {reason or "删除失败"}')
     else:
         for img in imgs:
+            deleted_root_ids.add(img.scan_root_id)
             sess.delete(img)
             deleted_count += 1
 
     if deleted_count > 0:
-        _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
+        _maybe_record_deleted_folder(
+            sess, barcode, image_type, folder_ctime, deleted_root_ids,
+        )
 
     if deleted_count == 0 and failed_msgs:
         return 0, f'文件删除失败: {"; ".join(failed_msgs)}'
@@ -228,14 +262,17 @@ def _compute_folder_stats():
 @batch_bp.route('/batch/duplicates', methods=['GET'])
 def list_duplicates():
     """扫描所有有重复文件夹的版本，返回分组数据"""
+    from scanner import validate_business_gtin
     versions = session.query(ImageVersion).filter(
         ImageVersion.duplicate_mtimes != '',
         ImageVersion.duplicate_mtimes != '[]',
     ).all()
 
-    # Build deduplicated key -> version info map
+    # Build deduplicated key -> version info map (skip RCN — same as async scan)
     dup_map = {}  # (barcode, image_type, dup_ctime) -> {version_label, version_folder_ctime}
     for v in versions:
+        if not validate_business_gtin(v.barcode)[0]:
+            continue
         try:
             dup_ctimes = json.loads(v.duplicate_mtimes)
         except (json.JSONDecodeError, TypeError):
@@ -395,8 +432,12 @@ def list_low_versions():
     if main_threshold == 0 and detail_threshold == 0:
         return jsonify({'error': 'at least one threshold must be > 0'}), 400
 
-    # Get all versions
-    versions = session.query(ImageVersion).all()
+    # Get all versions (skip RCN — same as async low-version scan)
+    from scanner import validate_business_gtin
+    versions = [
+        v for v in session.query(ImageVersion).all()
+        if validate_business_gtin(v.barcode)[0]
+    ]
     stats = _compute_folder_stats()
 
     # Group by (barcode, image_type)

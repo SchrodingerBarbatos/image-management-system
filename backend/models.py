@@ -234,16 +234,23 @@ class DuplicateVersionScanResult(Base):
 
 
 class DeletedFolder(Base):
-    """Tracks deleted (barcode, image_type, folder_ctime) tuples so the scanner
-    can skip them and avoid re-adding files the user intentionally deleted."""
+    """Tracks deleted (barcode, image_type, folder_ctime, scan_root_id) so the
+    scanner can skip them and avoid re-adding files the user intentionally
+    deleted — scoped per scan root so roots do not blacklist each other."""
     __tablename__ = 'deleted_folders'
     id = Column(Integer, primary_key=True)
     barcode = Column(Text, nullable=False)
     image_type = Column(Text, nullable=False)
     folder_ctime = Column(Text, nullable=False)
+    # 0 = legacy rows (pre-root-scoped); real roots use ScanRoot.id
+    scan_root_id = Column(Integer, nullable=False, default=0)
     deleted_at = Column(Text, default=lambda: datetime.datetime.now().isoformat())
 
     __table_args__ = (
-        UniqueConstraint('barcode', 'image_type', 'folder_ctime', name='uq_deleted_folder'),
+        UniqueConstraint(
+            'barcode', 'image_type', 'folder_ctime', 'scan_root_id',
+            name='uq_deleted_folder_root',
+        ),
         Index('idx_df_barcode_type', 'barcode', 'image_type'),
+        Index('idx_df_root', 'scan_root_id'),
     )

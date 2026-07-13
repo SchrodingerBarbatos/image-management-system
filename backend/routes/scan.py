@@ -310,10 +310,10 @@ def delete_scan_root(root_id):
     # Save path before deletion to avoid accessing expired ORM object
     root_path = root.path
 
-    # Record deleted folders BEFORE deleting images
+    # Record deleted folders BEFORE deleting images (scoped to this root)
     from routes.batch import _record_deleted_folder
     for bc, it, ctime in deleted_folder_keys:
-        _record_deleted_folder(session, bc, it, ctime)
+        _record_deleted_folder(session, bc, it, ctime, root_id)
 
     session.query(Image).filter(Image.scan_root_id == root_id).delete()
     session.delete(root)

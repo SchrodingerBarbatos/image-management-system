@@ -58,8 +58,9 @@ def ignore_pending(img_id):
     barcode = img.barcode
     image_type = img.image_type
     folder_ctime = img.folder_ctime
+    root_id = img.scan_root_id
     session.delete(img)
-    _maybe_record_deleted_folder(session, barcode, image_type, folder_ctime)
+    _maybe_record_deleted_folder(session, barcode, image_type, folder_ctime, {root_id})
     session.commit()
     return jsonify({'message': 'ignored'})
 

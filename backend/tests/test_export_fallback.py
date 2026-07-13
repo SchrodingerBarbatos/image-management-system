@@ -85,7 +85,7 @@ def _zip_names(zip_path):
 
 def test_detail_fallback_when_no_detail_images(db, images_dir):
     """detail export: barcode with only main images -> ALL main written as detail."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -108,7 +108,7 @@ def test_detail_fallback_when_no_detail_images(db, images_dir):
 
 def test_detail_no_fallback_when_detail_exists(db, images_dir):
     """detail export: barcode with detail images -> real detail exported, no fallback."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -130,7 +130,7 @@ def test_detail_no_fallback_when_detail_exists(db, images_dir):
 
 def test_detail_mixed_barcodes(db, images_dir):
     """detail export: mixed barcodes - only those missing detail get fallback."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -151,7 +151,7 @@ def test_detail_mixed_barcodes(db, images_dir):
 
 def test_detail_flat_mode(db, images_dir):
     """detail export flat mode: fallback at ZIP root."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -173,7 +173,7 @@ def test_detail_flat_mode(db, images_dir):
 
 def test_main_only_exports_main(db, images_dir):
     """main export: only main images written as main."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -191,7 +191,7 @@ def test_main_only_exports_main(db, images_dir):
 
 def test_main_flat_mode(db, images_dir):
     """main export flat mode: at ZIP root."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -208,7 +208,7 @@ def test_main_flat_mode(db, images_dir):
 
 def test_main_no_fallback_to_detail(db, images_dir):
     """main export: barcode with only main images should NOT write as detail."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -231,7 +231,7 @@ def test_main_no_fallback_to_detail(db, images_dir):
 
 def test_all_exports_main_and_detail(db, images_dir):
     """all export: main as main, detail as detail, no fallback."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -256,7 +256,7 @@ def test_all_exports_main_and_detail(db, images_dir):
 
 def test_all_no_fallback(db, images_dir):
     """all export: barcode with only main images stays as main, NO detail fallback."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -277,7 +277,7 @@ def test_all_no_fallback(db, images_dir):
 # ===========================================================================
 
 def test_empty_img_data(db, images_dir):
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     task = _make_task(db)
@@ -291,7 +291,7 @@ def test_empty_img_data(db, images_dir):
 
 
 def test_missing_files_skipped(db, images_dir):
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     img_data = [
@@ -441,7 +441,7 @@ def _add_image(db, images_dir, barcode, image_type, seq, scan_root_id):
 def test_batch_export_detail_route_fallback(client, db, images_dir, captured_builds):
     """image_type='detail': query fetches main+detail, fallback fills barcodes
     without detail, response total matches actual ZIP entries, report stays truthful."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     imgs = [
@@ -487,7 +487,7 @@ def test_batch_export_detail_route_fallback(client, db, images_dir, captured_bui
 
 def test_batch_export_main_route_no_fallback(client, db, images_dir, captured_builds):
     """image_type='main': type filter applies, no fallback, total == main count."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     m = _add_image(db, images_dir, "C", "main", 1, sr.id)
@@ -509,7 +509,7 @@ def test_batch_export_main_route_no_fallback(client, db, images_dir, captured_bu
 
 def test_batch_export_default_all(client, db, images_dir, captured_builds):
     """No image_type: export_type defaults to 'all', no fallback."""
-    sr = ScanRoot(path="/fake", enabled=True)
+    sr = ScanRoot(path=images_dir, enabled=True)
     db.add(sr); db.commit()
 
     m = _add_image(db, images_dir, "D", "main", 1, sr.id)

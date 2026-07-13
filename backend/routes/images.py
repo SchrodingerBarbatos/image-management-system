@@ -285,9 +285,10 @@ def delete_image(img_id):
         ok, reason = safe_remove_image_file(img, session)
         if not ok:
             return jsonify({'error': f'文件删除失败，已取消数据库删除: {reason}'}), 403
+    root_id = img.scan_root_id
     session.delete(img)
     from routes.batch import _maybe_record_deleted_folder
-    _maybe_record_deleted_folder(session, barcode, image_type, folder_ctime)
+    _maybe_record_deleted_folder(session, barcode, image_type, folder_ctime, {root_id})
     session.commit()
     update_versions_for_barcode(barcode)
     return jsonify({'message': 'deleted', 'file_deleted': delete_file})
@@ -427,18 +428,20 @@ def batch_delete():
         })
 
     # Collect barcodes and folder keys ONLY from images that will actually be deleted
-    barcodes = {r[0] for r in session.query(Image.barcode).filter(
-        Image.id.in_(delete_ids)).distinct().all()}
-    deleted_folder_keys = {
-        (r.barcode, r.image_type, r.folder_ctime)
-        for r in session.query(Image.barcode, Image.image_type, Image.folder_ctime)
-        .filter(Image.id.in_(delete_ids)).distinct().all()
-    }
+    rows = session.query(
+        Image.id, Image.barcode, Image.image_type, Image.folder_ctime, Image.scan_root_id,
+    ).filter(Image.id.in_(delete_ids)).all()
+    barcodes = {r.barcode for r in rows}
+    # key -> set of scan_root_ids that had images deleted
+    deleted_folder_roots: dict[tuple, set] = {}
+    for r in rows:
+        key = (r.barcode, r.image_type, r.folder_ctime)
+        deleted_folder_roots.setdefault(key, set()).add(r.scan_root_id)
 
     deleted = session.query(Image).filter(Image.id.in_(delete_ids)).delete(synchronize_session='fetch')
     from routes.batch import _maybe_record_deleted_folder
-    for bc, it, ctime in deleted_folder_keys:
-        _maybe_record_deleted_folder(session, bc, it, ctime)
+    for (bc, it, ctime), root_ids in deleted_folder_roots.items():
+        _maybe_record_deleted_folder(session, bc, it, ctime, root_ids)
     session.commit()
 
     for bc in barcodes:
@@ -512,50 +515,22 @@ def delete_duplicate_images(barcode):
     if not _ISO_RE.match(folder_ctime):
         return jsonify({'error': 'folder_ctime must be ISO8601 format'}), 400
 
-    # Match folder-delete filters: active + confirmed + enabled root only
-    imgs = session.query(Image).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id
-    ).filter(
-        Image.barcode == barcode,
-        Image.folder_ctime == folder_ctime,
-        Image.image_type == image_type,
-        Image.status == 'active',
-        Image.confirmed == True,
-        ScanRoot.enabled == True,
-    ).all()
+    # Match folder-delete filters via shared helper when deleting a full folder key
+    from routes.batch import _check_disabled_scan_roots, _delete_folder_images
+    items = [{'barcode': barcode, 'image_type': image_type, 'folder_ctime': folder_ctime}]
+    if _check_disabled_scan_roots(items) > 0:
+        return jsonify({'error': 'scan root is disabled'}), 403
 
-    if not imgs:
-        # Distinguish disabled-root vs empty
-        any_disabled = session.query(Image.id).join(
-            ScanRoot, Image.scan_root_id == ScanRoot.id
-        ).filter(
-            Image.barcode == barcode,
-            Image.folder_ctime == folder_ctime,
-            Image.image_type == image_type,
-            ScanRoot.enabled == False,
-        ).first()
-        if any_disabled:
-            return jsonify({'error': 'scan root is disabled'}), 403
-        return jsonify({'error': 'no duplicate images found'}), 404
-
-    deleted = 0
-    failed_items = []
-    for img in imgs:
-        if delete_file:
-            ok, reason = safe_remove_image_file(img, session)
-            if not ok:
-                failed_items.append({'id': img.id, 'file_path': img.file_path, 'reason': reason})
-                continue
-        session.delete(img)
-        deleted += 1
-
-    from routes.batch import _maybe_record_deleted_folder
-    if deleted > 0:
-        _maybe_record_deleted_folder(session, barcode, image_type, folder_ctime)
+    deleted, failed_items = _delete_folder_images(
+        barcode, image_type, folder_ctime, delete_file, sess=session,
+    )
     session.commit()
 
     if deleted > 0:
         update_versions_for_barcode(barcode)
+
+    if deleted == 0 and not failed_items:
+        return jsonify({'error': 'no duplicate images found'}), 404
 
     return jsonify({
         'deleted': deleted,
@@ -585,46 +560,18 @@ def delete_version(version_id):
     barcode = v.barcode
     folder_ctime = v.folder_ctime
 
-    # Match folder-delete filters: active + confirmed + enabled root only
-    imgs = session.query(Image).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id
-    ).filter(
-        Image.barcode == barcode,
-        Image.folder_ctime == folder_ctime,
-        Image.image_type == v.image_type,
-        Image.status == 'active',
-        Image.confirmed == True,
-        ScanRoot.enabled == True,
-    ).all()
-    if not imgs:
-        any_disabled = session.query(Image.id).join(
-            ScanRoot, Image.scan_root_id == ScanRoot.id
-        ).filter(
-            Image.barcode == barcode,
-            Image.folder_ctime == folder_ctime,
-            Image.image_type == v.image_type,
-            ScanRoot.enabled == False,
-        ).first()
-        if any_disabled:
-            return jsonify({'error': 'scan root is disabled'}), 403
-    deleted = 0
-    failed_items = []
-    for img in imgs:
-        if delete_file:
-            ok, reason = safe_remove_image_file(img, session)
-            if not ok:
-                failed_items.append({'id': img.id, 'file_path': img.file_path, 'reason': reason})
-                continue
-        session.delete(img)
-        deleted += 1
+    # Disabled-root guard (same as folder delete)
+    from routes.batch import _check_disabled_scan_roots, _delete_folder_images
+    items = [{'barcode': barcode, 'image_type': v.image_type, 'folder_ctime': folder_ctime}]
+    if _check_disabled_scan_roots(items) > 0:
+        return jsonify({'error': 'scan root is disabled'}), 403
 
-    from routes.batch import _maybe_record_deleted_folder
-    if deleted > 0:
-        _maybe_record_deleted_folder(session, barcode, v.image_type, folder_ctime)
+    # Unified folder-delete semantics (active+confirmed+enabled, partial ok, maybe-record)
+    deleted, failed_items = _delete_folder_images(
+        barcode, v.image_type, folder_ctime, delete_file, sess=session,
+    )
     session.commit()
 
-    # update_versions_for_barcode 会根据剩余图片自动重建或删除 ImageVersion，
-    # 无需手动 delete(v)。
     if deleted > 0:
         update_versions_for_barcode(barcode)
 

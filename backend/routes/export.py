@@ -230,11 +230,25 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
         written = 0
         progress = 0
 
+        # Path confinement: only pack files under a registered ScanRoot
+        from models import ScanRoot
+        from routes._utils import is_path_under_root
+        root_paths = [r.path for r in sess.query(ScanRoot).all()]
+
+        def _under_any_root(fp: str) -> bool:
+            for rp in root_paths:
+                ok, _ = is_path_under_root(fp, rp)
+                if ok:
+                    return True
+            return False
+
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
             for file_path, arcname in entries:
-                if os.path.exists(file_path):
+                if os.path.exists(file_path) and _under_any_root(file_path):
                     zf.write(file_path, arcname)
                     written += 1
+                elif os.path.exists(file_path):
+                    _log.warning("_build_zip: skip path outside scan roots: %s", file_path)
                 progress += 1
                 if progress % 100 == 0:
                     task.progress = progress

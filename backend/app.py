@@ -81,16 +81,22 @@ app = Flask(__name__, static_folder=None)
 
 @app.before_request
 def _optional_api_token_guard():
-    """If app_config.json has a non-empty api_token, require it on /api/* routes.
+    """If app_config.json has a non-empty api_token, require it on mutating /api/* calls.
 
-    Accepts X-API-Token header or Authorization: Bearer <token>.
+    Accepts X-API-Token header, Authorization: Bearer <token>, or ?api_token= for
+    media downloads that cannot set headers (img src / window.open / a href).
+
+    Safe methods (GET/HEAD/OPTIONS) are left open so thumbnails, original files,
+    ZIP/Excel downloads keep working without rewriting every media URL. Destructive
+    POST/PUT/DELETE still require the token when configured.
     Empty/missing token keeps backward-compatible open LAN access for local tools.
     """
     from flask import request, jsonify
     path = request.path or ''
     if not path.startswith('/api/'):
         return None
-    # Allow unauthenticated health/static-ish probes if any
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return None
     try:
         from config import load_config
         token = (load_config() or {}).get('api_token') or ''
@@ -103,6 +109,8 @@ def _optional_api_token_guard():
         auth = request.headers.get('Authorization') or ''
         if auth.lower().startswith('bearer '):
             provided = auth[7:].strip()
+    if not provided:
+        provided = request.args.get('api_token') or ''
     if provided != token:
         return jsonify({'error': '未授权：需要有效的 API Token'}), 401
     return None
@@ -337,11 +345,25 @@ with engine.connect() as conn:
             barcode TEXT NOT NULL,
             image_type TEXT NOT NULL,
             folder_ctime TEXT NOT NULL,
+            scan_root_id INTEGER NOT NULL DEFAULT 0,
             deleted_at TEXT DEFAULT ''
         )
     '''))
-    conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_deleted_folder ON deleted_folders (barcode, image_type, folder_ctime)'))
+    # Add scan_root_id to existing tables (legacy rows default to 0)
+    df_cols = {row[1] for row in conn.execute(text("PRAGMA table_info('deleted_folders')"))}
+    if 'scan_root_id' not in df_cols:
+        conn.execute(text(
+            "ALTER TABLE deleted_folders ADD COLUMN scan_root_id INTEGER NOT NULL DEFAULT 0"
+        ))
+        conn.commit()
+    # Drop old unique index (barcode, type, ctime) and create root-scoped one
+    conn.execute(text('DROP INDEX IF EXISTS uq_deleted_folder'))
+    conn.execute(text(
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_deleted_folder_root '
+        'ON deleted_folders (barcode, image_type, folder_ctime, scan_root_id)'
+    ))
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_df_barcode_type ON deleted_folders (barcode, image_type)'))
+    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_df_root ON deleted_folders (scan_root_id)'))
     conn.commit()
 
     # Mark stale running and queued tasks as interrupted on startup
@@ -425,34 +447,36 @@ try:
             "SELECT COUNT(*) FROM scan_log WHERE action = 'rcn_version_cleanup'"
         )).fetchone()[0]
         if not already_cleaned:
-            # 删除 RCN 条码（GTIN-13 前缀 200-299）的孤立 ImageVersion 记录
+            # 仅删除「无任何 image 行」的孤立版本：
+            # 1) GTIN-13 RCN 前缀 200-299
+            # 2) GTIN-14 RCN（第 2–4 位 200-299）
+            # 3) GTIN-12 NS=2/4（首位 2/4）
+            # 4) 已在 rejected_barcode 且无 image 的条码
+            # 注意：绝不删除仍有 image 行的 barcode 的版本
             result = conn.execute(text(
                 "DELETE FROM image_version WHERE "
-                "length(barcode) = 13 AND CAST(substr(barcode, 1, 3) AS INTEGER) BETWEEN 200 AND 299 "
-                "AND barcode NOT IN (SELECT DISTINCT barcode FROM image)"
+                "barcode NOT IN (SELECT DISTINCT barcode FROM image) "
+                "AND ("
+                "  (length(barcode) = 13 AND CAST(substr(barcode, 1, 3) AS INTEGER) BETWEEN 200 AND 299)"
+                "  OR (length(barcode) = 14 AND CAST(substr(barcode, 2, 3) AS INTEGER) BETWEEN 200 AND 299)"
+                "  OR (length(barcode) = 12 AND substr(barcode, 1, 1) IN ('2', '4'))"
+                "  OR barcode IN (SELECT DISTINCT barcode FROM rejected_barcode)"
+                ")"
             ))
-            rcn_deleted = result.rowcount
-            # 同时清理 rejected_barcode 中非 GTIN 条码的孤立版本（仅删无对应 image 记录的）
-            result2 = conn.execute(text(
-                "DELETE FROM image_version WHERE barcode IN "
-                "(SELECT barcode FROM rejected_barcode) "
-                "AND barcode NOT IN (SELECT DISTINCT barcode FROM image)"
-            ))
-            rejected_deleted = result2.rowcount
-            total_deleted = rcn_deleted + rejected_deleted
+            total_deleted = result.rowcount
             conn.execute(text(
                 "INSERT INTO scan_log (action, status, message, created_at) "
                 "VALUES ('rcn_version_cleanup', 'done', :msg, :now)"
             ), {
-                'msg': f'清理完成: 删除 {rcn_deleted} 条 RCN 版本 + {rejected_deleted} 条 rejected 版本',
+                'msg': f'清理完成: 删除 {total_deleted} 条孤立 RCN/rejected 版本',
                 'now': datetime.datetime.now().isoformat(),
             })
             conn.commit()
             if total_deleted:
                 import logging
                 logging.getLogger(__name__).info(
-                    "RCN 版本清理完成: 删除 %d 条 RCN + %d 条 rejected 孤立版本记录",
-                    rcn_deleted, rejected_deleted)
+                    "RCN 版本清理完成: 删除 %d 条孤立 RCN/rejected 版本记录",
+                    total_deleted)
 except Exception as e:
     import logging
     logging.getLogger(__name__).warning("RCN 版本清理跳过: %s", e)
