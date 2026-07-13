@@ -217,6 +217,47 @@ def _plan_zip_entries(img_data, flat, export_type='all'):
     return entries, fallback_barcodes
 
 
+def _index_img_data_by_path(img_data):
+    """O(n) index: file_path → {barcode, image_type}."""
+    index = {}
+    for row in img_data:
+        if len(row) >= 3:
+            index[row[0]] = {'barcode': row[1], 'image_type': row[2]}
+    return index
+
+
+def _build_typed_zip_entries(entries, img_data, export_type='all'):
+    """Attach barcode/report_type to planned ZIP entries in O(n).
+
+    entries: list of (file_path, arcname, scan_root_id?)
+    Returns list of (file_path, arcname, root_id, barcode, report_type).
+
+    report_type rules:
+    - export_type='detail': always 'detail' (includes main-as-detail fallback)
+    - export_type='main': always 'main'
+    - export_type='all': use source image_type from img_data
+    """
+    meta_by_path = _index_img_data_by_path(img_data)
+    typed = []
+    for entry in entries:
+        if len(entry) >= 3:
+            file_path, arcname, root_id = entry[0], entry[1], entry[2]
+        else:
+            file_path, arcname = entry[0], entry[1]
+            root_id = None
+        meta = meta_by_path.get(file_path)
+        barcode = meta['barcode'] if meta else None
+        source_type = meta['image_type'] if meta else None
+        if export_type == 'detail':
+            report_type = 'detail'
+        elif export_type == 'main':
+            report_type = 'main'
+        else:
+            report_type = source_type if source_type in ('main', 'detail') else 'main'
+        typed.append((file_path, arcname, root_id, barcode, report_type))
+    return typed
+
+
 def _build_zip(task_id, img_data, flat, export_type='all'):
     """Build ZIP file in a background thread, updating task progress.
 
@@ -273,47 +314,8 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             ok, _ = is_path_under_root(fp, root.path)
             return ok
 
-        # Map arcname -> barcode for actual count attribution
-        # entries are (file_path, arcname, scan_root_id); barcode is embedded in arcname
-        # Prefer tracking from original img_data order via planned entries
-        entry_barcodes = []
-        # Rebuild barcode list parallel to entries by re-planning with tags
-        for row in img_data:
-            if len(row) >= 6:
-                fp, bc, it, seq, ex, rid = row[0], row[1], row[2], row[3], row[4], row[5]
-            else:
-                fp, bc, it, seq, ex, rid = row[0], row[1], row[2], row[3], row[4], None
-            # Will re-derive from entries + export_type below
-
-        # Build (file_path, arcname, root_id, barcode, report_type) for counting
-        typed_entries = []
-        for entry in entries:
-            if len(entry) == 3:
-                file_path, arcname, root_id = entry
-            else:
-                file_path, arcname = entry[0], entry[1]
-                root_id = None
-            # Find matching img_data row by file_path
-            barcode = None
-            report_type = 'main' if '/主图/' in arcname.replace('\\', '/') or (
-                export_type == 'main' or (export_type == 'all' and '_详情图_' not in arcname)
-            ) else 'detail'
-            if export_type == 'detail' or '_详情图_' in arcname:
-                report_type = 'detail'
-            elif export_type == 'main' or (export_type == 'all' and '_详情图_' not in os.path.basename(arcname)):
-                report_type = 'main'
-            for row in img_data:
-                if row[0] == file_path:
-                    barcode = row[1]
-                    # For detail export fallback, count under detail
-                    if export_type == 'detail':
-                        report_type = 'detail'
-                    elif export_type == 'main':
-                        report_type = 'main'
-                    else:
-                        report_type = row[2] if row[2] in ('main', 'detail') else 'main'
-                    break
-            typed_entries.append((file_path, arcname, root_id, barcode, report_type))
+        # O(n) path → meta index (no nested scan of img_data per entry)
+        typed_entries = _build_typed_zip_entries(entries, img_data, export_type)
 
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
             for file_path, arcname, root_id, barcode, report_type in typed_entries:
@@ -353,11 +355,6 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             task.status = 'done'
 
         # Persist structured payload: barcodes = actual written counts; stats separate
-        # Preserve unmatched barcodes from original payload (zeros) for report completeness
-        try:
-            prev = json.loads(task.barcode_data) if task.barcode_data else {}
-        except (json.JSONDecodeError, TypeError):
-            prev = {}
         prev_barcodes, _ = _parse_export_payload(task.barcode_data) if task.barcode_data else ({}, {})
         if prev_barcodes is None:
             prev_barcodes = {}

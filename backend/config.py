@@ -12,6 +12,9 @@ EXPORT_XLSX_DIR = os.path.join(UPLOAD_DIR, 'xlsx')
 EXPORT_ZIP_DIR = os.path.join(UPLOAD_DIR, 'zips')
 LOG_DIR = os.path.join(DATA_DIR, 'logs')
 CONFIG_PATH = os.path.join(DATA_DIR, 'app_config.json')
+# Independent of app_config.json — survives config deletion/corruption without
+# persisting the token secret itself.
+AUTH_STATE_PATH = os.path.join(DATA_DIR, 'auth_state.json')
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
@@ -29,48 +32,96 @@ _log = logging.getLogger(__name__)
 
 # Last successfully loaded full config (any successful parse).
 _cached_config: dict | None = None
-# Independent last-known-good API token state. Survives config file deletion /
-# corruption after a token was once successfully loaded.
+# In-process last-known-good token (never written to auth_state.json).
 _last_good_token: str | None = None
-_token_was_enabled: bool = False
+
+
+def _atomic_write_json(path, payload):
+    """temp file → flush/fsync → os.replace."""
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix='.tmp_', suffix='.json', dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _write_persisted_token_enabled(enabled: bool):
+    """Atomically persist whether API token auth was intentionally enabled."""
+    try:
+        _atomic_write_json(AUTH_STATE_PATH, {'token_enabled': bool(enabled)})
+    except Exception as e:
+        _log.error("Failed to write auth_state.json: %s", e)
+        raise
+
+
+def _read_persisted_token_enabled():
+    """Return True/False/None.
+
+    None = no state file (first run).
+    True/False = explicit persisted flag.
+    Corrupt/unreadable state file → True (fail-closed, never fail-open).
+    """
+    if not os.path.exists(AUTH_STATE_PATH):
+        return None
+    try:
+        with open(AUTH_STATE_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            _log.error("auth_state.json root is not an object — fail-closed")
+            return True
+        return bool(data.get('token_enabled'))
+    except Exception as e:
+        _log.error("Failed to read auth_state.json: %s — fail-closed", e)
+        return True
 
 
 def load_config():
     """Load app config from JSON file.
 
     Returns (config_dict, error_string).
-    - Missing file is not an error (first-run open mode).
+    - Missing file is not an error (first-run open mode) unless auth was enabled.
     - Parse/read failure returns last good config when available, with err set.
     """
-    global _cached_config, _last_good_token, _token_was_enabled
+    global _cached_config, _last_good_token
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict):
             raise ValueError('config root must be an object')
         _cached_config = dict(cfg)
-        # Only update token state on successful parse of a real file.
         raw = cfg.get('api_token')
         if raw:
             _last_good_token = str(raw)
-            _token_was_enabled = True
+            # Keep persisted flag in sync on successful load of a non-empty token
+            try:
+                _write_persisted_token_enabled(True)
+            except Exception:
+                pass  # memory still holds token; flag write is best-effort here
         else:
-            # Explicit empty/missing token after successful read = user disabled auth
-            _last_good_token = None
-            _token_was_enabled = False
+            # Successful read of empty/missing token — intentional open mode.
+            # Do NOT clear persisted flag here unless save_config did it;
+            # a partial/legacy config without api_token key should not disable auth.
+            pass
         return cfg, None
     except FileNotFoundError:
-        # File gone: if token was ever enabled, keep last good token / fail-closed.
-        if _token_was_enabled and _last_good_token:
+        if _last_good_token:
             base = dict(_cached_config) if _cached_config else {"debug_mode": False}
             base['api_token'] = _last_good_token
             return base, 'config file missing; using last good token'
-        if _token_was_enabled:
-            return {"debug_mode": False}, 'config file missing after token was enabled'
         return {"debug_mode": False}, None
     except Exception as e:
         _log.error("Failed to load app_config.json: %s", e)
-        if _token_was_enabled and _last_good_token:
+        if _last_good_token:
             base = dict(_cached_config) if _cached_config else {"debug_mode": False}
             base['api_token'] = _last_good_token
             return base, f'config read failed, using last good token: {e}'
@@ -80,31 +131,20 @@ def load_config():
 
 
 def save_config(cfg):
-    """Atomically save app config: temp file → flush/fsync → os.replace."""
-    global _cached_config, _last_good_token, _token_was_enabled
-    os.makedirs(DATA_DIR, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix='app_config.', suffix='.json', dir=DATA_DIR)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, CONFIG_PATH)
-        _cached_config = dict(cfg)
-        raw = cfg.get('api_token') if isinstance(cfg, dict) else None
-        if raw:
-            _last_good_token = str(raw)
-            _token_was_enabled = True
-        else:
-            # Explicit save of empty token = intentional disable
-            _last_good_token = None
-            _token_was_enabled = False
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    """Atomically save app config and update auth_state for token enable/disable."""
+    global _cached_config, _last_good_token
+    if not isinstance(cfg, dict):
+        raise ValueError('config must be a dict')
+    _atomic_write_json(CONFIG_PATH, cfg)
+    _cached_config = dict(cfg)
+    raw = cfg.get('api_token')
+    if raw:
+        _last_good_token = str(raw)
+        _write_persisted_token_enabled(True)
+    else:
+        # Explicit save of empty/missing token = intentional disable
+        _last_good_token = None
+        _write_persisted_token_enabled(False)
 
 
 def get_api_token():
@@ -114,15 +154,22 @@ def get_api_token():
     usable token (config broken after token was once enabled).
     """
     cfg, err = load_config()
-    token = (cfg or {}).get('api_token') or ''
+    token = str((cfg or {}).get('api_token') or '')
+
     if token:
-        return str(token), False
-    if _token_was_enabled and _last_good_token:
+        return token, False
+
+    if _last_good_token:
         return str(_last_good_token), False
-    if _token_was_enabled:
-        # Token was enabled but we no longer have a usable value
+
+    # No in-memory token — consult persisted enable flag (survives restart)
+    persisted = _read_persisted_token_enabled()
+    if persisted is True:
         return '', True
+
     if err and os.path.exists(CONFIG_PATH):
-        # File exists but unreadable/corrupt and never had a token → fail closed
+        # File exists but unreadable/corrupt and never had a usable token
         return '', True
+
+    # persisted is False or None (first run / explicitly disabled)
     return '', False
