@@ -312,14 +312,16 @@ def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
 def _load_deleted_folders_set(scan_root_id=None):
     """Load deleted (barcode, image_type, folder_ctime) tuples into a set.
 
-    When scan_root_id is provided, include both that root's rows and legacy
-    rows with scan_root_id=0 (pre-root-scoped blacklist).
+    When scan_root_id is provided, only that root's rows are loaded.
+    Legacy scan_root_id=0 rows are NOT loaded (they are migrated away at
+    startup); unknown-root legacy rows are deleted rather than applied globally.
     """
     q = select(DeletedFolder.barcode, DeletedFolder.image_type, DeletedFolder.folder_ctime)
     if scan_root_id is not None:
-        q = q.where(
-            (DeletedFolder.scan_root_id == scan_root_id) | (DeletedFolder.scan_root_id == 0)
-        )
+        q = q.where(DeletedFolder.scan_root_id == scan_root_id)
+    else:
+        # No root context: load nothing rather than global legacy blacklist
+        return set()
     rows = session.execute(q).all()
     return {(r.barcode, r.image_type, r.folder_ctime) for r in rows}
 

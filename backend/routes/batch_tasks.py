@@ -307,16 +307,58 @@ def _run_low_version_scan(task_id):
 # long-running transactions from transient 'database is locked' errors.
 from task_engine import register_handler
 
-_TERMINAL_STATUSES = frozenset({'done', 'error', 'interrupted', 'cancelled'})
+_TERMINAL_STATUSES = frozenset({'done', 'error', 'interrupted', 'cancelled', 'partial_failed'})
+
+
+def _rebuild_versions_safe(barcodes, sess, task_id=None):
+    """Best-effort version rebuild for barcodes touched by a delete handler.
+
+    Always attempts every barcode so a mid-loop failure still leaves as many
+    ImageVersion rows consistent as possible. Returns list of barcodes that
+    failed to rebuild.
+    """
+    failed = []
+    for bc in barcodes:
+        try:
+            update_versions_for_barcode(bc, sess=sess)
+        except Exception as e:
+            _log.exception("version rebuild failed for barcode=%s task=%s: %s", bc, task_id, e)
+            failed.append(bc)
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+    return failed
+
+
+def _finish_delete_task(task_id, total_deleted, failed_count, version_failed, skipped_count=0):
+    """Mark delete task done / partial_failed with a clear message."""
+    if version_failed or failed_count:
+        parts = []
+        if failed_count:
+            parts.append(f'{failed_count} 个文件删除失败')
+        if version_failed:
+            parts.append(f'{len(version_failed)} 个条码版本重建失败')
+        if skipped_count:
+            parts.append(f'{skipped_count} 项跳过')
+        finish_task(
+            task_id,
+            result_count=total_deleted,
+            error_message='；'.join(parts),
+            status='partial_failed',
+        )
+    else:
+        finish_task(task_id, result_count=total_deleted)
 
 
 def _wrap_retry(fn):
     """Wrap a task handler with SQLite lock retry.
 
-    IMPORTANT: mid-handler update_task_progress() commits the thread session.
-    Re-running a destructive handler after progress > 0 can skip version rebuild
-    (deletes already committed, second pass deletes 0). Only retry when
-    progress is still 0 (no committed work yet).
+    Progress uses a dedicated meta session (see task_engine.update_task_progress),
+    so progress>0 no longer implies business commits. Handlers must be idempotent
+    for re-entry: folder deletes re-query remaining images; version rebuild is
+    always re-run for any barcodes touched. We still refuse re-run only when the
+    task already reached a terminal status.
     """
     def wrapper(task_id):
         import time as _time
@@ -332,24 +374,19 @@ def _wrap_retry(fn):
                     sess.rollback()
                 except Exception:
                     pass
+                # Read terminal status via a fresh meta session (not business sess)
+                from task_engine import _meta_session
+                meta = _meta_session()
                 try:
-                    task = sess.get(BatchTask, task_id)
-                except Exception:
-                    task = None
-                if task and task.status in _TERMINAL_STATUSES:
-                    _log.info(
-                        "_wrap_retry(%s): task %d already in terminal state '%s', skipping retry",
-                        fn.__name__, task_id, task.status,
-                    )
-                    return
-                # Already committed partial work via progress updates — do NOT re-run
-                if task and (task.progress or 0) > 0:
-                    _log.error(
-                        "_wrap_retry(%s): task %d has progress=%s after lock error; "
-                        "refusing full re-run to avoid lost version rebuild",
-                        fn.__name__, task_id, task.progress,
-                    )
-                    raise
+                    task = meta.get(BatchTask, task_id)
+                    if task and task.status in _TERMINAL_STATUSES:
+                        _log.info(
+                            "_wrap_retry(%s): task %d already in terminal state '%s', skipping retry",
+                            fn.__name__, task_id, task.status,
+                        )
+                        return
+                finally:
+                    meta.close()
                 _log.warning(
                     "%s: SQLite locked, retry %d/%d (delay=%.1fs)",
                     fn.__name__, attempt, _DEFAULT_MAX_ATTEMPTS, _DEFAULT_DELAY,
@@ -415,31 +452,40 @@ def _run_batch_delete_duplicates(task_id):
     skipped_count = 0
     failed_count = 0
 
-    for i, item in enumerate(items):
-        key = (item['barcode'], item['image_type'], item['folder_ctime'])
-        if key not in valid_duplicates:
-            skipped_count += 1
+    try:
+        for i, item in enumerate(items):
+            key = (item['barcode'], item['image_type'], item['folder_ctime'])
+            if key not in valid_duplicates:
+                skipped_count += 1
+                update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
+                continue
+
+            count, failed_items = _delete_folder_images(
+                item['barcode'], item['image_type'], item['folder_ctime'], delete_files
+            )
+            total_deleted += count
+            # Track barcode even on partial file failure so version rebuild still runs
+            if count > 0 or failed_items:
+                affected_barcodes.add(item['barcode'])
+            if failed_items:
+                failed_count += len(failed_items)
+                for fi in failed_items:
+                    update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
             update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
-            continue
 
-        count, failed_items = _delete_folder_images(
-            item['barcode'], item['image_type'], item['folder_ctime'], delete_files
-        )
-        total_deleted += count
-        if count > 0:
-            affected_barcodes.add(item['barcode'])
-        if failed_items:
-            failed_count += len(failed_items)
-            for fi in failed_items:
-                update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
-        update_task_progress(task_id, progress=i + 1, current_item=item['barcode'])
+        sess.commit()
+        version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
+        _finish_delete_task(task_id, total_deleted, failed_count, version_failed, skipped_count)
+    except Exception:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        # Compensation: still try to rebuild versions for anything already committed
+        version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
+        _finish_delete_task(task_id, total_deleted, failed_count, version_failed, skipped_count)
+        raise
 
-    sess.commit()
-
-    for bc in affected_barcodes:
-        update_versions_for_barcode(bc, sess=sess)
-
-    finish_task(task_id, result_count=total_deleted)
     _log.info("batch_delete_duplicates task %d done: deleted %d images, skipped %d", task_id, total_deleted, skipped_count)
 
 
@@ -488,35 +534,42 @@ def _run_batch_delete_low_versions(task_id):
     skipped_count = 0
     failed_count = 0
 
-    for i, item in enumerate(items):
-        barcode, image_type, folder_ctime = item['barcode'], item['image_type'], item['folder_ctime']
-        key = (barcode, image_type, folder_ctime)
-        count, _ = stats.get(key, (0, 0))
-        threshold = main_threshold if image_type == 'main' else detail_threshold
-        total_versions = len(by_barcode_type.get((barcode, image_type), []))
+    try:
+        for i, item in enumerate(items):
+            barcode, image_type, folder_ctime = item['barcode'], item['image_type'], item['folder_ctime']
+            key = (barcode, image_type, folder_ctime)
+            count, _ = stats.get(key, (0, 0))
+            threshold = main_threshold if image_type == 'main' else detail_threshold
+            total_versions = len(by_barcode_type.get((barcode, image_type), []))
 
-        # Validate: still qualifies for deletion
-        if count == 0 or threshold == 0 or total_versions <= 1 or count >= threshold:
-            skipped_count += 1
+            # Validate: still qualifies for deletion
+            if count == 0 or threshold == 0 or total_versions <= 1 or count >= threshold:
+                skipped_count += 1
+                update_task_progress(task_id, progress=i + 1, current_item=barcode)
+                continue
+
+            count, failed_items = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
+            total_deleted += count
+            if count > 0 or failed_items:
+                affected_barcodes.add(barcode)
+            if failed_items:
+                failed_count += len(failed_items)
+                for fi in failed_items:
+                    update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
             update_task_progress(task_id, progress=i + 1, current_item=barcode)
-            continue
 
-        count, failed_items = _delete_folder_images(barcode, image_type, folder_ctime, delete_files)
-        total_deleted += count
-        if count > 0:
-            affected_barcodes.add(barcode)
-        if failed_items:
-            failed_count += len(failed_items)
-            for fi in failed_items:
-                update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
-        update_task_progress(task_id, progress=i + 1, current_item=barcode)
+        sess.commit()
+        version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
+        _finish_delete_task(task_id, total_deleted, failed_count, version_failed, skipped_count)
+    except Exception:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
+        _finish_delete_task(task_id, total_deleted, failed_count, version_failed, skipped_count)
+        raise
 
-    sess.commit()
-
-    for bc in affected_barcodes:
-        update_versions_for_barcode(bc, sess=sess)
-
-    finish_task(task_id, result_count=total_deleted)
     _log.info("batch_delete_low_versions task %d done: deleted %d images, skipped %d", task_id, total_deleted, skipped_count)
 
 
@@ -561,20 +614,30 @@ def _run_delete_version(task_id):
     # Use shared folder-delete helper for identical filters/semantics as other paths
     # (progress is coarse: one step for the whole version folder)
     update_task_progress(task_id, progress=0, total=1, current_item=barcode)
-    deleted_count, failed_items = _delete_folder_images(
-        barcode, image_type, folder_ctime, delete_files,
-    )
-    failed_count = len(failed_items)
-    for fi in failed_items:
-        update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
-    update_task_progress(task_id, progress=1, current_item=barcode)
-    sess.commit()
+    deleted_count = 0
+    failed_items = []
+    try:
+        deleted_count, failed_items = _delete_folder_images(
+            barcode, image_type, folder_ctime, delete_files,
+        )
+        failed_count = len(failed_items)
+        for fi in failed_items:
+            update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
+        update_task_progress(task_id, progress=1, current_item=barcode)
+        sess.commit()
+        version_failed = []
+        if deleted_count > 0 or failed_items:
+            version_failed = _rebuild_versions_safe({barcode}, sess, task_id)
+        _finish_delete_task(task_id, deleted_count, failed_count, version_failed)
+    except Exception:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        version_failed = _rebuild_versions_safe({barcode}, sess, task_id)
+        _finish_delete_task(task_id, deleted_count, len(failed_items), version_failed)
+        raise
 
-    # 重建版本：只有实际删除了图片才更新版本
-    if deleted_count > 0:
-        update_versions_for_barcode(barcode, sess=sess)
-
-    finish_task(task_id, result_count=deleted_count)
     _log.info("delete_version task %d done: deleted %d images", task_id, deleted_count)
 
 
@@ -614,66 +677,71 @@ def _run_batch_delete_images(task_id):
         finish_task(task_id, error_message=f'部分图片属于已禁用的扫描目录（{len(disabled_ids)}个）')
         return
 
-    # Collect barcodes from the IDs that will actually be DB-deleted
     # key (bc, type, ctime) -> set of scan_root_ids
     delete_db_folder_roots: dict = {}
-
-    # Delete files if requested (with path safety validation)
+    barcodes: set = set()
     failed_count = 0
-    delete_db_ids = ids  # 默认删除所有传入 IDs 的索引（delete_files=False 时）
-    if delete_files:
-        imgs = sess.query(Image).filter(Image.id.in_(ids)).all()
-        scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
-        from routes.batch import validate_image_paths
-        is_valid, error_msg = validate_image_paths(imgs, scan_roots)
-        if not is_valid:
-            finish_task(task_id, error_message=f'路径安全验证失败: {error_msg}')
+    deleted = 0
+
+    try:
+        delete_db_ids = ids  # 默认删除所有传入 IDs 的索引（delete_files=False 时）
+        if delete_files:
+            imgs = sess.query(Image).filter(Image.id.in_(ids)).all()
+            scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
+            from routes.batch import validate_image_paths
+            is_valid, error_msg = validate_image_paths(imgs, scan_roots)
+            if not is_valid:
+                finish_task(task_id, error_message=f'路径安全验证失败: {error_msg}')
+                return
+            from routes._utils import safe_remove_image_file
+            delete_db_ids = []
+            for i, img in enumerate(imgs):
+                ok, reason = safe_remove_image_file(img, sess)
+                if ok:
+                    delete_db_ids.append(img.id)
+                    key = (img.barcode, img.image_type, img.folder_ctime)
+                    delete_db_folder_roots.setdefault(key, set()).add(img.scan_root_id)
+                    barcodes.add(img.barcode)
+                else:
+                    failed_count += 1
+                    update_task_progress(task_id, failed_count=failed_count,
+                        failed_item={'file': img.file_path, 'reason': reason or '删除失败'})
+                update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
+        else:
+            for i in range(total):
+                update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
+
+        if not delete_db_ids:
+            sess.commit()
+            _finish_delete_task(task_id, 0, failed_count, [], 0)
+            _log.info("batch_delete_images task %d done: 0 images deleted", task_id)
             return
-        from routes._utils import safe_remove_image_file
-        delete_db_ids = []
-        for i, img in enumerate(imgs):
-            ok, reason = safe_remove_image_file(img, sess)
-            if ok:
-                delete_db_ids.append(img.id)
-                key = (img.barcode, img.image_type, img.folder_ctime)
-                delete_db_folder_roots.setdefault(key, set()).add(img.scan_root_id)
-            else:
-                failed_count += 1
-                update_task_progress(task_id, failed_count=failed_count,
-                    failed_item={'file': img.file_path, 'reason': reason or '删除失败'})
-            update_task_progress(task_id, progress=i + 1, current_item=img.barcode)
-    else:
-        # Even when not deleting files, report progress for consistency
-        for i in range(total):
-            update_task_progress(task_id, progress=i + 1, current_item=f'image_id={ids[i]}')
 
-    if not delete_db_ids:
+        rows = sess.query(
+            Image.barcode, Image.image_type, Image.folder_ctime, Image.scan_root_id,
+        ).filter(Image.id.in_(delete_db_ids)).all()
+        barcodes = {r.barcode for r in rows} | barcodes
+        if not delete_files:
+            for r in rows:
+                key = (r.barcode, r.image_type, r.folder_ctime)
+                delete_db_folder_roots.setdefault(key, set()).add(r.scan_root_id)
+
+        deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
+        for (bc, it, ctime), root_ids in delete_db_folder_roots.items():
+            _maybe_record_deleted_folder(sess, bc, it, ctime, root_ids)
         sess.commit()
-        finish_task(task_id, result_count=0)
-        _log.info("batch_delete_images task %d done: 0 images deleted (all failed)", task_id)
-        return
 
-    # Collect barcodes and folder keys from the IDs that will actually be DB-deleted
-    rows = sess.query(
-        Image.barcode, Image.image_type, Image.folder_ctime, Image.scan_root_id,
-    ).filter(Image.id.in_(delete_db_ids)).all()
-    barcodes = {r.barcode for r in rows}
-    if not delete_files:
-        for r in rows:
-            key = (r.barcode, r.image_type, r.folder_ctime)
-            delete_db_folder_roots.setdefault(key, set()).add(r.scan_root_id)
+        version_failed = _rebuild_versions_safe(barcodes, sess, task_id)
+        _finish_delete_task(task_id, deleted, failed_count, version_failed)
+    except Exception:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        version_failed = _rebuild_versions_safe(barcodes, sess, task_id)
+        _finish_delete_task(task_id, deleted, failed_count, version_failed)
+        raise
 
-    # Delete database records（仅删除文件删除成功的记录）
-    deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
-    for (bc, it, ctime), root_ids in delete_db_folder_roots.items():
-        _maybe_record_deleted_folder(sess, bc, it, ctime, root_ids)
-    sess.commit()
-
-    # Re-sequence remaining versions
-    for bc in barcodes:
-        update_versions_for_barcode(bc, sess=sess)
-
-    finish_task(task_id, result_count=deleted)
     _log.info("batch_delete_images task %d done: deleted %d images", task_id, deleted)
 
 
@@ -777,42 +845,48 @@ def _run_batch_delete_duplicate_versions(task_id):
     failed_count = 0
     processed = 0
 
-    for r in results:
-        processed += 1
+    try:
+        for r in results:
+            processed += 1
 
-        if r.delete_status == 'deleted':
-            skipped_count += 1
+            if r.delete_status == 'deleted':
+                skipped_count += 1
+                update_task_progress(task_id, progress=processed, current_item=r.barcode)
+                continue
+
+            count, failed_items = _delete_folder_images(
+                r.barcode, r.image_type, r.folder_ctime, delete_files
+            )
+            if count > 0:
+                r.delete_status = 'deleted'
+                r.deleted_at = datetime.datetime.now().isoformat()
+                deleted_image_count += count
+                affected_barcodes.add(r.barcode)
+            elif not failed_items:
+                r.delete_status = 'skipped'
+                r.delete_message = '已无有效图片'
+                skipped_count += 1
+
+            if failed_items:
+                failed_count += len(failed_items)
+                affected_barcodes.add(r.barcode)
+                for fi in failed_items:
+                    update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
+
             update_task_progress(task_id, progress=processed, current_item=r.barcode)
-            continue
 
-        # Hard-delete: use same pattern as _run_batch_delete_duplicates
-        count, failed_items = _delete_folder_images(
-            r.barcode, r.image_type, r.folder_ctime, delete_files
-        )
-        if count > 0:
-            r.delete_status = 'deleted'
-            r.deleted_at = datetime.datetime.now().isoformat()
-            deleted_image_count += count
-            affected_barcodes.add(r.barcode)
-        elif not failed_items:
-            r.delete_status = 'skipped'
-            r.delete_message = '已无有效图片'
-            skipped_count += 1
+        sess.commit()
+        version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
+        _finish_delete_task(task_id, deleted_image_count, failed_count, version_failed, skipped_count)
+    except Exception:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
+        _finish_delete_task(task_id, deleted_image_count, failed_count, version_failed, skipped_count)
+        raise
 
-        if failed_items:
-            failed_count += len(failed_items)
-            for fi in failed_items:
-                update_task_progress(task_id, failed_count=failed_count, failed_item=fi)
-
-        update_task_progress(task_id, progress=processed, current_item=r.barcode)
-
-    sess.commit()
-
-    # Rebuild versions for affected barcodes
-    for bc in affected_barcodes:
-        update_versions_for_barcode(bc, sess=sess)
-
-    finish_task(task_id, result_count=deleted_image_count)
     _log.info("batch_delete_duplicate_versions task %d done: deleted %d images, skipped %d, failed %d",
               task_id, deleted_image_count, skipped_count, failed_count)
 
@@ -1270,6 +1344,8 @@ def delete_low_version_scan_results(task_id):
     task = session.get(BatchTask, task_id)
     if not task:
         return jsonify({'error': 'not found'}), 404
+    if task.task_type != 'low_version_scan':
+        return jsonify({'error': 'task is not a low_version_scan'}), 400
 
     data = request.json or {}
     mode = data.get('mode', 'selected')
@@ -1283,22 +1359,31 @@ def delete_low_version_scan_results(task_id):
     if err:
         return err
 
+    # result_ids must belong to THIS low_version_scan task
     results, err = _check_result_id_consistency(result_ids, LowVersionScanResult, task_id)
     if err:
         return err
 
-    # Re-validate with current thresholds
+    # Re-validate with thresholds from THIS scan task's params_json only
     try:
         params = json.loads(task.params_json) if task.params_json else {}
     except (json.JSONDecodeError, TypeError):
         params = {}
     main_threshold = params.get('main_threshold', 3)
     detail_threshold = params.get('detail_threshold', 5)
+    if params.get('main_enabled') is False:
+        main_threshold = 0
+    if params.get('detail_enabled') is False:
+        detail_threshold = 0
 
-    # Re-compute current state
+    # Re-compute current state from live DB (not stale scan snapshot)
     from routes.batch import _compute_folder_stats
+    from scanner import validate_business_gtin
     stats = _compute_folder_stats()
-    versions = session.query(ImageVersion).all()
+    versions = [
+        v for v in session.query(ImageVersion).all()
+        if validate_business_gtin(v.barcode)[0]
+    ]
     from collections import defaultdict
     by_barcode_type = defaultdict(list)
     for v in versions:
@@ -1321,7 +1406,7 @@ def delete_low_version_scan_results(task_id):
         threshold = main_threshold if image_type == 'main' else detail_threshold
         total_versions = len(by_barcode_type.get((barcode, image_type), []))
 
-        # Validate: still qualifies for deletion
+        # Validate: still qualifies for deletion against live DB
         if count == 0:
             r.delete_status = 'skipped'
             r.delete_message = '已无有效图片'

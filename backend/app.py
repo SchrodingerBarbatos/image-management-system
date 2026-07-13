@@ -83,15 +83,16 @@ app = Flask(__name__, static_folder=None)
 def _optional_api_token_guard():
     """If app_config.json has a non-empty api_token, require it on mutating /api/* calls.
 
-    Accepts X-API-Token header, Authorization: Bearer <token>, or ?api_token= for
-    media downloads that cannot set headers (img src / window.open / a href).
+    Accepts X-API-Token header or Authorization: Bearer <token> only.
+    Query-string tokens are rejected so secrets never land in URLs/logs.
 
     Safe methods (GET/HEAD/OPTIONS) are left open so thumbnails, original files,
     ZIP/Excel downloads keep working without rewriting every media URL. Destructive
-    POST/PUT/DELETE still require the token when configured.
+    POST/PUT/PATCH/DELETE still require the token when configured.
     Empty/missing token keeps backward-compatible open LAN access for local tools.
     """
     from flask import request, jsonify
+    import hmac
     path = request.path or ''
     if not path.startswith('/api/'):
         return None
@@ -109,9 +110,8 @@ def _optional_api_token_guard():
         auth = request.headers.get('Authorization') or ''
         if auth.lower().startswith('bearer '):
             provided = auth[7:].strip()
-    if not provided:
-        provided = request.args.get('api_token') or ''
-    if provided != token:
+    # Constant-time compare; never accept query-string tokens
+    if not provided or not hmac.compare_digest(str(provided), str(token)):
         return jsonify({'error': '未授权：需要有效的 API Token'}), 401
     return None
 
@@ -365,6 +365,62 @@ with engine.connect() as conn:
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_df_barcode_type ON deleted_folders (barcode, image_type)'))
     conn.execute(text('CREATE INDEX IF NOT EXISTS idx_df_root ON deleted_folders (scan_root_id)'))
     conn.commit()
+
+    # One-shot: migrate legacy scan_root_id=0 rows to a real root when unique,
+    # otherwise drop them so they cannot global-blacklist every scan root.
+    try:
+        already = conn.execute(text(
+            "SELECT COUNT(*) FROM scan_log WHERE action = 'deleted_folders_root_migrate'"
+        )).fetchone()[0]
+        if not already:
+            legacy = conn.execute(text(
+                "SELECT id, barcode, image_type, folder_ctime FROM deleted_folders "
+                "WHERE scan_root_id = 0 OR scan_root_id IS NULL"
+            )).fetchall()
+            migrated = 0
+            dropped = 0
+            for row in legacy:
+                df_id, bc, it, ctime = row
+                roots = conn.execute(text(
+                    "SELECT DISTINCT scan_root_id FROM image "
+                    "WHERE barcode = :bc AND image_type = :it AND folder_mtime = :ct"
+                ), {'bc': bc, 'it': it, 'ct': ctime}).fetchall()
+                # Also check if any image ever matched via barcode alone when ctime empty
+                if not roots:
+                    roots = conn.execute(text(
+                        "SELECT DISTINCT scan_root_id FROM image WHERE barcode = :bc"
+                    ), {'bc': bc}).fetchall()
+                if len(roots) == 1:
+                    rid = roots[0][0]
+                    # Upsert into root-scoped key; drop the legacy row after
+                    try:
+                        conn.execute(text(
+                            "UPDATE deleted_folders SET scan_root_id = :rid WHERE id = :id"
+                        ), {'rid': rid, 'id': df_id})
+                        migrated += 1
+                    except Exception:
+                        conn.execute(text("DELETE FROM deleted_folders WHERE id = :id"), {'id': df_id})
+                        dropped += 1
+                else:
+                    # 0 or >1 candidate roots — cannot safely attribute; drop
+                    conn.execute(text("DELETE FROM deleted_folders WHERE id = :id"), {'id': df_id})
+                    dropped += 1
+            conn.execute(text(
+                "INSERT INTO scan_log (action, status, message, created_at) "
+                "VALUES ('deleted_folders_root_migrate', 'done', :msg, :now)"
+            ), {
+                'msg': f'legacy deleted_folders 迁移: 归因 {migrated} 条, 丢弃 {dropped} 条',
+                'now': datetime.datetime.now().isoformat(),
+            })
+            conn.commit()
+            if migrated or dropped:
+                import logging
+                logging.getLogger(__name__).info(
+                    "deleted_folders root migrate: migrated=%d dropped=%d", migrated, dropped,
+                )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("deleted_folders root migrate skipped: %s", e)
 
     # Mark stale running and queued tasks as interrupted on startup
     now_iso = datetime.datetime.now().isoformat()

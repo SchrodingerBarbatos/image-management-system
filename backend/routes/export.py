@@ -139,10 +139,14 @@ def _col_letter_to_idx(s):
     return idx - 1
 
 def _plan_zip_entries(img_data, flat, export_type='all'):
-    """Compute the (file_path, arcname) entries a ZIP export will contain.
+    """Compute the (file_path, arcname, scan_root_id) entries a ZIP export will contain.
 
     Pure function over img_data — no DB or filesystem access, so routes can
     call it to report an accurate entry count before the build thread starts.
+
+    img_data rows are either:
+      (file_path, barcode, image_type, sequence, ext)
+    or (file_path, barcode, image_type, sequence, ext, scan_root_id)
 
     export_type semantics:
     - 'main': only main images, named as main
@@ -150,24 +154,32 @@ def _plan_zip_entries(img_data, flat, export_type='all'):
       images renamed as detail (fallback)
     - 'all': main as main, detail as detail, no fallback
 
-    Returns (entries, fallback_barcodes).
+    Returns (entries, fallback_barcodes) where each entry is
+    (file_path, arcname, scan_root_id|None).
     """
+    def _unpack(row):
+        if len(row) >= 6:
+            return row[0], row[1], row[2], row[3], row[4], row[5]
+        return row[0], row[1], row[2], row[3], row[4], None
+
     entries = []
     fallback_barcodes = []
 
     if export_type == 'main':
-        for file_path, barcode, image_type, sequence, ext in img_data:
+        for row in img_data:
+            file_path, barcode, image_type, sequence, ext, root_id = _unpack(row)
             if image_type != 'main':
                 continue
             display_name = f"{barcode}_{sequence}.{ext}"
-            entries.append((file_path, display_name if flat else f"主图/{display_name}"))
+            entries.append((file_path, display_name if flat else f"主图/{display_name}", root_id))
 
     elif export_type == 'detail':
         grouped = {}
-        for fp, bc, it, seq, ex in img_data:
+        for row in img_data:
+            fp, bc, it, seq, ex, root_id = _unpack(row)
             grouped.setdefault(bc, {'main': [], 'detail': []})
             if it in ('main', 'detail'):
-                grouped[bc][it].append((fp, seq, ex))
+                grouped[bc][it].append((fp, seq, ex, root_id))
         for barcode, groups in grouped.items():
             if groups['detail']:
                 items = groups['detail']
@@ -175,19 +187,20 @@ def _plan_zip_entries(img_data, flat, export_type='all'):
                 items = groups['main']
                 if items:
                     fallback_barcodes.append(barcode)
-            for file_path, sequence, ext in items:
+            for file_path, sequence, ext, root_id in items:
                 display_name = f"{barcode}_详情图_{sequence}.{ext}"
-                entries.append((file_path, display_name if flat else f"详情图/{display_name}"))
+                entries.append((file_path, display_name if flat else f"详情图/{display_name}", root_id))
 
     else:
-        for file_path, barcode, image_type, sequence, ext in img_data:
+        for row in img_data:
+            file_path, barcode, image_type, sequence, ext, root_id = _unpack(row)
             if image_type == 'main':
                 display_name = f"{barcode}_{sequence}.{ext}"
                 arcname = display_name if flat else f"主图/{display_name}"
             else:
                 display_name = f"{barcode}_详情图_{sequence}.{ext}"
                 arcname = display_name if flat else f"详情图/{display_name}"
-            entries.append((file_path, arcname))
+            entries.append((file_path, arcname, root_id))
 
     return entries, fallback_barcodes
 
@@ -230,25 +243,39 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
         written = 0
         progress = 0
 
-        # Path confinement: only pack files under a registered ScanRoot
+        # Path confinement: file must live under ITS OWN enabled ScanRoot
+        # (not any root). Uses realpath/commonpath via is_path_under_root.
         from models import ScanRoot
         from routes._utils import is_path_under_root
-        root_paths = [r.path for r in sess.query(ScanRoot).all()]
+        root_map = {
+            r.id: r for r in sess.query(ScanRoot).all()
+        }
 
-        def _under_any_root(fp: str) -> bool:
-            for rp in root_paths:
-                ok, _ = is_path_under_root(fp, rp)
-                if ok:
-                    return True
-            return False
+        def _allowed_for_root(fp: str, root_id) -> bool:
+            if root_id is None:
+                return False
+            root = root_map.get(root_id)
+            if not root or not root.enabled:
+                return False
+            ok, _ = is_path_under_root(fp, root.path)
+            return ok
 
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
-            for file_path, arcname in entries:
-                if os.path.exists(file_path) and _under_any_root(file_path):
+            for entry in entries:
+                # entries are (file_path, arcname, scan_root_id)
+                if len(entry) == 3:
+                    file_path, arcname, root_id = entry
+                else:
+                    file_path, arcname = entry[0], entry[1]
+                    root_id = None
+                if os.path.exists(file_path) and _allowed_for_root(file_path, root_id):
                     zf.write(file_path, arcname)
                     written += 1
                 elif os.path.exists(file_path):
-                    _log.warning("_build_zip: skip path outside scan roots: %s", file_path)
+                    _log.warning(
+                        "_build_zip: skip path not under own enabled root "
+                        "(root_id=%s): %s", root_id, file_path,
+                    )
                 progress += 1
                 if progress % 100 == 0:
                     task.progress = progress
@@ -461,7 +488,10 @@ def generate_zip():
         session.add(task)
         session.commit()
 
-    img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
+    img_data = [
+        (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
+        for img in imgs
+    ]
     # Accurate entry count for the sync response — detail exports may rename
     # main images as fallback, so the ZIP entry count can differ from len(imgs)
     planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')

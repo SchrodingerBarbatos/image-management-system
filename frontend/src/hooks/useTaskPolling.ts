@@ -61,11 +61,19 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
         pollTimerRef.current = setTimeout(() => poll(id, generation), pollInterval);
       } else {
         setPolling(false);
-        if (task.status === 'done') {
+        if (task.status === 'done' || task.status === 'partial_failed') {
           const msg = typeof successMessage === 'function'
             ? successMessage(task)
-            : successMessage || `任务完成，共处理 ${task.result_count} 项`;
-          message.success(msg);
+            : successMessage || (
+              task.status === 'partial_failed'
+                ? `任务部分完成（删除 ${task.result_count} 项）${task.error_message ? '：' + task.error_message : ''}`
+                : `任务完成，共处理 ${task.result_count} 项`
+            );
+          if (task.status === 'partial_failed') {
+            message.warning(msg);
+          } else {
+            message.success(msg);
+          }
           onComplete?.(task);
         } else if (task.status === 'error' || task.status === 'cancelled' || task.status === 'interrupted') {
           const defaultMessage = task.status === 'cancelled'

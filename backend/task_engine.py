@@ -205,51 +205,89 @@ def delete_task(task_id):
         return {'ok': True}
 
 
+def _meta_session():
+    """Independent short-lived session for task metadata (progress/finish).
+
+    Must NOT share the handler's business session: progress commits must not
+    flush in-progress deletes/version rebuilds, and must not prevent recovery
+    after a mid-handler lock error.
+    """
+    from sqlalchemy.orm import sessionmaker
+    return sessionmaker(bind=session.get_bind())()
+
+
 def update_task_progress(task_id, progress=None, total=None, result_count=None,
                          current_item=None, failed_count=None, failed_item=None):
     """Update task progress fields. Called by handler.
-    failed_item: {file, reason} dict to append to failed_items (max 20)."""
-    sess = _get_thread_session()
+    failed_item: {file, reason} dict to append to failed_items (max 20).
+
+    Uses a dedicated session so progress commits never flush the handler's
+    uncommitted business work (and so progress>0 is a true signal of
+    committed handler work only when the handler itself commits).
+    """
     with _task_lock:
-        task = sess.get(BatchTask, task_id)
-        if not task:
-            return
-        if progress is not None:
-            task.progress = progress
-        if total is not None:
-            task.total = total
-        if result_count is not None:
-            task.result_count = result_count
-        if current_item is not None:
-            task.current_item = current_item
-        if failed_count is not None:
-            task.failed_count = failed_count
-        if failed_item is not None:
-            try:
-                items = json.loads(task.failed_items) if task.failed_items else []
-            except (json.JSONDecodeError, TypeError):
-                items = []
-            if len(items) < 20:
-                items.append(failed_item)
-                task.failed_items = json.dumps(items, ensure_ascii=False)
-        sess.commit()
+        meta = _meta_session()
+        try:
+            task = meta.get(BatchTask, task_id)
+            if not task:
+                return
+            if progress is not None:
+                task.progress = progress
+            if total is not None:
+                task.total = total
+            if result_count is not None:
+                task.result_count = result_count
+            if current_item is not None:
+                task.current_item = current_item
+            if failed_count is not None:
+                task.failed_count = failed_count
+            if failed_item is not None:
+                try:
+                    items = json.loads(task.failed_items) if task.failed_items else []
+                except (json.JSONDecodeError, TypeError):
+                    items = []
+                if len(items) < 20:
+                    items.append(failed_item)
+                    task.failed_items = json.dumps(items, ensure_ascii=False)
+            meta.commit()
+        except Exception:
+            meta.rollback()
+            raise
+        finally:
+            meta.close()
 
 
-def finish_task(task_id, result_count=0, error_message=''):
-    """Mark a task as done or error. Called by handler in finally block."""
-    sess = _get_thread_session()
+def finish_task(task_id, result_count=0, error_message='', status=None):
+    """Mark a task as done, error, or partial_failed.
+
+    status: optional override ('done' | 'error' | 'partial_failed').
+    When error_message is set and status is None, defaults to 'error'.
+    """
     with _task_lock:
-        task = sess.get(BatchTask, task_id)
-        if not task:
-            return
-        if error_message:
-            task.status = 'error'
-            task.error_message = error_message
-        else:
-            task.status = 'done'
-            task.result_count = result_count
-        task.finished_at = datetime.datetime.now().isoformat()
-        sess.commit()
+        meta = _meta_session()
+        try:
+            task = meta.get(BatchTask, task_id)
+            if not task:
+                return
+            if status:
+                task.status = status
+                if error_message:
+                    task.error_message = error_message
+                if status in ('done', 'partial_failed'):
+                    task.result_count = result_count
+            elif error_message:
+                task.status = 'error'
+                task.error_message = error_message
+            else:
+                task.status = 'done'
+                task.result_count = result_count
+            task.finished_at = datetime.datetime.now().isoformat()
+            meta.commit()
+        except Exception:
+            meta.rollback()
+            raise
+        finally:
+            meta.close()
 
 
 def _task_to_dict(task):

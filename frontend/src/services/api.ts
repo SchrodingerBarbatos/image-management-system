@@ -2,6 +2,20 @@
 
 const api = axios.create({ baseURL: '/api' });
 
+// Optional API token from localStorage / Vite env for mutating requests.
+// Never put the token in URLs; only X-API-Token header.
+api.interceptors.request.use((config) => {
+  const token =
+    (typeof localStorage !== 'undefined' && localStorage.getItem('api_token')) ||
+    (import.meta as { env?: { VITE_API_TOKEN?: string } }).env?.VITE_API_TOKEN ||
+    '';
+  if (token) {
+    config.headers = config.headers || {};
+    (config.headers as Record<string, string>)['X-API-Token'] = token;
+  }
+  return config;
+});
+
 export interface ScanRoot {
   id: number; path: string; recursive: boolean; enabled: boolean;
   allow_fuzzy: boolean; fuzzy_image_type: string;

@@ -199,25 +199,31 @@ def _do_update_versions_for_barcode(barcode, work_sess=None):
     work_sess.commit()
 
 
-def _expunge_versions_and_images():
-    """Expunge only Image and ImageVersion objects from the session.
+def _expunge_versions_and_images(work_sess=None):
+    """Expunge only Image and ImageVersion objects from the given session.
     Leaves ScanRoot and other ORM objects untouched to avoid DetachedInstanceError
     for callers that hold references to them."""
+    if work_sess is None:
+        work_sess = session
     to_expunge = [
-        obj for obj in session.identity_map.values()
+        obj for obj in work_sess.identity_map.values()
         if isinstance(obj, (Image, ImageVersion))
     ]
     for obj in to_expunge:
         try:
-            session.expunge(obj)
+            work_sess.expunge(obj)
         except Exception:
             pass  # already detached or deleted
 
 
-def update_all_versions(progress_callback=None):
+def update_all_versions(progress_callback=None, sess=None):
     """Run version update for all barcodes in the database.
-    Includes progress logging and periodic session cleanup for memory control."""
-    barcodes = session.query(Image.barcode).filter(
+    Includes progress logging and periodic session cleanup for memory control.
+
+    sess: optional Session; defaults to models.session (request/migration thread).
+    """
+    work_sess = sess if sess is not None else session
+    barcodes = work_sess.query(Image.barcode).filter(
         Image.confirmed == True, Image.status == 'active'
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
         ScanRoot.enabled == True
@@ -227,14 +233,14 @@ def update_all_versions(progress_callback=None):
     _log.info("update_all_versions: starting version rebuild for %d barcodes", total)
 
     for i, (bc,) in enumerate(barcodes):
-        update_versions_for_barcode(bc)
+        update_versions_for_barcode(bc, sess=work_sess)
 
         # Progress logging every _VERSION_BATCH_SIZE barcodes
         if (i + 1) % _VERSION_BATCH_SIZE == 0:
             _log.info("update_all_versions: processed %d/%d barcodes", i + 1, total)
             # Periodic session cleanup to control memory — only expunge
             # Image/ImageVersion, not ScanRoot (caller may hold a reference)
-            _expunge_versions_and_images()
+            _expunge_versions_and_images(work_sess)
 
         # Optional progress callback for async reporting
         if progress_callback:

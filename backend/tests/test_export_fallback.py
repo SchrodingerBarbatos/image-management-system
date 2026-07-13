@@ -65,11 +65,22 @@ def _make_task(session):
 
 def _run_build_zip(task_id, img_data, flat, export_type, upload_dir=None):
     import routes.export as exp_mod
+    import models
+    from models import ScanRoot
     old = exp_mod.UPLOAD_DIR
     exp_mod.UPLOAD_DIR = upload_dir
+    # Attach scan_root_id when tests pass 5-tuples (path under the enabled root)
+    root = models.session.query(ScanRoot).filter(ScanRoot.enabled == True).first()
+    root_id = root.id if root else None
+    normalized = []
+    for row in img_data:
+        if len(row) >= 6:
+            normalized.append(row)
+        else:
+            normalized.append(tuple(row) + (root_id,))
     try:
         from routes.export import _build_zip
-        _build_zip(task_id, img_data, flat, export_type=export_type)
+        _build_zip(task_id, normalized, flat, export_type=export_type)
     finally:
         exp_mod.UPLOAD_DIR = old
 
@@ -340,7 +351,7 @@ def test_plan_entries_detail_fallback_count():
     ]
     entries, fallback = _plan_zip_entries(img_data, flat=True, export_type='detail')
     # A has real detail (1), B falls back to its 2 mains
-    assert sorted(n for _, n in entries) == [
+    assert sorted(n for _, n, *_ in entries) == [
         "A_详情图_1.jpg", "B_详情图_1.jpg", "B_详情图_2.jpg",
     ]
     assert fallback == ["B"]
@@ -354,7 +365,7 @@ def test_plan_entries_main_excludes_detail():
         ("/fake/a_d.jpg", "A", "detail", 1, "jpg"),
     ]
     entries, fallback = _plan_zip_entries(img_data, flat=True, export_type='main')
-    assert [n for _, n in entries] == ["A_1.jpg"]
+    assert [n for _, n, *_ in entries] == ["A_1.jpg"]
     assert fallback == []
 
 

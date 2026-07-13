@@ -493,7 +493,10 @@ def batch_export():
 
     from routes.export import _build_zip, _plan_zip_entries
     import threading
-    img_data = [(img.file_path, img.barcode, img.image_type, img.sequence, img.ext) for img in imgs]
+    img_data = [
+        (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
+        for img in imgs
+    ]
     # Accurate entry count for the sync response — detail exports may rename
     # main images as fallback, so the ZIP entry count can differ from len(imgs)
     planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
