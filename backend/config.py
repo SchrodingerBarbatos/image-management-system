@@ -67,9 +67,9 @@ def _write_persisted_token_enabled(enabled: bool):
 def _read_persisted_token_enabled():
     """Return True/False/None.
 
-    None = no state file (first run).
-    True/False = explicit persisted flag.
-    Corrupt/unreadable state file → True (fail-closed, never fail-open).
+    None = no state file (first run / never migrated).
+    True/False = explicit persisted flag (strict bool only).
+    Missing key, wrong type, corrupt/unreadable file → True (fail-closed).
     """
     if not os.path.exists(AUTH_STATE_PATH):
         return None
@@ -79,10 +79,54 @@ def _read_persisted_token_enabled():
         if not isinstance(data, dict):
             _log.error("auth_state.json root is not an object — fail-closed")
             return True
-        return bool(data.get('token_enabled'))
+        if 'token_enabled' not in data:
+            _log.error("auth_state.json missing token_enabled — fail-closed")
+            return True
+        value = data['token_enabled']
+        if value is True:
+            return True
+        if value is False:
+            return False
+        _log.error(
+            "auth_state.json token_enabled has invalid type %s — fail-closed",
+            type(value).__name__,
+        )
+        return True
     except Exception as e:
         _log.error("Failed to read auth_state.json: %s — fail-closed", e)
         return True
+
+
+def migrate_auth_state_from_config():
+    """One-shot startup migration: if auth_state is absent and app_config has a
+    non-empty api_token (legacy / hand-edited config), write token_enabled=true.
+
+    Safe to call every boot — no-ops when AUTH_STATE_PATH already exists.
+    Does not run inside load_config (avoids side effects on every read).
+    """
+    if os.path.exists(AUTH_STATE_PATH):
+        return False
+    try:
+        if not os.path.exists(CONFIG_PATH):
+            return False
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            return False
+        raw = cfg.get('api_token')
+        if raw:
+            _write_persisted_token_enabled(True)
+            _log.info(
+                "auth_state migration: token found in app_config.json, "
+                "wrote token_enabled=true",
+            )
+            return True
+        return False
+    except Exception as e:
+        # Fail closed for subsequent get_api_token if config is unreadable but
+        # present — do not create a false "disabled" marker.
+        _log.error("auth_state migration skipped: %s", e)
+        return False
 
 
 def load_config():
@@ -91,7 +135,7 @@ def load_config():
     Returns (config_dict, error_string).
     - Missing file is not an error (first-run open mode).
     - Parse/read failure returns last good config when available, with err set.
-    - Never writes auth_state.json (only save_config mutates enable flag).
+    - Never writes auth_state.json (save_config + migrate_auth_state_from_config only).
     """
     global _cached_config, _last_good_token
     try:
@@ -103,7 +147,6 @@ def load_config():
         raw = cfg.get('api_token')
         if raw:
             # Cache token for this process only — do NOT write auth_state here.
-            # Enable/disable is intentional via save_config only.
             _last_good_token = str(raw)
         return cfg, None
     except FileNotFoundError:

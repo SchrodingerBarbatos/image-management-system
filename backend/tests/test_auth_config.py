@@ -93,6 +93,78 @@ def test_auth_state_corrupt_fail_closed(conf):
     assert fail_closed is True
 
 
+def test_auth_state_empty_object_fail_closed(conf):
+    conf.save_config({"api_token": "secret-7"})
+    conf._cached_config = None
+    conf._last_good_token = None
+    os.remove(conf.CONFIG_PATH)
+    with open(conf.AUTH_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+    token, fail_closed = conf.get_api_token()
+    assert token == ""
+    assert fail_closed is True
+
+
+def test_auth_state_zero_token_enabled_fail_closed(conf):
+    conf.save_config({"api_token": "secret-8"})
+    conf._cached_config = None
+    conf._last_good_token = None
+    os.remove(conf.CONFIG_PATH)
+    with open(conf.AUTH_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"token_enabled": 0}, f)
+    token, fail_closed = conf.get_api_token()
+    assert token == ""
+    assert fail_closed is True
+
+
+def test_auth_state_empty_string_token_enabled_fail_closed(conf):
+    conf.save_config({"api_token": "secret-9"})
+    conf._cached_config = None
+    conf._last_good_token = None
+    os.remove(conf.CONFIG_PATH)
+    with open(conf.AUTH_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"token_enabled": ""}, f)
+    token, fail_closed = conf.get_api_token()
+    assert token == ""
+    assert fail_closed is True
+
+
+def test_migrate_auth_state_from_legacy_config(conf):
+    """Hand-edited app_config with token + no auth_state → migration enables flag."""
+    with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"api_token": "legacy-secret"}, f)
+    conf._cached_config = None
+    conf._last_good_token = None
+    if os.path.exists(conf.AUTH_STATE_PATH):
+        os.remove(conf.AUTH_STATE_PATH)
+    assert conf.migrate_auth_state_from_config() is True
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is True
+    # Simulate restart: config deleted, memory empty — must fail-closed
+    os.remove(conf.CONFIG_PATH)
+    conf._cached_config = None
+    conf._last_good_token = None
+    token, fail_closed = conf.get_api_token()
+    assert token == ""
+    assert fail_closed is True
+
+
+def test_migrate_is_noop_when_auth_state_exists(conf):
+    conf.save_config({"api_token": ""})  # creates token_enabled=false
+    with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"api_token": "should-not-override"}, f)
+    assert conf.migrate_auth_state_from_config() is False
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is False
+
+
+def test_migrate_noop_when_no_token_in_config(conf):
+    with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"debug_mode": True}, f)
+    assert conf.migrate_auth_state_from_config() is False
+    assert not os.path.exists(conf.AUTH_STATE_PATH)
+
+
 def test_load_config_with_token_does_not_write_auth_state(conf):
     """Reading a config that contains a token must not create/enable auth_state."""
     # Write config file directly without going through save_config
@@ -106,27 +178,8 @@ def test_load_config_with_token_does_not_write_auth_state(conf):
     cfg, err = conf.load_config()
     assert err is None
     assert cfg.get("api_token") == "leaked-read-only"
-    # auth_state must still be absent — only save_config writes it
+    # auth_state must still be absent — only save_config / migrate write it
     assert not os.path.exists(conf.AUTH_STATE_PATH)
-    # get_api_token can use in-memory last_good for this process
-    token, fail_closed = conf.get_api_token()
-    assert token == "leaked-read-only"
-    assert fail_closed is False
-    # But after memory wipe without auth_state, must be open (never auto-enabled)
-    conf._cached_config = None
-    conf._last_good_token = None
-    token2, fail2 = conf.get_api_token()
-    assert token2 == "leaked-read-only" or (token2 == "" and fail2 is False)
-    # Re-read file into memory again then wipe — still no auth_state file
-    conf.load_config()
-    conf._cached_config = None
-    conf._last_good_token = None
-    assert not os.path.exists(conf.AUTH_STATE_PATH)
-    token3, fail3 = conf.get_api_token()
-    # Without auth_state and without memory, open mode (token may come from re-read of config)
-    # Config file still exists with token, so load succeeds and returns token
-    assert fail3 is False
-    assert token3 == "leaked-read-only"
 
 
 def test_only_save_config_enables_persisted_flag(conf):

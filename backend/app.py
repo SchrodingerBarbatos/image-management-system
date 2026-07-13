@@ -651,6 +651,20 @@ def _cleanup_exports_on_startup():
     start_export_cleanup_loop(interval_seconds=900)
 
 
+def _bootstrap_runtime():
+    """One-time startup steps before accepting requests.
+
+    - Migrate legacy app_config api_token → auth_state token_enabled
+    - Reset stale exports + start cleanup loop
+    """
+    from config import migrate_auth_state_from_config
+    try:
+        migrate_auth_state_from_config()
+    except Exception:
+        logging.getLogger(__name__).exception("auth_state migration failed")
+    _cleanup_exports_on_startup()
+
+
 def start_tray(port, open_browser_on_start=True):
     import pystray
     from PIL import Image as PILImage
@@ -674,8 +688,7 @@ def start_tray(port, open_browser_on_start=True):
         _ensure_debug_handler()
         logger.info("调试模式已恢复开启状态")
 
-    # Cleanup old export tasks on startup
-    _cleanup_exports_on_startup()
+    _bootstrap_runtime()
 
     # Check port availability with fallback
     resolved = _resolve_port('127.0.0.1', port)
@@ -764,7 +777,7 @@ if __name__ == '__main__':
             if resolved != port:
                 print(f"Port {port} in use, using {resolved} instead")
             port = resolved
-            _cleanup_exports_on_startup()
+            _bootstrap_runtime()
             _ensure_firewall_rule(port)
             _configure_cors(app, port)
             # Restore debug mode handler if it was enabled
