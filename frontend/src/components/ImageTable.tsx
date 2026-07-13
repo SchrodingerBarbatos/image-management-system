@@ -53,6 +53,7 @@ const ImageTable: React.FC<Props> = ({
       size="small"
       rowSelection={{
         selectedRowKeys: Array.from(selectedBarcodes),
+        preserveSelectedRowKeys: true,
         onChange: (keys) => onSelectionChange(new Set(keys as string[])),
       }}
       onRow={(record) => ({

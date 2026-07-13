@@ -7,6 +7,22 @@ from flask import request, jsonify
 _log = logging.getLogger(__name__)
 
 
+def is_path_under_root(file_path, root_path):
+    """Return (True, None) if realpath(file_path) is under realpath(root_path).
+
+    Used by safe_remove_* and serve_file for consistent path confinement.
+    """
+    real_file = os.path.realpath(file_path)
+    real_root = os.path.realpath(root_path)
+    try:
+        if os.path.commonpath([real_file, real_root]) != real_root:
+            return False, '文件路径不在所属扫描目录下'
+    except ValueError:
+        # Different drives on Windows → commonpath raises ValueError
+        return False, '文件路径与扫描目录不在同一驱动器'
+    return True, None
+
+
 def parse_pagination(default_page_size=50, max_page_size=500):
     """Parse and validate page/page_size query parameters.
 
@@ -60,16 +76,8 @@ def safe_remove_image_file(img, sess):
         _log.warning("safe_remove: %s, refusing to delete %s", reason, img.file_path)
         return False, reason
 
-    real_file = os.path.realpath(img.file_path)
-    real_root = os.path.realpath(root.path)
-    try:
-        if os.path.commonpath([real_file, real_root]) != real_root:
-            reason = '文件路径不在所属扫描目录下'
-            _log.warning("safe_remove: %s — file=%s root=%s", reason, img.file_path, root.path)
-            return False, reason
-    except ValueError:
-        # Different drives on Windows → commonpath raises ValueError
-        reason = '文件路径与扫描目录不在同一驱动器'
+    ok, reason = is_path_under_root(img.file_path, root.path)
+    if not ok:
         _log.warning("safe_remove: %s — file=%s root=%s", reason, img.file_path, root.path)
         return False, reason
 

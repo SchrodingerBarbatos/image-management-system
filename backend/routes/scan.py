@@ -17,34 +17,41 @@ def _add_log(action, status, message, details=''):
     session.commit()
 
 
-def _run_scan(root_ids, scan_mode, job_ready_event=None):
-    """Execute scan in background thread with progress reporting."""
-    job_id = str(uuid.uuid4())
+def _make_scan_job(root_ids):
+    """Create the initial in-memory scan job dict (caller holds _scan_lock)."""
+    return {
+        'status': 'running',
+        'phase': 'counting',
+        'current_root_path': '',
+        'current_root_index': 0,
+        'total_roots': len(root_ids),
+        'current_file': '',
+        'current_dir': '',
+        'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'broken_new': 0,
+        'rejected': 0,
+        'thumbnail_total': 0, 'thumbnail_current': 0,
+        'total_files': 0, 'processed_files': 0, 'percent': 0,
+        'eta_seconds': 0, 'speed': 0,
+        'counted_files': 0, 'counting_current_dir': '',
+        'counting_root_index': 0, 'counting_total_roots': len(root_ids),
+        'error': None,
+        'elapsed_seconds': 0,
+        'started_at': datetime.datetime.now().isoformat(),
+    }
+
+
+def _run_scan(root_ids, scan_mode, job_id=None):
+    """Execute scan in background thread with progress reporting.
+
+    job_id must already be registered in _scan_jobs under _scan_lock by the
+    request handler (atomic claim) to prevent TOCTOU dual-running scans.
+    """
+    if job_id is None:
+        # Backward-compatible path (tests / direct calls): claim under lock
+        job_id = str(uuid.uuid4())
+        with _scan_lock:
+            _scan_jobs[job_id] = _make_scan_job(root_ids)
     full_scan = scan_mode == 'full'
-
-    with _scan_lock:
-        _scan_jobs[job_id] = {
-            'status': 'running',
-            'phase': 'counting',
-            'current_root_path': '',
-            'current_root_index': 0,
-            'total_roots': len(root_ids),
-            'current_file': '',
-            'current_dir': '',
-            'added': 0, 'skipped': 0, 'broken_cleaned': 0, 'broken_new': 0,
-            'rejected': 0,
-            'thumbnail_total': 0, 'thumbnail_current': 0,
-            'total_files': 0, 'processed_files': 0, 'percent': 0,
-            'eta_seconds': 0, 'speed': 0,
-            'counted_files': 0, 'counting_current_dir': '',
-            'counting_root_index': 0, 'counting_total_roots': len(root_ids),
-            'error': None,
-            'elapsed_seconds': 0,
-            'started_at': datetime.datetime.now().isoformat(),
-        }
-
-    if job_ready_event:
-        job_ready_event.set()
 
     def is_cancelled():
         with _scan_lock:
@@ -369,33 +376,22 @@ def trigger_scan():
     if not roots:
         return jsonify({'error': '没有可扫描的目录'}), 400
 
-    # Check for existing running scan
+    # Atomically claim the single running-scan slot under the lock (no TOCTOU)
     _cleanup_old_jobs()
+    job_id = str(uuid.uuid4())
     with _scan_lock:
         running = [jid for jid, j in _scan_jobs.items() if j['status'] == 'running']
-    if running:
-        return jsonify({'error': '已有扫描任务正在执行中，请等待完成'}), 409
+        if running:
+            return jsonify({'error': '已有扫描任务正在执行中，请等待完成'}), 409
+        _scan_jobs[job_id] = _make_scan_job(root_ids)
 
-    # Launch background scan
-    job_ready = threading.Event()
     thread = threading.Thread(
         target=_run_scan,
-        args=(root_ids, scan_mode, job_ready),
+        args=(root_ids, scan_mode, job_id),
         daemon=True,
     )
     thread.start()
-
-    # Wait for job entry to be created
-    if not job_ready.wait(timeout=5.0):
-        return jsonify({'error': '扫描启动超时'}), 500
-
-    with _scan_lock:
-        active_jobs = [jid for jid, j in _scan_jobs.items() if j['status'] == 'running']
-
-    if active_jobs:
-        job_id = active_jobs[0]
-        return jsonify({'job_id': job_id, 'status': 'started'}), 202
-    return jsonify({'error': '扫描启动失败'}), 500
+    return jsonify({'job_id': job_id, 'status': 'started'}), 202
 
 
 @scan_bp.route('/scan/status', methods=['GET'])

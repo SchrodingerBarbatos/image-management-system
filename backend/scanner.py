@@ -49,13 +49,15 @@ def validate_business_gtin(barcode: str) -> tuple[bool, str]:
         if 200 <= prefix3 <= 299:
             return False, "GS1 200–299 为限制流通码（Restricted Circulation Number）"
 
-    # UPC-A / GTIN-12: 前3位含 Number System + Category
+    # UPC-A / GTIN-12: Number System digit is the first digit.
+    # NS=2 (RCN / variable measure) and NS=4 (restricted circulation) cover
+    # the full 200–299 and 400–499 three-digit ranges, not only 020–029/040–049.
     elif length == 12:
-        prefix3 = int(barcode[:3])
-        if 20 <= prefix3 <= 29:
-            return False, "UPC 020–029 为限制流通码"
-        if 40 <= prefix3 <= 49:
-            return False, "UPC 040–049 为企业内部流通码"
+        ns = barcode[0]
+        if ns == '2':
+            return False, "UPC NS=2（200–299）为限制流通码"
+        if ns == '4':
+            return False, "UPC NS=4（400–499）为企业内部流通码"
 
     return True, ""
 

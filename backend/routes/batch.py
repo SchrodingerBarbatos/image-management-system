@@ -30,6 +30,7 @@ def _classify_delete_error(filepath, error):
 
 
 def _record_deleted_folder(sess, barcode, image_type, folder_ctime):
+    """Unconditionally insert a deleted_folders row (caller must ensure the folder is empty)."""
     stmt = sqlite_insert(DeletedFolder).values(
         barcode=barcode,
         image_type=image_type,
@@ -41,10 +42,29 @@ def _record_deleted_folder(sess, barcode, image_type, folder_ctime):
     sess.execute(stmt)
 
 
+def _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime):
+    """Record deleted_folders only when no Image rows remain for this folder key.
+
+    Partial deletes must not blacklist a folder while sibling images still exist;
+    otherwise the scanner permanently skips re-adding restored/sibling files.
+    """
+    sess.flush()
+    remaining = sess.query(Image.id).filter(
+        Image.barcode == barcode,
+        Image.image_type == image_type,
+        Image.folder_ctime == folder_ctime,
+    ).count()
+    if remaining == 0:
+        _record_deleted_folder(sess, barcode, image_type, folder_ctime)
+        return True
+    return False
+
+
 def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
     """删除指定条码+类型+文件夹下 active+confirmed+enabled 的图片，返回删除数量。
     过滤条件与扫描端点一致，确保预览和实际操作匹配。
-    使用 thread-local session 以支持后台任务调用。"""
+    使用 thread-local session 以支持后台任务调用。
+    仅当该 folder key 下已无任何 Image 行时才写入 deleted_folders。"""
     sess = _get_thread_session()
     # Subquery to get matching image IDs (join with ScanRoot for enabled check)
     match_ids = select(Image.id).where(
@@ -70,12 +90,12 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files):
                 _log.warning("Refused or failed to delete file: %s — %s", img.file_path, reason)
                 failed_items.append({'file': img.file_path, 'reason': reason or '删除失败'})
         if deleted_count > 0:
-            _record_deleted_folder(sess, barcode, image_type, folder_ctime)
+            _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
         return deleted_count, failed_items
     else:
         count = sess.query(Image).filter(Image.id.in_(match_ids)).delete(synchronize_session='fetch')
         if count > 0:
-            _record_deleted_folder(sess, barcode, image_type, folder_ctime)
+            _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
         return count, []
 
 
@@ -110,31 +130,27 @@ def _check_disabled_scan_roots(items):
 
 def validate_image_paths(imgs, scan_roots):
     """验证图片路径是否安全（在扫描目录下）。
+    仅做路径归属校验，不要求文件已存在（缺失文件由 safe_remove 视为成功）。
     返回 (is_valid, error_message) 元组。"""
+    from routes._utils import is_path_under_root
     for img in imgs:
         root_path = scan_roots.get(img.scan_root_id)
         if not root_path:
             return False, f'无法找到扫描目录 (scan_root_id={img.scan_root_id})'
-        real_file = os.path.realpath(img.file_path)
-        real_root = os.path.realpath(root_path)
-        try:
-            safe = os.path.commonpath([real_file, real_root]) == real_root
-        except ValueError:
-            safe = False
-        if not safe:
-            return False, '文件路径不在扫描目录下，拒绝删除'
-        if not os.path.exists(img.file_path):
-            return False, f'文件不存在: {img.file_path}'
+        ok, reason = is_path_under_root(img.file_path, root_path)
+        if not ok:
+            return False, reason or '文件路径不在扫描目录下，拒绝删除'
     return True, None
 
 
 def delete_images_with_validation(barcode, image_type, folder_ctime, delete_files):
-    """删除图片，包含路径安全验证。
-    返回 (deleted_count, error_message) 元组。
-    注意：文件删除是 best-effort，无法回滚。"""
+    """删除图片，与 _delete_folder_images 语义一致：
+    - 路径不安全：在任何磁盘操作前整批拒绝
+    - 路径安全后：逐张 safe_remove + DB 删除（部分成功）
+    - 仅当 folder key 下无剩余 Image 时写 deleted_folders
+    返回 (deleted_count, error_message) 元组。error_message 仅在完全失败时设置。"""
     sess = _get_thread_session()
 
-    # 获取匹配的图片
     match_ids = select(Image.id).where(
         Image.barcode == barcode,
         Image.image_type == image_type,
@@ -149,31 +165,38 @@ def delete_images_with_validation(barcode, image_type, folder_ctime, delete_file
     if not imgs:
         return 0, '已无有效图片'
 
-    # Phase 1: 验证路径安全
+    # Preflight path safety only — refuse whole batch before any disk op
     if delete_files:
         scan_roots = {sr.id: sr.path for sr in sess.query(ScanRoot).all()}
         is_valid, error_msg = validate_image_paths(imgs, scan_roots)
         if not is_valid:
             return 0, error_msg
 
-    # Phase 2: 删除文件（best-effort，无法回滚）
-    file_errors = []
+    failed_msgs = []
+    deleted_count = 0
     if delete_files:
         from routes._utils import safe_remove_image_file
         for img in imgs:
             ok, reason = safe_remove_image_file(img, sess)
-            if not ok:
-                file_errors.append(f'{img.file_path}: {reason or "删除失败"}')
+            if ok:
+                sess.delete(img)
+                deleted_count += 1
+            else:
+                failed_msgs.append(f'{img.file_path}: {reason or "删除失败"}')
+    else:
+        for img in imgs:
+            sess.delete(img)
+            deleted_count += 1
 
-    if file_errors:
-        return 0, f'文件删除失败: {"; ".join(file_errors)}'
+    if deleted_count > 0:
+        _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
 
-    # Phase 3: 删除索引
-    for img in imgs:
-        sess.delete(img)
-
-    _record_deleted_folder(sess, barcode, image_type, folder_ctime)
-    return len(imgs), None
+    if deleted_count == 0 and failed_msgs:
+        return 0, f'文件删除失败: {"; ".join(failed_msgs)}'
+    if deleted_count == 0:
+        return 0, '已无有效图片'
+    # Partial success: no error_message (callers treat error_message as hard fail)
+    return deleted_count, None
 
 
 def _build_image_stats_query():

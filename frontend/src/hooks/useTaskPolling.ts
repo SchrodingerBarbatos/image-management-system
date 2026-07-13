@@ -8,6 +8,7 @@ export interface UseTaskPollingOptions {
   successMessage?: string | ((task: BatchTaskInfo) => string);
   errorMessage?: string | ((task: BatchTaskInfo) => string);
   pollInterval?: number;
+  maxNetworkRetries?: number;
 }
 
 export interface UseTaskPollingReturn {
@@ -27,6 +28,7 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
     successMessage,
     errorMessage,
     pollInterval = 2000,
+    maxNetworkRetries = 5,
   } = options;
 
   const [taskId, setTaskId] = useState<number | null>(null);
@@ -34,8 +36,12 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
   const [currentTask, setCurrentTask] = useState<BatchTaskInfo | null>(null);
   const [polling, setPolling] = useState(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Generation token: any in-flight response with a stale generation is ignored
+  const generationRef = useRef(0);
+  const networkFailRef = useRef(0);
 
   const cancelPolling = useCallback(() => {
+    generationRef.current += 1;
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
@@ -43,14 +49,16 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
     setPolling(false);
   }, []);
 
-  const poll = useCallback((id: number) => {
-    cancelPolling();
+  const poll = useCallback((id: number, generation: number) => {
+    if (generation !== generationRef.current) return;
     setPolling(true);
     taskApi.getTask(id).then(task => {
+      if (generation !== generationRef.current) return;
+      networkFailRef.current = 0;
       setTaskStatus(task.status);
       setCurrentTask(task);
       if (task.status === 'running' || task.status === 'queued') {
-        pollTimerRef.current = setTimeout(() => poll(id), pollInterval);
+        pollTimerRef.current = setTimeout(() => poll(id, generation), pollInterval);
       } else {
         setPolling(false);
         if (task.status === 'done') {
@@ -73,13 +81,29 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
         }
       }
     }).catch(() => {
-      setPolling(false);
+      if (generation !== generationRef.current) return;
+      networkFailRef.current += 1;
+      if (networkFailRef.current >= maxNetworkRetries) {
+        setPolling(false);
+        message.error('任务状态查询失败，请刷新后重试');
+        return;
+      }
+      // Transient network error — retry without stopping
+      pollTimerRef.current = setTimeout(() => poll(id, generation), pollInterval);
     });
-  }, [cancelPolling, pollInterval, successMessage, errorMessage, onComplete, onError]);
+  }, [pollInterval, successMessage, errorMessage, onComplete, onError, maxNetworkRetries]);
 
   const startPolling = useCallback((id: number) => {
+    // Bump generation so any previous in-flight poll is ignored
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    networkFailRef.current = 0;
     setTaskId(id);
-    poll(id);
+    poll(id, generation);
   }, [poll]);
 
   const reset = useCallback(() => {
@@ -92,6 +116,7 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      generationRef.current += 1;
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
     };
   }, []);

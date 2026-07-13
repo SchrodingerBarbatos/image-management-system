@@ -12,7 +12,7 @@ from models import (
 )
 from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
-from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error, _record_deleted_folder
+from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error, _record_deleted_folder, _maybe_record_deleted_folder
 from db_retry import with_sqlite_lock_retry
 from routes._utils import parse_pagination
 
@@ -85,7 +85,7 @@ def _cleanup_orphaned_images():
         if not validate_business_gtin(bc)[0]:
             sess.query(ImageVersion).filter(ImageVersion.barcode == bc).delete()
             continue
-        update_versions_for_barcode(bc)
+        update_versions_for_barcode(bc, sess=sess)
 
     _log.info("Cleanup done: %d images, %d versions removed", len(orphaned_images), cleaned_versions)
     return len(orphaned_images), cleaned_versions
@@ -422,7 +422,7 @@ def _run_batch_delete_duplicates(task_id):
     sess.commit()
 
     for bc in affected_barcodes:
-        update_versions_for_barcode(bc)
+        update_versions_for_barcode(bc, sess=sess)
 
     finish_task(task_id, result_count=total_deleted)
     _log.info("batch_delete_duplicates task %d done: deleted %d images, skipped %d", task_id, total_deleted, skipped_count)
@@ -499,7 +499,7 @@ def _run_batch_delete_low_versions(task_id):
     sess.commit()
 
     for bc in affected_barcodes:
-        update_versions_for_barcode(bc)
+        update_versions_for_barcode(bc, sess=sess)
 
     finish_task(task_id, result_count=total_deleted)
     _log.info("batch_delete_low_versions task %d done: deleted %d images, skipped %d", task_id, total_deleted, skipped_count)
@@ -543,11 +543,16 @@ def _run_delete_version(task_id):
         finish_task(task_id, error_message='该版本属于已禁用的扫描目录，无法删除')
         return
 
-    # Delete all images belonging to this version
-    imgs = sess.query(Image).filter(
+    # Same filters as _delete_folder_images: active + confirmed + enabled root
+    imgs = sess.query(Image).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(
         Image.barcode == barcode,
         Image.folder_ctime == folder_ctime,
         Image.image_type == image_type,
+        Image.status == 'active',
+        Image.confirmed == True,
+        ScanRoot.enabled == True,
     ).all()
 
     total = len(imgs)
@@ -571,14 +576,14 @@ def _run_delete_version(task_id):
             deleted_count += 1
         update_task_progress(task_id, progress=i + 1, current_item=f'image_id={img.id}')
 
-    # Record in deleted_folders tracking table to prevent re-adding on next scan
+    # Only blacklist folder when no Image rows remain for this key
     if deleted_count > 0:
-        _record_deleted_folder(sess, barcode, image_type, folder_ctime)
+        _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime)
     sess.commit()
 
     # 重建版本：只有实际删除了图片才更新版本
     if deleted_count > 0:
-        update_versions_for_barcode(barcode)
+        update_versions_for_barcode(barcode, sess=sess)
 
     finish_task(task_id, result_count=deleted_count)
     _log.info("delete_version task %d done: deleted %d images", task_id, deleted_count)
@@ -668,14 +673,14 @@ def _run_batch_delete_images(task_id):
         }
 
     # Delete database records（仅删除文件删除成功的记录）
-    for bc, it, ctime in delete_db_folder_keys:
-        _record_deleted_folder(sess, bc, it, ctime)
     deleted = sess.query(Image).filter(Image.id.in_(delete_db_ids)).delete(synchronize_session='fetch')
+    for bc, it, ctime in delete_db_folder_keys:
+        _maybe_record_deleted_folder(sess, bc, it, ctime)
     sess.commit()
 
     # Re-sequence remaining versions
     for bc in barcodes:
-        update_versions_for_barcode(bc)
+        update_versions_for_barcode(bc, sess=sess)
 
     finish_task(task_id, result_count=deleted)
     _log.info("batch_delete_images task %d done: deleted %d images", task_id, deleted)
@@ -814,7 +819,7 @@ def _run_batch_delete_duplicate_versions(task_id):
 
     # Rebuild versions for affected barcodes
     for bc in affected_barcodes:
-        update_versions_for_barcode(bc)
+        update_versions_for_barcode(bc, sess=sess)
 
     finish_task(task_id, result_count=deleted_image_count)
     _log.info("batch_delete_duplicate_versions task %d done: deleted %d images, skipped %d, failed %d",

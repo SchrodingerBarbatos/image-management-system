@@ -462,11 +462,11 @@ def test_batch_export_detail_route_fallback(client, db, images_dir, captured_bui
     assert body["scanroot_excluded"] == 0
     assert body["version_filtered"] == 0
 
-    # Report counts reflect real data types (main zeroed for detail export)
+    # Report: real detail for A; B's main-as-detail fallback counted under detail
     task = db.get(ExportTask, body["task_id"])
     counts = json.loads(task.barcode_data)
     assert counts["A"] == {"main": 0, "detail": 2}
-    assert counts["B"] == {"main": 0, "detail": 0}
+    assert counts["B"] == {"main": 0, "detail": 2}
 
     # Replay the real build with the captured args -> fallback lands in ZIP
     args = captured_builds.replay(0, upload_dir=images_dir)

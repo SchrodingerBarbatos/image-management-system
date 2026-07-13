@@ -138,20 +138,30 @@ def test_validate_gtin14_allows_non_rcn():
     assert reason == ""
 
 
-def test_validate_upc_rejects_rcn_020_029():
-    """UPC-A 前缀 020-029 应被拒绝。"""
-    is_valid, reason = validate_gtin("021234567893")
+def test_validate_upc_rejects_ns2():
+    """UPC-A Number System 2（首位 2，含 020 误区之外的 200…）应被拒绝。"""
+    is_valid, reason = validate_gtin("200123456788")
     assert is_valid is False
-    assert "020–029" in reason
+    assert "NS=2" in reason
     assert "限制流通码" in reason
 
 
-def test_validate_upc_rejects_rcn_040_049():
-    """UPC-A 前缀 040-049 应被拒绝。"""
-    is_valid, reason = validate_gtin("041234567891")
+def test_validate_upc_rejects_ns4():
+    """UPC-A Number System 4（首位 4）应被拒绝。"""
+    payload = "40012345678"
+    bc = payload + str(calculate_gtin_check_digit(payload))
+    is_valid, reason = validate_gtin(bc)
     assert is_valid is False
-    assert "040–049" in reason
+    assert "NS=4" in reason
     assert "企业内部流通码" in reason
+
+
+def test_validate_upc_ns0_with_02x_prefix_allowed():
+    """首位 0 的 UPC（NS=0）即使前三位为 021 也不是 NS=2 RCN。"""
+    # 021234567893 has valid check digit but NS=0 — regular retail, not RCN
+    is_valid, reason = validate_gtin("021234567893")
+    assert is_valid is True
+    assert reason == ""
 
 
 def test_validate_gtin_valid_china():

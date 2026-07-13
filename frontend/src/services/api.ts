@@ -144,7 +144,7 @@ export const barcodeApi = {
   list: (params: BarcodeListParams) =>
     api.get<Paginated<BarcodeRec>>('/barcodes', { params }).then(r => r.data),
   deleteDuplicateImages: (barcode: string, folderCtime: string, imageType: string, deleteFile = false) =>
-    api.delete(`/barcodes/${barcode}/duplicate-images`, { params: { folder_ctime: folderCtime, image_type: imageType, delete_file: deleteFile } }).then(r => r.data),
+    api.delete(`/barcodes/${encodeURIComponent(barcode)}/duplicate-images`, { params: { folder_ctime: folderCtime, image_type: imageType, delete_file: deleteFile } }).then(r => r.data),
 };
 
 export const pendingApi = {
@@ -186,9 +186,9 @@ export interface BarcodeSetting {
 
 export const barcodeSettingApi = {
   get: (barcode: string) =>
-    api.get<BarcodeSetting>(`/barcode-settings/${barcode}`).then(r => r.data),
+    api.get<BarcodeSetting>(`/barcode-settings/${encodeURIComponent(barcode)}`).then(r => r.data),
   update: (barcode: string, data: { default_main_ctime?: string; default_detail_ctime?: string }) =>
-    api.put<BarcodeSetting>(`/barcode-settings/${barcode}`, data).then(r => r.data),
+    api.put<BarcodeSetting>(`/barcode-settings/${encodeURIComponent(barcode)}`, data).then(r => r.data),
 };
 
 export interface DuplicateGroup {

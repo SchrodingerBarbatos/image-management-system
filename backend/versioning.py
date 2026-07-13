@@ -11,18 +11,22 @@ _SQLITE_RETRY_ATTEMPTS = 5
 _SQLITE_RETRY_DELAY = 0.5  # seconds
 
 
-def update_versions_for_barcode(barcode):
+def update_versions_for_barcode(barcode, sess=None):
     """Rebuild version records for a single barcode, per image_type.
-    Groups images by (folder_ctime, image_type), then uses signature-based
-    dedup + funnel comparison to merge identical groups before creating versions."""
+
+    sess: optional SQLAlchemy Session. When called from a background task
+    thread, pass the task's thread-local session so deletes and version
+    rebuild share one identity map / connection. Defaults to models.session.
+    """
+    work_sess = sess if sess is not None else session
     for attempt in range(1, _SQLITE_RETRY_ATTEMPTS + 1):
         try:
-            _do_update_versions_for_barcode(barcode)
+            _do_update_versions_for_barcode(barcode, work_sess)
             return
         except Exception as e:
             if not _is_sqlite_locked(e):
                 raise
-            session.rollback()
+            work_sess.rollback()
             if attempt == _SQLITE_RETRY_ATTEMPTS:
                 _log.error("update_versions_for_barcode(%s) failed after %d retries: %s",
                            barcode, _SQLITE_RETRY_ATTEMPTS, e)
@@ -87,33 +91,35 @@ def groups_are_identical(imgs1, imgs2):
     return True
 
 
-def _expunge_image_version_objects():
+def _expunge_image_version_objects(work_sess):
     """Remove cached ImageVersion instances before recreating rows.
 
     SQLite may reuse the same primary keys for the rebuilt versions, so stale
     ORM identities must be dropped first to avoid identity-map replacement
     warnings during flush.
     """
-    for obj in list(session.identity_map.values()):
+    for obj in list(work_sess.identity_map.values()):
         if isinstance(obj, ImageVersion):
             try:
-                session.expunge(obj)
+                work_sess.expunge(obj)
             except Exception:
                 pass
 
 
 
-def _do_update_versions_for_barcode(barcode):
+def _do_update_versions_for_barcode(barcode, work_sess=None):
+    if work_sess is None:
+        work_sess = session
     # RCN 条码不应有版本记录：删除残留版本后跳过
     from scanner import validate_business_gtin
     is_valid, _ = validate_business_gtin(barcode)
     if not is_valid:
-        deleted = session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
+        deleted = work_sess.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
         if deleted:
-            session.commit()
+            work_sess.commit()
         return
 
-    images = session.query(Image).filter(
+    images = work_sess.query(Image).filter(
         Image.barcode == barcode, Image.confirmed == True, Image.status == 'active'
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).filter(
         ScanRoot.enabled == True
@@ -121,8 +127,8 @@ def _do_update_versions_for_barcode(barcode):
 
     if not images:
         # Clean up orphaned version records when all images are gone
-        session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
-        session.commit()
+        work_sess.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
+        work_sess.commit()
         return
 
     # Group by (folder_ctime, image_type)
@@ -169,9 +175,9 @@ def _do_update_versions_for_barcode(barcode):
         ]
 
     # Delete old versions for this barcode
-    session.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
-    session.flush()
-    _expunge_image_version_objects()
+    work_sess.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
+    work_sess.flush()
+    _expunge_image_version_objects(work_sess)
 
     # Create new versions per image_type
     for img_type, vers in versions_by_type.items():
@@ -189,8 +195,8 @@ def _do_update_versions_for_barcode(barcode):
                 is_latest=is_latest,
                 duplicate_mtimes=dup_ctimes,
             )
-            session.add(v)
-    session.commit()
+            work_sess.add(v)
+    work_sess.commit()
 
 
 def _expunge_versions_and_images():

@@ -12,16 +12,13 @@ rejected_bp = Blueprint('rejected', __name__)
 def safe_remove_rejected_file(rejected, sess):
     """Safely remove a rejected barcode file with root/path validation.
     Returns (True, None) on success, (False, reason) on failure."""
+    from routes._utils import is_path_under_root
     root = sess.get(ScanRoot, rejected.scan_root_id)
     if not root:
         return False, f'找不到扫描目录 (scan_root_id={rejected.scan_root_id})'
-    real_file = os.path.realpath(rejected.file_path)
-    real_root = os.path.realpath(root.path)
-    try:
-        if os.path.commonpath([real_file, real_root]) != real_root:
-            return False, '文件路径不在所属扫描目录下'
-    except ValueError:
-        return False, '文件路径与扫描目录不在同一驱动器'
+    ok, reason = is_path_under_root(rejected.file_path, root.path)
+    if not ok:
+        return False, reason
     try:
         os.remove(rejected.file_path)
         return True, None

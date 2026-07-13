@@ -322,12 +322,18 @@ const ImageCardDetail: React.FC<Props> = ({
 
   const toggleAll = useCallback(
     (imgs: ImageRec[], type: "main" | "detail") => {
+      // Merge with existing selection so cross-version picks are preserved
       const currentSet = type === "main" ? selectedMainIds : selectedDetailIds;
-      const allIds = new Set(imgs.map((i) => i.id));
-      const allSelected = imgs.every((i) => currentSet.has(i.id));
+      const next = new Set(currentSet);
+      const allSelected = imgs.length > 0 && imgs.every((i) => currentSet.has(i.id));
+      if (allSelected) {
+        imgs.forEach((i) => next.delete(i.id));
+      } else {
+        imgs.forEach((i) => next.add(i.id));
+      }
       type === "main"
-        ? onMainSelectionChange(allSelected ? new Set() : allIds)
-        : onDetailSelectionChange(allSelected ? new Set() : allIds);
+        ? onMainSelectionChange(next)
+        : onDetailSelectionChange(next);
     },
     [
       selectedMainIds,

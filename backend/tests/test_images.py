@@ -119,6 +119,35 @@ def test_batch_delete_records_deleted_folders(client, sess):
     assert ("BC_DEL_BATCH", "detail", ctime2) in keys
 
 
+def test_partial_folder_delete_does_not_record_deleted_folder(client, sess):
+    """Deleting 1 of N images in a folder must NOT blacklist the folder key."""
+    _make_root(sess)
+    ctime = "2024-03-01T00:00:00"
+    img1 = _make_image(sess, "BC_PARTIAL_DF", "main", ctime, filename="a.jpg")
+    _make_image(sess, "BC_PARTIAL_DF", "main", ctime, filename="b.jpg")
+
+    resp = client.delete(f"/api/images/{img1.id}")
+    assert resp.status_code == 200
+    assert sess.query(Image).filter(Image.barcode == "BC_PARTIAL_DF").count() == 1
+    assert sess.query(DeletedFolder).filter_by(
+        barcode="BC_PARTIAL_DF", image_type="main", folder_ctime=ctime,
+    ).one_or_none() is None
+
+
+def test_full_folder_delete_records_deleted_folder(client, sess):
+    """Deleting all images of a folder key still records deleted_folders."""
+    _make_root(sess)
+    ctime = "2024-03-02T00:00:00"
+    img1 = _make_image(sess, "BC_FULL_DF", "main", ctime, filename="a.jpg")
+    img2 = _make_image(sess, "BC_FULL_DF", "main", ctime, filename="b.jpg")
+
+    resp = client.post("/api/images/batch-delete", json={"ids": [img1.id, img2.id], "delete_file": False})
+    assert resp.status_code == 200
+    assert sess.query(DeletedFolder).filter_by(
+        barcode="BC_FULL_DF", image_type="main", folder_ctime=ctime,
+    ).one_or_none() is not None
+
+
 # ===================================================================
 # list_images  tests
 # ===================================================================
@@ -463,38 +492,9 @@ def scan_client(sess, monkeypatch):
     scan_mod._scan_jobs.clear()
     scan_mod._scan_cancel_flags.clear()
 
-    def _fake_run_scan(root_ids, scan_mode, job_ready_event=None):
-        with scan_mod._scan_lock:
-            scan_mod._scan_jobs["test-job"] = {
-                "status": "running",
-                "phase": "starting",
-                "current_root_path": "",
-                "current_root_index": 0,
-                "total_roots": len(root_ids),
-                "current_file": "",
-                "current_dir": "",
-                "added": 0,
-                "skipped": 0,
-                "broken_cleaned": 0,
-                "broken_new": 0,
-                "rejected": 0,
-                "thumbnail_total": 0,
-                "thumbnail_current": 0,
-                "total_files": 0,
-                "processed_files": 0,
-                "percent": 0,
-                "eta_seconds": 0,
-                "speed": 0,
-                "counted_files": 0,
-                "counting_current_dir": "",
-                "counting_root_index": 0,
-                "counting_total_roots": len(root_ids),
-                "error": None,
-                "elapsed_seconds": 0,
-                "started_at": "2026-01-01T00:00:00",
-            }
-        if job_ready_event:
-            job_ready_event.set()
+    def _fake_run_scan(root_ids, scan_mode, job_id=None):
+        # Request handler already claims job_id under lock; no-op worker for validation tests
+        return
 
     monkeypatch.setattr(scan_mod, "_run_scan", _fake_run_scan)
 

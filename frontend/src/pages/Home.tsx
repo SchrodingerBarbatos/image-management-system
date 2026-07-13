@@ -160,6 +160,7 @@ const Home: React.FC = () => {
       exportTimerRef.current = setTimeout(poll, 1000);
     } catch {
       setBatchLoading(false);
+      message.error('创建导出任务失败');
     }
   };
 
@@ -213,7 +214,11 @@ const Home: React.FC = () => {
               selectedBarcode={selectedBarcode}
               selectedBarcodes={selectedBarcodes}
               onSelectionChange={setSelectedBarcodes}
-              onRowClick={setSelectedBarcode}
+              onRowClick={(bc) => {
+                setSelectedBarcode(bc);
+                setSelectedMainIds(new Set());
+                setSelectedDetailIds(new Set());
+              }}
               onPageChange={(p, ps) => { setPage(p); setPageSize(ps); }}
               onSortChange={(field, order) => { setSortField(field); setSortOrder(order); }}
             />

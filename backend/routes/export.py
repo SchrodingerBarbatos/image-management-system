@@ -78,20 +78,45 @@ def filter_to_single_version(imgs, barcodes, session):
         filtered.append(img)
     return filtered
 
-def _compute_barcode_counts(imgs, all_barcodes=None):
-    """Compute per-barcode main/detail match counts.
+def _compute_barcode_counts(imgs, all_barcodes=None, export_type='all'):
+    """Compute per-barcode main/detail match counts for the export report.
 
-    If all_barcodes is provided, unmatched barcodes are included with zero counts.
-    Otherwise, only barcodes that appear in imgs are included.
+    export_type:
+    - 'all': real main/detail counts from imgs
+    - 'main': only main counts (detail forced 0)
+    - 'detail': detail counts; barcodes that only have main (fallback) report
+      those as detail so the detail Excel matches ZIP contents
     """
     counts = {}
     if all_barcodes:
         for b in all_barcodes:
             counts[b] = {'main': 0, 'detail': 0}
+
+    if export_type == 'detail':
+        grouped = {}
+        for img in imgs:
+            grouped.setdefault(img.barcode, {'main': 0, 'detail': 0})
+            if img.image_type in ('main', 'detail'):
+                grouped[img.barcode][img.image_type] += 1
+        for bc, g in grouped.items():
+            counts.setdefault(bc, {'main': 0, 'detail': 0})
+            if g['detail'] > 0:
+                counts[bc]['detail'] = g['detail']
+                counts[bc]['main'] = 0
+            else:
+                # main-as-detail fallback: report under detail so report matches ZIP
+                counts[bc]['detail'] = g['main']
+                counts[bc]['main'] = 0
+        return counts
+
     for img in imgs:
         counts.setdefault(img.barcode, {'main': 0, 'detail': 0})
         if img.image_type in ('main', 'detail'):
             counts[img.barcode][img.image_type] += 1
+
+    if export_type == 'main':
+        for bc in counts:
+            counts[bc]['detail'] = 0
     return counts
 
 def _col_letter(idx):
@@ -219,13 +244,18 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             _log.info("_build_zip task %s: %d barcodes used main images as detail fallback",
                       task_id, len(fallback_barcodes))
 
+        # Always finalize progress to planned total so UI never sticks < 100%
+        task.progress = total
+        # Keep total_images as planned entry count (set earlier); surface written via log
         if written == 0:
             _log.warning("_build_zip task %s: all %d files missing from disk", task_id, total)
             task.status = 'failed'
             task.error_message = '所有匹配的图片文件均不存在（可能已被移动或删除）'
         else:
             task.status = 'done'
-            task.total_images = written
+            if written < total:
+                _log.info("_build_zip task %s: wrote %d/%d entries (missing files skipped)",
+                          task_id, written, total)
         sess.commit()
     except Exception as e:
         _log.error("_build_zip task %s failed:\n%s", task_id, traceback.format_exc())
@@ -405,13 +435,7 @@ def generate_zip():
     excluded_barcodes = len(barcodes) - len(matched_barcodes)
 
     # Compute per-barcode match counts (include all barcodes, even unmatched)
-    barcode_counts = _compute_barcode_counts(imgs, barcodes)
-    # When exporting a specific type, zero out the other type so the report
-    # only reflects what was requested (e.g. detail export shows detail=5, main=0)
-    if image_type in ('main', 'detail'):
-        other = 'detail' if image_type == 'main' else 'main'
-        for bc in barcode_counts:
-            barcode_counts[bc][other] = 0
+    barcode_counts = _compute_barcode_counts(imgs, barcodes, export_type=image_type or 'all')
 
     # Concurrency guard: check + create + commit must be atomic
     with _export_lock:

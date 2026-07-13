@@ -78,6 +78,36 @@ def _migrate_export_task_schema(conn):
 
 app = Flask(__name__, static_folder=None)
 
+
+@app.before_request
+def _optional_api_token_guard():
+    """If app_config.json has a non-empty api_token, require it on /api/* routes.
+
+    Accepts X-API-Token header or Authorization: Bearer <token>.
+    Empty/missing token keeps backward-compatible open LAN access for local tools.
+    """
+    from flask import request, jsonify
+    path = request.path or ''
+    if not path.startswith('/api/'):
+        return None
+    # Allow unauthenticated health/static-ish probes if any
+    try:
+        from config import load_config
+        token = (load_config() or {}).get('api_token') or ''
+    except Exception:
+        token = ''
+    if not token:
+        return None
+    provided = request.headers.get('X-API-Token') or ''
+    if not provided:
+        auth = request.headers.get('Authorization') or ''
+        if auth.lower().startswith('bearer '):
+            provided = auth[7:].strip()
+    if provided != token:
+        return jsonify({'error': '未授权：需要有效的 API Token'}), 401
+    return None
+
+
 Base.metadata.create_all(bind=engine)
 
 # Migration: add missing export_task columns (idempotent)

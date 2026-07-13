@@ -28,10 +28,13 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
   const [taskList, setTaskList] = useState<{ id: number; status: string; total_images: number; created_at: string; file_available: boolean; error_message?: string; has_detail: boolean }[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Generation token: ignore in-flight responses after clear/reset/unmount
+  const pollGenerationRef = useRef(0);
 
   const [pollingCount, setPollingCount] = useState(0);
 
   const clearTimer = () => {
+    pollGenerationRef.current += 1;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     setPollingCount(0);
   };
@@ -42,9 +45,13 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
 
   const startPolling = (tid: number) => {
     clearTimer();
+    const generation = pollGenerationRef.current;
+    let count = 0;
     const poll = async () => {
+      if (generation !== pollGenerationRef.current) return;
       try {
         const p = await exportApi.getProgress(tid);
+        if (generation !== pollGenerationRef.current) return;
         setProgress(p.progress);
         setProgressTotal(p.total);
         if (p.status === 'done') {
@@ -59,29 +66,26 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
           setStep(0);
           return;
         }
-        setPollingCount(prev => {
-          const next = prev + 1;
-          if (next >= MAX_POLLING_RETRIES) {
-            clearTimer();
-            message.error('生成超时，请重试');
-            setStep(0);
-            return 0;
-          }
-          timerRef.current = setTimeout(poll, 2000);
-          return next;
-        });
+        count += 1;
+        if (count >= MAX_POLLING_RETRIES) {
+          clearTimer();
+          message.error('生成超时，请重试');
+          setStep(0);
+          return;
+        }
+        setPollingCount(count);
+        timerRef.current = setTimeout(poll, 2000);
       } catch {
-        setPollingCount(prev => {
-          const next = prev + 1;
-          if (next >= MAX_POLLING_RETRIES) {
-            clearTimer();
-            message.error('生成超时，请重试');
-            setStep(0);
-            return 0;
-          }
-          timerRef.current = setTimeout(poll, 2000);
-          return next;
-        });
+        if (generation !== pollGenerationRef.current) return;
+        count += 1;
+        if (count >= MAX_POLLING_RETRIES) {
+          clearTimer();
+          message.error('生成超时，请重试');
+          setStep(0);
+          return;
+        }
+        setPollingCount(count);
+        timerRef.current = setTimeout(poll, 2000);
       }
     };
     timerRef.current = setTimeout(poll, 1000);

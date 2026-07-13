@@ -582,7 +582,23 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
         .forEach(r => selectedItems.push(toDeleteTarget(r)));
     }
     if (selectedItems.length === 0) return;
-    const task = await taskApi.createBatchDeleteLowVersionsTask(selectedItems, deleteFiles, mainThreshold, detailThreshold);
+    // Use thresholds from the scan task (not the live form inputs) so revalidation
+    // matches the results the user selected after scanning.
+    let scanMainThreshold = mainThreshold;
+    let scanDetailThreshold = detailThreshold;
+    try {
+      const scanTask = await taskApi.getTask(lowTaskId);
+      const params = typeof scanTask.params_json === 'string'
+        ? JSON.parse(scanTask.params_json || '{}')
+        : (scanTask as unknown as { params?: Record<string, number> }).params || {};
+      if (typeof params.main_threshold === 'number') scanMainThreshold = params.main_threshold;
+      if (typeof params.detail_threshold === 'number') scanDetailThreshold = params.detail_threshold;
+    } catch {
+      // fall back to form thresholds
+    }
+    const task = await taskApi.createBatchDeleteLowVersionsTask(
+      selectedItems, deleteFiles, scanMainThreshold, scanDetailThreshold,
+    );
     deletePolling.startPolling(task.id);
   };
 
