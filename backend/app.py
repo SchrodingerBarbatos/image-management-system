@@ -10,7 +10,6 @@ except ImportError:
     tkinter = None
 from flask import Flask, send_from_directory
 from flask_cors import CORS
-from config import DB_PATH
 from models import Base, engine, session
 
 IS_PACKAGED = getattr(sys, 'frozen', False)
@@ -660,7 +659,7 @@ def _bootstrap_runtime():
     If enabling auth_state cannot be persisted, abort startup so we never
     listen while marker is still false (would fail-open after config loss).
     """
-    from config import migrate_auth_state_from_config, AuthStateError
+    from config import migrate_auth_state_from_config
     result = migrate_auth_state_from_config()
     if result == 'failed':
         logging.getLogger(__name__).critical(

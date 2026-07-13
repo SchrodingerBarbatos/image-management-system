@@ -67,13 +67,13 @@ def _write_persisted_token_enabled(enabled: bool):
 
     On failure when enabling (enabled=True), sets process-level
     _auth_persist_failed so get_api_token fail-closes even if the on-disk
-    marker is still false/missing.
+    marker is still false/missing. Any later successful state write clears
+    the latch because disk state is synchronized again.
     """
     global _auth_persist_failed
     try:
         _atomic_write_json(AUTH_STATE_PATH, {'token_enabled': bool(enabled)})
-        if enabled:
-            _auth_persist_failed = False
+        _auth_persist_failed = False
     except Exception as e:
         _log.error("Failed to write auth_state.json: %s", e)
         if enabled:

@@ -247,6 +247,30 @@ def test_save_config_enable_write_failure_raises(conf, monkeypatch):
     assert conf._auth_persist_failed is True
 
 
+def test_successful_disable_clears_enable_write_failure_latch(conf, monkeypatch):
+    """A recovered marker write must allow intentional open mode immediately."""
+    conf.save_config({"api_token": ""})
+    real_atomic_write_json = conf._atomic_write_json
+
+    def fail_enabled_state(path, payload):
+        if path == conf.AUTH_STATE_PATH and payload.get("token_enabled") is True:
+            raise OSError("disk temporarily unavailable")
+        return real_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(conf, "_atomic_write_json", fail_enabled_state)
+    with pytest.raises(conf.AuthStateError):
+        conf.save_config({"api_token": "cannot-persist"})
+    assert conf._auth_persist_failed is True
+
+    monkeypatch.setattr(conf, "_atomic_write_json", real_atomic_write_json)
+    conf.save_config({"api_token": ""})
+
+    assert conf._auth_persist_failed is False
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is False
+    assert conf.get_api_token() == ("", False)
+
+
 def test_load_config_with_token_does_not_write_auth_state(conf):
     """Reading a config that contains a token must not create/enable auth_state."""
     # Write config file directly without going through save_config
@@ -269,4 +293,3 @@ def test_only_save_config_enables_persisted_flag(conf):
     assert os.path.exists(conf.AUTH_STATE_PATH)
     with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
         assert json.load(f)["token_enabled"] is True
-
