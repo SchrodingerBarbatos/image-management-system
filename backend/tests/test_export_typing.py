@@ -1,6 +1,12 @@
 """Unit tests for O(n) ZIP entry typing / barcode attribution helpers."""
 
-from routes.export import _build_typed_zip_entries, _index_img_data_by_path, _plan_zip_entries
+from routes.export import (
+    _build_typed_zip_entries,
+    _index_img_data_by_path,
+    _plan_zip_entries,
+    _accumulate_written_counts,
+    _merge_actual_into_planned,
+)
 
 
 def test_index_img_data_by_path_is_dict():
@@ -79,13 +85,11 @@ def test_typed_entries_no_nested_scan_structure():
     entries, _ = _plan_zip_entries(img_data, flat=True, export_type="all")
     typed = _build_typed_zip_entries(entries, img_data, export_type="all")
     assert len(typed) == n
-    # Spot-check last entry
     assert typed[-1][3] == f"BC{(n - 1) % 100}"
     assert typed[-1][4] in ("main", "detail")
 
 
-def test_actual_count_overlay_partial_missing():
-    """Only successfully written paths contribute to counts (caller logic)."""
+def test_accumulate_written_counts_partial_missing():
     img_data = [
         ("/ok/1.jpg", "X", "main", 1, "jpg", 1),
         ("/missing/2.jpg", "X", "main", 2, "jpg", 1),
@@ -93,10 +97,27 @@ def test_actual_count_overlay_partial_missing():
     ]
     entries, _ = _plan_zip_entries(img_data, flat=False, export_type="all")
     typed = _build_typed_zip_entries(entries, img_data, export_type="all")
-    # Simulate write success only for paths under /ok/
-    actual = {}
-    for file_path, _arc, _rid, barcode, report_type in typed:
-        if file_path.startswith("/ok/") and barcode:
-            actual.setdefault(barcode, {"main": 0, "detail": 0})
-            actual[barcode][report_type] += 1
+    actual = _accumulate_written_counts(typed, {"/ok/1.jpg", "/ok/3.jpg"})
     assert actual == {"X": {"main": 1, "detail": 0}, "Y": {"main": 0, "detail": 1}}
+
+
+def test_merge_actual_into_planned_keeps_zeros_for_unwritten():
+    planned = {"A": {"main": 2, "detail": 1}, "B": {"main": 0, "detail": 3}}
+    actual = {"A": {"main": 1, "detail": 0}}
+    merged = _merge_actual_into_planned(planned, actual)
+    assert merged == {
+        "A": {"main": 1, "detail": 0},
+        "B": {"main": 0, "detail": 0},
+    }
+
+
+def test_detail_fallback_accumulate_as_detail():
+    img_data = [
+        ("/b/m1.jpg", "B", "main", 1, "jpg", 1),
+        ("/b/m2.jpg", "B", "main", 2, "jpg", 1),
+    ]
+    entries, fallback = _plan_zip_entries(img_data, flat=False, export_type="detail")
+    assert fallback == ["B"]
+    typed = _build_typed_zip_entries(entries, img_data, export_type="detail")
+    actual = _accumulate_written_counts(typed, {"/b/m1.jpg", "/b/m2.jpg"})
+    assert actual == {"B": {"main": 0, "detail": 2}}

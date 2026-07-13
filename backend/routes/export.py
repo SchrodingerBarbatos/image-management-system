@@ -258,6 +258,30 @@ def _build_typed_zip_entries(entries, img_data, export_type='all'):
     return typed
 
 
+def _accumulate_written_counts(typed_entries, written_paths):
+    """Pure helper: from typed entries + set of successfully written paths,
+    return {barcode: {main, detail}} actual counts. O(n)."""
+    actual = {}
+    written = set(written_paths)
+    for file_path, _arcname, _root_id, barcode, report_type in typed_entries:
+        if file_path not in written or not barcode:
+            continue
+        actual.setdefault(barcode, {'main': 0, 'detail': 0})
+        if report_type in ('main', 'detail'):
+            actual[barcode][report_type] += 1
+    return actual
+
+
+def _merge_actual_into_planned(prev_barcodes, actual_counts):
+    """Start from planned zeros (all known barcodes), overlay actual written."""
+    final = {bc: {'main': 0, 'detail': 0} for bc in (prev_barcodes or {})}
+    for bc, c in (actual_counts or {}).items():
+        final.setdefault(bc, {'main': 0, 'detail': 0})
+        final[bc]['main'] = c.get('main', 0)
+        final[bc]['detail'] = c.get('detail', 0)
+    return final
+
+
 def _build_zip(task_id, img_data, flat, export_type='all'):
     """Build ZIP file in a background thread, updating task progress.
 
@@ -295,7 +319,7 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
 
         written = 0
         progress = 0
-        actual_counts = {}  # barcode -> {main, detail} based on successful writes
+        written_paths = []
 
         # Path confinement: file must live under ITS OWN enabled ScanRoot
         # (not any root). Uses realpath/commonpath via is_path_under_root.
@@ -314,7 +338,6 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             ok, _ = is_path_under_root(fp, root.path)
             return ok
 
-        # O(n) path → meta index (no nested scan of img_data per entry)
         typed_entries = _build_typed_zip_entries(entries, img_data, export_type)
 
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
@@ -322,10 +345,7 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
                 if os.path.exists(file_path) and _allowed_for_root(file_path, root_id):
                     zf.write(file_path, arcname)
                     written += 1
-                    if barcode:
-                        actual_counts.setdefault(barcode, {'main': 0, 'detail': 0})
-                        if report_type in ('main', 'detail'):
-                            actual_counts[barcode][report_type] += 1
+                    written_paths.append(file_path)
                 elif os.path.exists(file_path):
                     _log.warning(
                         "_build_zip: skip path not under own enabled root "
@@ -340,7 +360,6 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             _log.info("_build_zip task %s: %d barcodes used main images as detail fallback",
                       task_id, len(fallback_barcodes))
 
-        # Always finalize progress to planned total so UI never sticks < 100%
         task.progress = total
         skipped = total - written
         if written == 0:
@@ -354,18 +373,11 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
         else:
             task.status = 'done'
 
-        # Persist structured payload: barcodes = actual written counts; stats separate
         prev_barcodes, _ = _parse_export_payload(task.barcode_data) if task.barcode_data else ({}, {})
         if prev_barcodes is None:
             prev_barcodes = {}
-        # Start from planned zeros, overlay actual written
-        final_barcodes = {
-            bc: {'main': 0, 'detail': 0} for bc in prev_barcodes
-        }
-        for bc, c in actual_counts.items():
-            final_barcodes.setdefault(bc, {'main': 0, 'detail': 0})
-            final_barcodes[bc]['main'] = c.get('main', 0)
-            final_barcodes[bc]['detail'] = c.get('detail', 0)
+        actual_counts = _accumulate_written_counts(typed_entries, written_paths)
+        final_barcodes = _merge_actual_into_planned(prev_barcodes, actual_counts)
         task.barcode_data = json.dumps({
             'barcodes': final_barcodes,
             'stats': {

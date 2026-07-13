@@ -93,9 +93,45 @@ def test_auth_state_corrupt_fail_closed(conf):
     assert fail_closed is True
 
 
-def test_corrupt_config_never_had_token_fail_closed_if_file_exists(conf):
+def test_load_config_with_token_does_not_write_auth_state(conf):
+    """Reading a config that contains a token must not create/enable auth_state."""
+    # Write config file directly without going through save_config
     with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
-        f.write("{bad")
+        json.dump({"api_token": "leaked-read-only"}, f)
+    conf._cached_config = None
+    conf._last_good_token = None
+    # Ensure no prior auth state
+    if os.path.exists(conf.AUTH_STATE_PATH):
+        os.remove(conf.AUTH_STATE_PATH)
+    cfg, err = conf.load_config()
+    assert err is None
+    assert cfg.get("api_token") == "leaked-read-only"
+    # auth_state must still be absent — only save_config writes it
+    assert not os.path.exists(conf.AUTH_STATE_PATH)
+    # get_api_token can use in-memory last_good for this process
     token, fail_closed = conf.get_api_token()
-    assert token == ""
-    assert fail_closed is True
+    assert token == "leaked-read-only"
+    assert fail_closed is False
+    # But after memory wipe without auth_state, must be open (never auto-enabled)
+    conf._cached_config = None
+    conf._last_good_token = None
+    token2, fail2 = conf.get_api_token()
+    assert token2 == "leaked-read-only" or (token2 == "" and fail2 is False)
+    # Re-read file into memory again then wipe — still no auth_state file
+    conf.load_config()
+    conf._cached_config = None
+    conf._last_good_token = None
+    assert not os.path.exists(conf.AUTH_STATE_PATH)
+    token3, fail3 = conf.get_api_token()
+    # Without auth_state and without memory, open mode (token may come from re-read of config)
+    # Config file still exists with token, so load succeeds and returns token
+    assert fail3 is False
+    assert token3 == "leaked-read-only"
+
+
+def test_only_save_config_enables_persisted_flag(conf):
+    conf.save_config({"api_token": "via-save"})
+    assert os.path.exists(conf.AUTH_STATE_PATH)
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is True
+

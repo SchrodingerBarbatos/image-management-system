@@ -89,8 +89,9 @@ def load_config():
     """Load app config from JSON file.
 
     Returns (config_dict, error_string).
-    - Missing file is not an error (first-run open mode) unless auth was enabled.
+    - Missing file is not an error (first-run open mode).
     - Parse/read failure returns last good config when available, with err set.
+    - Never writes auth_state.json (only save_config mutates enable flag).
     """
     global _cached_config, _last_good_token
     try:
@@ -101,17 +102,9 @@ def load_config():
         _cached_config = dict(cfg)
         raw = cfg.get('api_token')
         if raw:
+            # Cache token for this process only — do NOT write auth_state here.
+            # Enable/disable is intentional via save_config only.
             _last_good_token = str(raw)
-            # Keep persisted flag in sync on successful load of a non-empty token
-            try:
-                _write_persisted_token_enabled(True)
-            except Exception:
-                pass  # memory still holds token; flag write is best-effort here
-        else:
-            # Successful read of empty/missing token — intentional open mode.
-            # Do NOT clear persisted flag here unless save_config did it;
-            # a partial/legacy config without api_token key should not disable auth.
-            pass
         return cfg, None
     except FileNotFoundError:
         if _last_good_token:
