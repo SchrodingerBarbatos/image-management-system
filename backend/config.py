@@ -98,14 +98,19 @@ def _read_persisted_token_enabled():
 
 
 def migrate_auth_state_from_config():
-    """One-shot startup migration: if auth_state is absent and app_config has a
-    non-empty api_token (legacy / hand-edited config), write token_enabled=true.
+    """Startup reconcile of auth_state with app_config (safe every boot).
 
-    Safe to call every boot — no-ops when AUTH_STATE_PATH already exists.
-    Does not run inside load_config (avoids side effects on every read).
+    Rules (only when app_config is readable JSON object):
+    - Key ``api_token`` present and non-empty → ensure token_enabled=true
+    - Key ``api_token`` present and empty → ensure token_enabled=false
+    - Key ``api_token`` absent → leave marker unchanged (do not auto-disable)
+    - Config missing/corrupt → leave marker unchanged (never write false)
+
+    Covers:
+    - Legacy first boot: no marker + hand-edited non-empty token → create true
+    - Re-enable after disable: marker false + hand-edit non-empty token → true
+    - Explicit open: marker true + hand-edit empty token → false
     """
-    if os.path.exists(AUTH_STATE_PATH):
-        return False
     try:
         if not os.path.exists(CONFIG_PATH):
             return False
@@ -113,19 +118,35 @@ def migrate_auth_state_from_config():
             cfg = json.load(f)
         if not isinstance(cfg, dict):
             return False
+        # Only act when the field is explicitly present in config.
+        if 'api_token' not in cfg:
+            return False
         raw = cfg.get('api_token')
-        if raw:
-            _write_persisted_token_enabled(True)
-            _log.info(
-                "auth_state migration: token found in app_config.json, "
-                "wrote token_enabled=true",
-            )
-            return True
-        return False
+        desired = bool(raw)  # non-empty string → True; "" / None → False
+        current = _read_persisted_token_enabled()
+        # current is True/False/None; None means no file (or corrupt→True).
+        # If corrupt, _read returns True — only rewrite when desired differs
+        # and we have an explicit config field.
+        if current is desired:
+            return False
+        # Avoid rewriting when current is True due to corrupt file and desired
+        # is True — already matched. When current is True (corrupt) and desired
+        # is False, rewrite to explicit false is intentional hand-clear.
+        if current is True and desired is True and not os.path.exists(AUTH_STATE_PATH):
+            # No file but read returned True? shouldn't happen; treat as create.
+            pass
+        _write_persisted_token_enabled(desired)
+        _log.info(
+            "auth_state reconcile: api_token %s → wrote token_enabled=%s "
+            "(was %s)",
+            'set' if desired else 'empty',
+            desired,
+            current,
+        )
+        return True
     except Exception as e:
-        # Fail closed for subsequent get_api_token if config is unreadable but
-        # present — do not create a false "disabled" marker.
-        _log.error("auth_state migration skipped: %s", e)
+        # Fail closed: do not create a false "disabled" marker on bad config.
+        _log.error("auth_state reconcile skipped: %s", e)
         return False
 
 

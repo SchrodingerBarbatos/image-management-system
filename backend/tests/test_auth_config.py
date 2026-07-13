@@ -149,13 +149,46 @@ def test_migrate_auth_state_from_legacy_config(conf):
     assert fail_closed is True
 
 
-def test_migrate_is_noop_when_auth_state_exists(conf):
-    conf.save_config({"api_token": ""})  # creates token_enabled=false
+def test_reconcile_reenables_when_marker_false_and_token_set(conf):
+    """marker=false then hand-edit non-empty token → sync true; config loss fail-closed."""
+    conf.save_config({"api_token": ""})  # token_enabled=false
     with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump({"api_token": "should-not-override"}, f)
-    assert conf.migrate_auth_state_from_config() is False
+        json.dump({"api_token": "re-enabled-secret"}, f)
+    assert conf.migrate_auth_state_from_config() is True
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is True
+    # Config deleted + memory wipe → must fail-closed
+    os.remove(conf.CONFIG_PATH)
+    conf._cached_config = None
+    conf._last_good_token = None
+    token, fail_closed = conf.get_api_token()
+    assert token == ""
+    assert fail_closed is True
+
+
+def test_reconcile_disables_when_marker_true_and_token_empty(conf):
+    """marker=true then hand-edit empty token → sync false; restart open mode."""
+    conf.save_config({"api_token": "was-on"})
+    with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"api_token": ""}, f)
+    assert conf.migrate_auth_state_from_config() is True
     with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
         assert json.load(f)["token_enabled"] is False
+    conf._cached_config = None
+    conf._last_good_token = None
+    token, fail_closed = conf.get_api_token()
+    assert token == ""
+    assert fail_closed is False
+
+
+def test_reconcile_noop_when_api_token_key_absent(conf):
+    """Config without api_token key must not flip an existing marker."""
+    conf.save_config({"api_token": "keep-enabled"})
+    with open(conf.CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"debug_mode": True}, f)  # no api_token field
+    assert conf.migrate_auth_state_from_config() is False
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is True
 
 
 def test_migrate_noop_when_no_token_in_config(conf):
@@ -163,6 +196,13 @@ def test_migrate_noop_when_no_token_in_config(conf):
         json.dump({"debug_mode": True}, f)
     assert conf.migrate_auth_state_from_config() is False
     assert not os.path.exists(conf.AUTH_STATE_PATH)
+
+
+def test_reconcile_noop_when_already_in_sync(conf):
+    conf.save_config({"api_token": "same"})
+    assert conf.migrate_auth_state_from_config() is False
+    with open(conf.AUTH_STATE_PATH, encoding="utf-8") as f:
+        assert json.load(f)["token_enabled"] is True
 
 
 def test_load_config_with_token_does_not_write_auth_state(conf):
