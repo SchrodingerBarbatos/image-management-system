@@ -2,7 +2,19 @@ import os, sys, uuid, zipfile, datetime, threading, logging, traceback, re, json
 from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook, Workbook
 from models import session, Image, ExportTask, ScanRoot, BarcodeSetting, ImageVersion
-from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS
+from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS, XLSX_TTL_HOURS
+
+
+def _xlsx_dir():
+    d = os.path.join(UPLOAD_DIR, 'xlsx')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _zip_dir():
+    d = os.path.join(UPLOAD_DIR, 'zips')
+    os.makedirs(d, exist_ok=True)
+    return d
 
 export_bp = Blueprint('export', __name__)
 _log = logging.getLogger(__name__)
@@ -225,7 +237,7 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             task.status = 'done'
             task.total_images = 0
             task.progress = 0
-            zip_path = os.path.join(UPLOAD_DIR, f'export_{task_id}.zip')
+            zip_path = os.path.join(_zip_dir(), f'export_{task_id}.zip')
             task.zip_path = zip_path
             with zipfile.ZipFile(zip_path, 'w'):
                 pass
@@ -236,7 +248,7 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
         sess.commit()
 
         zip_name = f'export_{task_id}.zip'
-        zip_path = os.path.join(UPLOAD_DIR, zip_name)
+        zip_path = os.path.join(_zip_dir(), zip_name)
         task.zip_path = zip_path
         sess.commit()
 
@@ -287,16 +299,30 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
 
         # Always finalize progress to planned total so UI never sticks < 100%
         task.progress = total
-        # Keep total_images as planned entry count (set earlier); surface written via log
+        # Keep total_images as planned entry count; surface written/skipped in message
+        skipped = total - written
         if written == 0:
-            _log.warning("_build_zip task %s: all %d files missing from disk", task_id, total)
+            _log.warning("_build_zip task %s: all %d files missing/skipped", task_id, total)
             task.status = 'failed'
-            task.error_message = '所有匹配的图片文件均不存在（可能已被移动或删除）'
+            task.error_message = '所有匹配的图片文件均不存在或不在所属扫描目录下'
+        elif written < total:
+            task.status = 'partial_failed'
+            task.error_message = f'实际写入 {written} / 计划 {total}（跳过 {skipped}）'
+            _log.info("_build_zip task %s: partial_failed wrote %d/%d", task_id, written, total)
         else:
             task.status = 'done'
-            if written < total:
-                _log.info("_build_zip task %s: wrote %d/%d entries (missing files skipped)",
-                          task_id, written, total)
+        # Persist written count for UI (barcode_data remains planned report)
+        try:
+            meta = json.loads(task.barcode_data) if task.barcode_data else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        if isinstance(meta, dict):
+            meta['__export_stats'] = {
+                'planned_count': total,
+                'written_count': written,
+                'skipped_count': skipped,
+            }
+            task.barcode_data = json.dumps(meta, ensure_ascii=False)
         sess.commit()
     except Exception as e:
         _log.error("_build_zip task %s failed:\n%s", task_id, traceback.format_exc())
@@ -331,16 +357,19 @@ def upload_excel():
         return jsonify({'error': '文件大小不能超过 10MB'}), 400
 
     upload_id = uuid.uuid4().hex[:12]
-    upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
-    file.save(upload_path)
-
-    # Parse workbook — delegate to helper so we can guarantee cleanup.
-    data, error = _parse_excel(upload_path)
-    if error:
+    upload_path = os.path.join(_xlsx_dir(), f'{upload_id}.xlsx')
+    try:
+        file.save(upload_path)
+            # Parse workbook — delete source on any failure
+        data, error = _parse_excel(upload_path)
+        if error:
+            _safe_remove(upload_path)
+            return jsonify({'error': error}), 400
+        return jsonify({**data, 'upload_id': upload_id})
+    except Exception as e:
         _safe_remove(upload_path)
-        return jsonify({'error': error}), 400
-
-    return jsonify({**data, 'upload_id': upload_id})
+        _log.exception("upload_excel failed: %s", e)
+        return jsonify({'error': '上传处理失败'}), 500
 
 
 def _parse_excel(upload_path):
@@ -410,12 +439,17 @@ def generate_zip():
     except ValueError:
         return jsonify({'error': f'invalid column letter: {col_letter}'}), 400
 
-    # Read barcodes from Excel
-    upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
-    # Resolve real path and ensure it stays within UPLOAD_DIR
+    # Read barcodes from Excel (xlsx subdir preferred, legacy flat path fallback)
+    upload_path = os.path.join(_xlsx_dir(), f'{upload_id}.xlsx')
+    if not os.path.isfile(upload_path):
+        upload_path = os.path.join(UPLOAD_DIR, f'{upload_id}.xlsx')
+    # Resolve real path and ensure it stays within UPLOAD_DIR tree
     real_upload = os.path.realpath(upload_path)
     real_upload_dir = os.path.realpath(UPLOAD_DIR)
-    if os.path.commonpath([real_upload, real_upload_dir]) != real_upload_dir:
+    try:
+        if os.path.commonpath([real_upload, real_upload_dir]) != real_upload_dir:
+            return jsonify({'error': 'invalid upload_id'}), 400
+    except ValueError:
         return jsonify({'error': 'invalid upload_id'}), 400
     if not os.path.isfile(real_upload):
         return jsonify({'error': 'upload file not found'}), 404
@@ -423,27 +457,30 @@ def generate_zip():
     try:
         wb = load_workbook(real_upload, read_only=True)
     except Exception:
+        _safe_remove(real_upload)
         return jsonify({'error': '无法解析 Excel 文件'}), 400
 
-    if sheet_name and sheet_name not in wb.sheetnames:
-        wb.close()
-        return jsonify({'error': f'工作表 "{sheet_name}" 不存在'}), 400
+    try:
+        if sheet_name and sheet_name not in wb.sheetnames:
+            return jsonify({'error': f'工作表 "{sheet_name}" 不存在'}), 400
 
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
-    # Get header row to validate column index
-    header_row = next(ws.iter_rows(min_row=1, max_row=1))
-    if col_idx >= len(header_row):
-        wb.close()
-        return jsonify({'error': f'列索引 {col_letter}({col_idx}) 超出表头范围(共 {len(header_row)} 列)'}), 400
+        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+        # Get header row to validate column index
+        header_row = next(ws.iter_rows(min_row=1, max_row=1))
+        if col_idx >= len(header_row):
+            return jsonify({'error': f'列索引 {col_letter}({col_idx}) 超出表头范围(共 {len(header_row)} 列)'}), 400
 
-    barcodes_raw = []
-    for row in ws.iter_rows(min_row=2):
-        if col_idx >= len(row):
-            continue
-        val = str(row[col_idx].value).strip() if row[col_idx].value else ''
-        if val:
-            barcodes_raw.append(val)
-    wb.close()
+        barcodes_raw = []
+        for row in ws.iter_rows(min_row=2):
+            if col_idx >= len(row):
+                continue
+            val = str(row[col_idx].value).strip() if row[col_idx].value else ''
+            if val:
+                barcodes_raw.append(val)
+    finally:
+        wb.close()
+        # Source xlsx no longer needed after barcodes are in memory
+        _safe_remove(real_upload)
 
     if selected:
         selected_set = set(selected)
@@ -506,7 +543,24 @@ def export_progress(task_id):
     task = session.get(ExportTask, task_id)
     if not task:
         return jsonify({'error': 'not found'}), 404
-    return jsonify({'status': task.status, 'progress': task.progress, 'total': task.total_images, 'error_message': task.error_message})
+    written = None
+    planned = task.total_images
+    try:
+        meta = json.loads(task.barcode_data) if task.barcode_data else {}
+        stats = meta.get('__export_stats') if isinstance(meta, dict) else None
+        if isinstance(stats, dict):
+            written = stats.get('written_count')
+            planned = stats.get('planned_count', planned)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return jsonify({
+        'status': task.status,
+        'progress': task.progress,
+        'total': task.total_images,
+        'planned_count': planned,
+        'written_count': written,
+        'error_message': task.error_message,
+    })
 
 
 @export_bp.route('/export/tasks')
@@ -634,6 +688,8 @@ def reset_stale_processing():
 
 def cleanup_old_exports():
     """Remove export tasks and their files older than ZIP_CLEANUP_HOURS.
+    Also purge orphaned xlsx under EXPORT_XLSX_DIR older than XLSX_TTL_HOURS
+    and leftover zip files without a task row.
     Processing tasks are skipped (they should already have been handled by
     reset_stale_processing)."""
     with _export_lock:
@@ -652,3 +708,43 @@ def cleanup_old_exports():
         if old_tasks:
             session.commit()
             _log.info("Cleaned up %d old export tasks", len(old_tasks))
+
+    # TTL cleanup for source xlsx (success path deletes after barcode read;
+    # this covers abandoned uploads)
+    xlsx_cutoff = datetime.datetime.now() - datetime.timedelta(hours=XLSX_TTL_HOURS)
+    for directory in (_xlsx_dir(), UPLOAD_DIR):
+        try:
+            for name in os.listdir(directory):
+                if not name.endswith('.xlsx'):
+                    continue
+                path = os.path.join(directory, name)
+                try:
+                    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+                    if mtime < xlsx_cutoff:
+                        os.remove(path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    # Orphan zips under zips/ with no matching task
+    try:
+        known = {
+            os.path.realpath(t.zip_path)
+            for t in session.query(ExportTask).filter(ExportTask.zip_path != '').all()
+            if t.zip_path
+        }
+        zip_dir = _zip_dir()
+        for name in os.listdir(zip_dir):
+            if not name.endswith('.zip'):
+                continue
+            path = os.path.realpath(os.path.join(zip_dir, name))
+            if path not in known:
+                try:
+                    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+                    if mtime < cutoff:
+                        os.remove(path)
+                except OSError:
+                    pass
+    except OSError:
+        pass

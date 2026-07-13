@@ -337,7 +337,7 @@ def _task_to_dict(task):
         d['speed'] = 0
         d['eta_seconds'] = 0
     # 完成信息（所有终态任务都计算耗时）
-    if task.status in ('done', 'error', 'interrupted', 'cancelled') and task.started_at and task.finished_at:
+    if task.status in ('done', 'partial_failed', 'error', 'interrupted', 'cancelled') and task.started_at and task.finished_at:
         try:
             started = datetime.datetime.fromisoformat(task.started_at)
             finished = datetime.datetime.fromisoformat(task.finished_at)

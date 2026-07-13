@@ -1,21 +1,13 @@
 import React, { useState } from 'react';
-import { Tag, Space, Button, Progress, Spin, Typography, message } from 'antd';
+import { Tag, Space, Button, Progress, Typography, message } from 'antd';
 import { BatchTaskInfo, taskApi } from '../services/api';
 import { fmtEta } from '../utils/format';
+import { BATCH_STATUS_LABELS, isBatchTerminalStatus } from '../utils/taskStatus';
 
 const { Text } = Typography;
 
-const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
-  queued: { color: 'default', label: '排队中' },
-  running: { color: 'processing', label: '运行中' },
-  done: { color: 'success', label: '已完成' },
-  error: { color: 'error', label: '失败' },
-  cancelled: { color: 'warning', label: '已取消' },
-  interrupted: { color: 'error', label: '中断' },
-};
-
 export function TaskStatusBadge({ status }: { status: string }) {
-  const cfg = STATUS_CONFIG[status] || { color: 'default', label: status };
+  const cfg = BATCH_STATUS_LABELS[status] || { color: 'default', label: status };
   return <Tag color={cfg.color}>{cfg.label}</Tag>;
 }
 
@@ -38,14 +30,20 @@ export function TaskProgress({ task }: { task: BatchTaskInfo }) {
       </div>
     );
   }
-  if (task.status === 'done') {
+  if (task.status === 'done' || task.status === 'partial_failed') {
     const elapsed = task.elapsed_seconds;
     const failed = task.failed_count || 0;
+    const isPartial = task.status === 'partial_failed';
     return (
       <div>
-        <Text type="success">
-          完成（成功 {task.result_count} 条）
-          {failed > 0 && <Text type="danger">，失败 {failed} 条</Text>}
+        <Text type={isPartial ? 'warning' : 'success'}>
+          {isPartial ? '部分完成' : '完成'}（成功 {task.result_count} 条）
+          {(failed > 0 || isPartial) && (
+            <Text type="danger">
+              {failed > 0 ? `，失败 ${failed} 条` : ''}
+              {isPartial && task.error_message ? `：${task.error_message}` : ''}
+            </Text>
+          )}
           {elapsed > 0 && `，耗时 ${elapsed}秒`}
         </Text>
         {failed > 0 && task.failed_items && task.failed_items.length > 0 && (
@@ -109,10 +107,10 @@ export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDelet
             border: '1px solid #f0f0f0',
             borderRadius: 4,
             background: task.id === selectedTaskId ? '#e6f7ff' : undefined,
-            cursor: ['done', 'error', 'interrupted', 'cancelled'].includes(task.status) ? 'pointer' : 'default',
+            cursor: isBatchTerminalStatus(task.status) ? 'pointer' : 'default',
           }}
           onClick={() => {
-            if (['done', 'error', 'interrupted', 'cancelled'].includes(task.status)) {
+            if (isBatchTerminalStatus(task.status)) {
               onSelectTask(task.id);
             }
           }}
@@ -130,7 +128,7 @@ export const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, onDelet
                   取消
                 </Button>
               )}
-              {['done', 'error', 'interrupted', 'cancelled'].includes(task.status) && (
+              {isBatchTerminalStatus(task.status) && (
                 <Button size="small" danger type="link" onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}>
                   删除记录
                 </Button>

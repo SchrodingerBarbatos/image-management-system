@@ -117,7 +117,7 @@ def _wait_for_task(client, task_id, timeout=10):
     while time.time() - start < timeout:
         resp = client.get(f'/api/tasks/{task_id}')
         data = resp.get_json()
-        if data['status'] in ('done', 'error', 'cancelled', 'interrupted'):
+        if data['status'] in ('done', 'partial_failed', 'error', 'cancelled', 'interrupted'):
             return data
         time.sleep(0.1)
     return data

@@ -896,7 +896,7 @@ def _run_batch_delete_duplicate_versions(task_id):
 def _run_hash_backfill(task_id):
     """Background handler for hash_backfill tasks.
     Scans active images where phash or content_md5 is empty,
-    generates thumbnail/hash for each, reports progress."""
+    generates thumbnail/hash for each, reports progress and failures."""
     _log.info("Starting hash_backfill task %d", task_id)
 
     sess = _get_thread_session()
@@ -940,21 +940,35 @@ def _run_hash_backfill(task_id):
             file_path = img.file_path
             if not file_path or not os.path.exists(file_path):
                 fail_count += 1
+                update_task_progress(
+                    task_id, failed_count=fail_count,
+                    failed_item={'file': file_path or f'image_id={img.id}', 'reason': '文件不存在'},
+                )
                 continue
 
             # Generate thumbnail + compute MD5 + pHash
-            _, md5, phash = generate_thumbnail(img.id, file_path)
-            if md5:
-                md5_updates[img.id] = md5
-            if phash:
-                phash_updates[img.id] = phash
-            # Count success only when both hashes are present
-            if md5 and phash:
-                success_count += 1
-            elif md5:
-                # Got MD5 but pHash failed — still partial success
-                success_count += 1
-                _log.warning("hash_backfill: image %d got MD5 but no pHash", img.id)
+            ok, md5, phash = generate_thumbnail(img.id, file_path)
+            if not ok and not md5 and not phash:
+                fail_count += 1
+                update_task_progress(
+                    task_id, failed_count=fail_count,
+                    failed_item={'file': file_path, 'reason': '缩略图/哈希生成失败'},
+                )
+            else:
+                if md5:
+                    md5_updates[img.id] = md5
+                if phash:
+                    phash_updates[img.id] = phash
+                if md5 or phash:
+                    success_count += 1
+                    if md5 and not phash:
+                        _log.warning("hash_backfill: image %d got MD5 but no pHash", img.id)
+                else:
+                    fail_count += 1
+                    update_task_progress(
+                        task_id, failed_count=fail_count,
+                        failed_item={'file': file_path, 'reason': '未生成任何哈希'},
+                    )
 
             # Batch flush every 100 images
             if len(md5_updates) >= 100:
@@ -965,17 +979,33 @@ def _run_hash_backfill(task_id):
         except Exception as e:
             _log.warning("hash_backfill: failed for image %d: %s", img.id, e)
             fail_count += 1
+            update_task_progress(
+                task_id, failed_count=fail_count,
+                failed_item={'file': getattr(img, 'file_path', '') or f'image_id={img.id}',
+                             'reason': f'异常: {e}'},
+            )
 
         if (i + 1) % 100 == 0:
-            update_task_progress(task_id, progress=i + 1, total=total)
+            update_task_progress(task_id, progress=i + 1, total=total, result_count=success_count)
 
     # Final flush
     if md5_updates or phash_updates:
         _flush_hash_updates_core(md5_updates, phash_updates, sess=sess)
 
     sess.commit()
-    update_task_progress(task_id, progress=total, total=total, result_count=success_count)
-    finish_task(task_id, result_count=success_count)
+    update_task_progress(task_id, progress=total, total=total, result_count=success_count,
+                         failed_count=fail_count)
+    if fail_count == 0:
+        finish_task(task_id, result_count=success_count)
+    elif success_count == 0:
+        finish_task(task_id, result_count=0, error_message=f'全部失败（{fail_count}/{total}）',
+                    status='error')
+    else:
+        finish_task(
+            task_id, result_count=success_count,
+            error_message=f'成功 {success_count}，失败 {fail_count} / 共 {total}',
+            status='partial_failed',
+        )
     _log.info("hash_backfill task %d done: %d success, %d failed out of %d",
               task_id, success_count, fail_count, total)
 
@@ -1723,18 +1753,51 @@ def change_keep_version(task_id):
 
 @batch_tasks_bp.route('/batch/delete-duplicate-versions/tasks', methods=['POST'])
 def create_batch_delete_duplicate_versions_task():
-    """Create an async task to hard-delete duplicate versions."""
+    """Create an async task to hard-delete duplicate versions.
+
+    Full precheck: all result_ids must belong to scan_task_id, be unique positive
+    ints, and currently have role=='clean'. Any mismatch aborts the whole batch.
+    """
     data = request.json or {}
     scan_task_id = data.get('scan_task_id')
     result_ids = data.get('result_ids', [])
     delete_files = bool(data.get('delete_files', False))
 
-    if not scan_task_id:
+    if not scan_task_id or not isinstance(scan_task_id, int) or scan_task_id < 1:
         return jsonify({'error': 'scan_task_id required'}), 400
 
     result_ids, err = _validate_result_ids(result_ids)
     if err:
         return err
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_ids = []
+    for rid in result_ids:
+        if rid not in seen:
+            seen.add(rid)
+            unique_ids.append(rid)
+    result_ids = unique_ids
+
+    scan_task = session.get(BatchTask, scan_task_id)
+    if not scan_task:
+        return jsonify({'error': 'scan_task_id not found'}), 404
+    if scan_task.task_type != 'duplicate_version_scan':
+        return jsonify({'error': 'scan_task_id is not a duplicate_version_scan task'}), 400
+
+    # Full precheck: requested set must equal clean results under this scan task
+    rows = session.query(DuplicateVersionScanResult).filter(
+        DuplicateVersionScanResult.task_id == scan_task_id,
+        DuplicateVersionScanResult.id.in_(result_ids),
+        DuplicateVersionScanResult.role == 'clean',
+    ).all()
+    found_ids = {r.id for r in rows}
+    missing = [rid for rid in result_ids if rid not in found_ids]
+    if missing:
+        return jsonify({
+            'error': 'result_ids 中包含无效/非 clean/不属于该扫描任务的 ID，已整批拒绝',
+            'invalid_ids': missing,
+        }), 400
 
     params = {
         'scan_task_id': scan_task_id,

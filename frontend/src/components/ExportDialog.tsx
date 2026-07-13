@@ -54,9 +54,16 @@ const ExportDialog: React.FC<Props> = ({ visible, onClose }) => {
         if (generation !== pollGenerationRef.current) return;
         setProgress(p.progress);
         setProgressTotal(p.total);
-        if (p.status === 'done') {
+        if (p.status === 'done' || p.status === 'partial_failed') {
           clearTimer();
           setStep(3);
+          if (p.status === 'partial_failed') {
+            const written = p.written_count ?? '?';
+            const planned = p.planned_count ?? p.total;
+            message.warning(
+              p.error_message || `部分导出：实际写入 ${written} / 计划 ${planned}`,
+            );
+          }
           return;
         }
         if (p.status === 'failed') {

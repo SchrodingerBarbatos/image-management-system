@@ -62,16 +62,23 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): UseTaskPoll
       } else {
         setPolling(false);
         if (task.status === 'done' || task.status === 'partial_failed') {
-          const msg = typeof successMessage === 'function'
-            ? successMessage(task)
-            : successMessage || (
-              task.status === 'partial_failed'
-                ? `任务部分完成（删除 ${task.result_count} 项）${task.error_message ? '：' + task.error_message : ''}`
-                : `任务完成，共处理 ${task.result_count} 项`
-            );
+          // partial_failed always surfaces error_message; custom successMessage
+          // must not hide failure details.
+          let msg: string;
           if (task.status === 'partial_failed') {
+            const base = typeof successMessage === 'function'
+              ? successMessage(task)
+              : `任务部分完成（成功 ${task.result_count} 项）`;
+            const detail = [
+              task.failed_count ? `失败 ${task.failed_count}` : '',
+              task.error_message || '',
+            ].filter(Boolean).join('；');
+            msg = detail ? `${base}：${detail}` : base;
             message.warning(msg);
           } else {
+            msg = typeof successMessage === 'function'
+              ? successMessage(task)
+              : successMessage || `任务完成，共处理 ${task.result_count} 项`;
             message.success(msg);
           }
           onComplete?.(task);

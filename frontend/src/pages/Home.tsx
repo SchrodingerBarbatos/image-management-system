@@ -130,8 +130,14 @@ const Home: React.FC = () => {
       const poll = async () => {
         try {
           const p = await exportApi.getProgress(res.task_id);
-          if (p.status === 'done') {
+          if (p.status === 'done' || p.status === 'partial_failed') {
             setBatchLoading(false);
+            if (p.status === 'partial_failed') {
+              message.warning(
+                p.error_message ||
+                `部分导出：实际写入 ${p.written_count ?? '?'} / 计划 ${p.planned_count ?? p.total}`,
+              );
+            }
             window.open(exportApi.downloadUrl(res.task_id), '_blank');
             return;
           }

@@ -87,9 +87,11 @@ def _optional_api_token_guard():
     Query-string tokens are rejected so secrets never land in URLs/logs.
 
     Safe methods (GET/HEAD/OPTIONS) are left open so thumbnails, original files,
-    ZIP/Excel downloads keep working without rewriting every media URL. Destructive
-    POST/PUT/PATCH/DELETE still require the token when configured.
-    Empty/missing token keeps backward-compatible open LAN access for local tools.
+    ZIP/Excel downloads keep working without rewriting every media URL.
+
+    Fail-closed: if the config file exists but is unreadable/corrupt and a token
+    cannot be resolved (including from cache), mutating requests are rejected
+    with 503 rather than treated as open.
     """
     from flask import request, jsonify
     import hmac
@@ -99,10 +101,12 @@ def _optional_api_token_guard():
     if request.method in ('GET', 'HEAD', 'OPTIONS'):
         return None
     try:
-        from config import load_config
-        token = (load_config() or {}).get('api_token') or ''
+        from config import get_api_token
+        token, fail_closed = get_api_token()
     except Exception:
-        token = ''
+        return jsonify({'error': '配置读取失败，拒绝修改操作'}), 503
+    if fail_closed and not token:
+        return jsonify({'error': '配置读取失败，拒绝修改操作'}), 503
     if not token:
         return None
     provided = request.headers.get('X-API-Token') or ''
@@ -110,7 +114,6 @@ def _optional_api_token_guard():
         auth = request.headers.get('Authorization') or ''
         if auth.lower().startswith('bearer '):
             provided = auth[7:].strip()
-    # Constant-time compare; never accept query-string tokens
     if not provided or not hmac.compare_digest(str(provided), str(token)):
         return jsonify({'error': '未授权：需要有效的 API Token'}), 401
     return None
@@ -663,7 +666,7 @@ def start_tray(port, open_browser_on_start=True):
 
     # Restore debug mode handler if it was enabled
     from config import load_config
-    cfg = load_config()
+    cfg, _ = load_config()
     if cfg.get('debug_mode', False):
         from routes.settings import _ensure_debug_handler
         _ensure_debug_handler()
@@ -764,7 +767,7 @@ if __name__ == '__main__':
             _configure_cors(app, port)
             # Restore debug mode handler if it was enabled
             from config import load_config
-            cfg = load_config()
+            cfg, _ = load_config()
             if cfg.get('debug_mode', False):
                 from routes.settings import _ensure_debug_handler
                 _ensure_debug_handler()

@@ -109,7 +109,7 @@ def test_detail_fallback_when_no_detail_images(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='detail', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == [
         "详情图/A_详情图_1.jpg",
         "详情图/A_详情图_2.jpg",
@@ -132,7 +132,7 @@ def test_detail_no_fallback_when_detail_exists(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='detail', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == [
         "详情图/B_详情图_1.jpg",
         "详情图/B_详情图_2.jpg",
@@ -153,7 +153,7 @@ def test_detail_mixed_barcodes(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='detail', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == [
         "详情图/A_详情图_1.jpg",
         "详情图/B_详情图_1.jpg",
@@ -174,7 +174,7 @@ def test_detail_flat_mode(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=True, export_type='detail', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == ["E_详情图_1.jpg", "E_详情图_2.jpg"]
 
 
@@ -196,7 +196,7 @@ def test_main_only_exports_main(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='main', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == ["主图/A_1.jpg"]
 
 
@@ -213,7 +213,7 @@ def test_main_flat_mode(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=True, export_type='main', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == ["C_1.jpg"]
 
 
@@ -231,7 +231,7 @@ def test_main_no_fallback_to_detail(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='main', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == ["主图/D_1.jpg", "主图/D_2.jpg"]
     assert not any("详情图" in n for n in names)
 
@@ -256,7 +256,7 @@ def test_all_exports_main_and_detail(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='all', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == [
         "主图/A_1.jpg",
         "主图/B_1.jpg",
@@ -278,7 +278,7 @@ def test_all_no_fallback(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='all', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == ["主图/C_1.jpg"]
     assert not any("详情图" in n for n in names)
 
@@ -295,7 +295,7 @@ def test_empty_img_data(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, [], flat=False, export_type='detail', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == []
     db.expire_all()
     assert db.get(ExportTask, task_id).status == "done"
@@ -313,7 +313,7 @@ def test_missing_files_skipped(db, images_dir):
     task_id = task.id
     _run_build_zip(task_id, img_data, flat=False, export_type='main', upload_dir=images_dir)
 
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == []
     db.expire_all()
     assert db.get(ExportTask, task_id).status == "failed"
@@ -483,7 +483,7 @@ def test_batch_export_detail_route_fallback(client, db, images_dir, captured_bui
     args = captured_builds.replay(0, upload_dir=images_dir)
     task_id, img_data, flat, export_type = args
     assert export_type == "detail"
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == [
         "详情图/A_详情图_1.jpg",
         "详情图/A_详情图_2.jpg",
@@ -514,7 +514,7 @@ def test_batch_export_main_route_no_fallback(client, db, images_dir, captured_bu
     args = captured_builds.replay(0, upload_dir=images_dir)
     task_id, img_data, flat, export_type = args
     assert export_type == "main"
-    names = _zip_names(os.path.join(images_dir, f"export_{task_id}.zip"))
+    names = _zip_names(os.path.join(images_dir, "zips", f"export_{task_id}.zip"))
     assert names == ["主图/C_1.jpg"]
 
 

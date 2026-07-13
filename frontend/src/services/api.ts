@@ -178,7 +178,11 @@ export const exportApi = {
   generateZip: (data: { barcode_column: string; image_type: string; upload_id: string; sheet_name?: string; selected_barcodes?: string[]; flat?: boolean }) =>
     api.post<{ task_id: number; total_images: number; total_barcodes: number; excluded_barcodes: number }>('/export/zip', data).then(r => r.data),
   getProgress: (taskId: number) =>
-    api.get<{ status: string; progress: number; total: number; error_message?: string }>(`/export/progress/${taskId}`).then(r => r.data),
+    api.get<{
+      status: string; progress: number; total: number;
+      planned_count?: number; written_count?: number | null;
+      error_message?: string;
+    }>(`/export/progress/${taskId}`).then(r => r.data),
   deleteTask: (taskId: number) =>
     api.delete(`/export/tasks/${taskId}`).then(r => r.data),
   listTasks: () =>
@@ -251,7 +255,14 @@ export const batchApi = {
 // ---------- Batch Task Framework ----------
 
 export type BatchTaskType = 'duplicate_scan' | 'low_version_scan' | 'batch_delete_duplicates' | 'batch_delete_low_versions' | 'delete_version' | 'batch_delete_images' | 'duplicate_version_scan' | 'batch_delete_duplicate_versions';
-export type BatchTaskStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+export type BatchTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'done'
+  | 'partial_failed'
+  | 'error'
+  | 'cancelled'
+  | 'interrupted';
 
 export interface BatchTaskInfo {
   id: number;

@@ -43,7 +43,7 @@ def _remove_debug_handler():
 
 @settings_bp.route('/settings/debug-mode', methods=['GET'])
 def get_debug_mode():
-    cfg = load_config()
+    cfg, _ = load_config()
     return jsonify({"debug_mode": cfg.get("debug_mode", False)})
 
 
@@ -52,7 +52,7 @@ def set_debug_mode():
     data = request.get_json(force=True)
     debug_mode = bool(data.get('debug_mode', False))
 
-    cfg = load_config()
+    cfg, _ = load_config()
     cfg['debug_mode'] = debug_mode
     save_config(cfg)
 
