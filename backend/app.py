@@ -654,14 +654,22 @@ def _cleanup_exports_on_startup():
 def _bootstrap_runtime():
     """One-time startup steps before accepting requests.
 
-    - Migrate legacy app_config api_token → auth_state token_enabled
+    - Reconcile app_config.api_token ↔ auth_state token_enabled
     - Reset stale exports + start cleanup loop
+
+    If enabling auth_state cannot be persisted, abort startup so we never
+    listen while marker is still false (would fail-open after config loss).
     """
-    from config import migrate_auth_state_from_config
-    try:
-        migrate_auth_state_from_config()
-    except Exception:
-        logging.getLogger(__name__).exception("auth_state migration failed")
+    from config import migrate_auth_state_from_config, AuthStateError
+    result = migrate_auth_state_from_config()
+    if result == 'failed':
+        logging.getLogger(__name__).critical(
+            "auth_state reconcile failed while enabling token — refusing to start",
+        )
+        raise SystemExit(
+            "无法持久化鉴权状态（auth_state.json），拒绝启动。"
+            "请检查 data 目录写权限后重试。"
+        )
     _cleanup_exports_on_startup()
 
 

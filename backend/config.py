@@ -34,6 +34,13 @@ _log = logging.getLogger(__name__)
 _cached_config: dict | None = None
 # In-process last-known-good token (never written to auth_state.json).
 _last_good_token: str | None = None
+# Process-level latch: auth_state write failed while enabling auth. Forces
+# get_api_token() → fail-closed even if marker file still says false/missing.
+_auth_persist_failed: bool = False
+
+
+class AuthStateError(RuntimeError):
+    """Raised when enabling token_enabled cannot be durably persisted."""
 
 
 def _atomic_write_json(path, payload):
@@ -56,11 +63,24 @@ def _atomic_write_json(path, payload):
 
 
 def _write_persisted_token_enabled(enabled: bool):
-    """Atomically persist whether API token auth was intentionally enabled."""
+    """Atomically persist whether API token auth was intentionally enabled.
+
+    On failure when enabling (enabled=True), sets process-level
+    _auth_persist_failed so get_api_token fail-closes even if the on-disk
+    marker is still false/missing.
+    """
+    global _auth_persist_failed
     try:
         _atomic_write_json(AUTH_STATE_PATH, {'token_enabled': bool(enabled)})
+        if enabled:
+            _auth_persist_failed = False
     except Exception as e:
         _log.error("Failed to write auth_state.json: %s", e)
+        if enabled:
+            _auth_persist_failed = True
+            raise AuthStateError(
+                f'无法持久化 token_enabled=true: {e}'
+            ) from e
         raise
 
 
@@ -98,7 +118,9 @@ def _read_persisted_token_enabled():
 
 
 def migrate_auth_state_from_config():
-    """Startup reconcile of auth_state with app_config (safe every boot).
+    """Startup reconcile of auth_state with app_config.
+
+    Returns one of: 'no_change' | 'updated' | 'failed'.
 
     Rules (only when app_config is readable JSON object):
     - Key ``api_token`` present and non-empty → ensure token_enabled=true
@@ -106,36 +128,39 @@ def migrate_auth_state_from_config():
     - Key ``api_token`` absent → leave marker unchanged (do not auto-disable)
     - Config missing/corrupt → leave marker unchanged (never write false)
 
-    Covers:
-    - Legacy first boot: no marker + hand-edited non-empty token → create true
-    - Re-enable after disable: marker false + hand-edit non-empty token → true
-    - Explicit open: marker true + hand-edit empty token → false
+    When desired state is enabled and the write fails, returns 'failed' and
+    latches process-level fail-closed. Callers must not treat that as no-op.
     """
+    global _auth_persist_failed
     try:
         if not os.path.exists(CONFIG_PATH):
-            return False
+            return 'no_change'
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict):
-            return False
+            return 'no_change'
         # Only act when the field is explicitly present in config.
         if 'api_token' not in cfg:
-            return False
+            return 'no_change'
         raw = cfg.get('api_token')
         desired = bool(raw)  # non-empty string → True; "" / None → False
         current = _read_persisted_token_enabled()
-        # current is True/False/None; None means no file (or corrupt→True).
-        # If corrupt, _read returns True — only rewrite when desired differs
-        # and we have an explicit config field.
         if current is desired:
-            return False
-        # Avoid rewriting when current is True due to corrupt file and desired
-        # is True — already matched. When current is True (corrupt) and desired
-        # is False, rewrite to explicit false is intentional hand-clear.
-        if current is True and desired is True and not os.path.exists(AUTH_STATE_PATH):
-            # No file but read returned True? shouldn't happen; treat as create.
-            pass
-        _write_persisted_token_enabled(desired)
+            return 'no_change'
+        try:
+            _write_persisted_token_enabled(desired)
+        except AuthStateError:
+            # Enabling failed: already latched _auth_persist_failed
+            _log.error(
+                "auth_state reconcile FAILED enabling token_enabled "
+                "(desired=true, was %s)",
+                current,
+            )
+            return 'failed'
+        except Exception as e:
+            # Disabling failed: do not open up; leave old marker, report failed
+            _log.error("auth_state reconcile write failed: %s", e)
+            return 'failed'
         _log.info(
             "auth_state reconcile: api_token %s → wrote token_enabled=%s "
             "(was %s)",
@@ -143,11 +168,11 @@ def migrate_auth_state_from_config():
             desired,
             current,
         )
-        return True
+        return 'updated'
     except Exception as e:
-        # Fail closed: do not create a false "disabled" marker on bad config.
-        _log.error("auth_state reconcile skipped: %s", e)
-        return False
+        # Config unreadable: never write false; not a persistence failure.
+        _log.error("auth_state reconcile skipped (config unreadable): %s", e)
+        return 'no_change'
 
 
 def load_config():
@@ -188,7 +213,12 @@ def load_config():
 
 
 def save_config(cfg):
-    """Atomically save app config and update auth_state for token enable/disable."""
+    """Atomically save app config and update auth_state for token enable/disable.
+
+    If enabling auth and auth_state write fails, raises AuthStateError after
+    config is written, and latches process fail-closed. Callers must treat
+    that as a hard failure (do not report success to the user).
+    """
     global _cached_config, _last_good_token
     if not isinstance(cfg, dict):
         raise ValueError('config must be a dict')
@@ -197,6 +227,7 @@ def save_config(cfg):
     raw = cfg.get('api_token')
     if raw:
         _last_good_token = str(raw)
+        # May raise AuthStateError (and latch fail-closed)
         _write_persisted_token_enabled(True)
     else:
         # Explicit save of empty/missing token = intentional disable
@@ -208,8 +239,21 @@ def get_api_token():
     """Return (token, fail_closed).
 
     fail_closed=True → mutating requests must be rejected even without a
-    usable token (config broken after token was once enabled).
+    usable token (config broken after token was once enabled, or auth_state
+    persistence failed while enabling).
     """
+    # Process latch from failed enable write — always fail closed first
+    if _auth_persist_failed:
+        cfg, _err = load_config()
+        token = str((cfg or {}).get('api_token') or '') or (
+            str(_last_good_token) if _last_good_token else ''
+        )
+        # Prefer still serving the live token if we have it; either way
+        # fail_closed is True so missing/empty token rejects writes.
+        if token:
+            return token, False
+        return '', True
+
     cfg, err = load_config()
     token = str((cfg or {}).get('api_token') or '')
 
