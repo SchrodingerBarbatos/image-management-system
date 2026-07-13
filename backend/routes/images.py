@@ -479,7 +479,11 @@ def batch_export():
     version_filtered = len(ids) - scanroot_excluded - len(imgs)
 
     from routes.export import _compute_barcode_counts, _export_lock
-    barcode_counts = _compute_barcode_counts(imgs, export_type=image_type or 'all')
+    planned_counts = _compute_barcode_counts(imgs, export_type=image_type or 'all')
+    payload = {
+        'barcodes': planned_counts,
+        'stats': {'planned_count': 0, 'written_count': 0, 'skipped_count': 0},
+    }
 
     # Concurrency guard: same lock + running check as /export/zip
     with _export_lock:
@@ -487,7 +491,7 @@ def batch_export():
         if running:
             return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
 
-        task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
+        task = ExportTask(status='processing', barcode_data=json.dumps(payload, ensure_ascii=False))
         session.add(task)
         session.commit()
 
@@ -500,6 +504,18 @@ def batch_export():
     # Accurate entry count for the sync response — detail exports may rename
     # main images as fallback, so the ZIP entry count can differ from len(imgs)
     planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
+    with _export_lock:
+        t = session.get(ExportTask, task.id)
+        if t:
+            t.total_images = len(planned_entries)
+            try:
+                data = json.loads(t.barcode_data) if t.barcode_data else payload
+            except (json.JSONDecodeError, TypeError):
+                data = payload
+            if isinstance(data, dict):
+                data.setdefault('stats', {})['planned_count'] = len(planned_entries)
+                t.barcode_data = json.dumps(data, ensure_ascii=False)
+            session.commit()
 
     threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
 

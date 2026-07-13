@@ -254,6 +254,7 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
 
         written = 0
         progress = 0
+        actual_counts = {}  # barcode -> {main, detail} based on successful writes
 
         # Path confinement: file must live under ITS OWN enabled ScanRoot
         # (not any root). Uses realpath/commonpath via is_path_under_root.
@@ -272,17 +273,57 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             ok, _ = is_path_under_root(fp, root.path)
             return ok
 
+        # Map arcname -> barcode for actual count attribution
+        # entries are (file_path, arcname, scan_root_id); barcode is embedded in arcname
+        # Prefer tracking from original img_data order via planned entries
+        entry_barcodes = []
+        # Rebuild barcode list parallel to entries by re-planning with tags
+        for row in img_data:
+            if len(row) >= 6:
+                fp, bc, it, seq, ex, rid = row[0], row[1], row[2], row[3], row[4], row[5]
+            else:
+                fp, bc, it, seq, ex, rid = row[0], row[1], row[2], row[3], row[4], None
+            # Will re-derive from entries + export_type below
+
+        # Build (file_path, arcname, root_id, barcode, report_type) for counting
+        typed_entries = []
+        for entry in entries:
+            if len(entry) == 3:
+                file_path, arcname, root_id = entry
+            else:
+                file_path, arcname = entry[0], entry[1]
+                root_id = None
+            # Find matching img_data row by file_path
+            barcode = None
+            report_type = 'main' if '/主图/' in arcname.replace('\\', '/') or (
+                export_type == 'main' or (export_type == 'all' and '_详情图_' not in arcname)
+            ) else 'detail'
+            if export_type == 'detail' or '_详情图_' in arcname:
+                report_type = 'detail'
+            elif export_type == 'main' or (export_type == 'all' and '_详情图_' not in os.path.basename(arcname)):
+                report_type = 'main'
+            for row in img_data:
+                if row[0] == file_path:
+                    barcode = row[1]
+                    # For detail export fallback, count under detail
+                    if export_type == 'detail':
+                        report_type = 'detail'
+                    elif export_type == 'main':
+                        report_type = 'main'
+                    else:
+                        report_type = row[2] if row[2] in ('main', 'detail') else 'main'
+                    break
+            typed_entries.append((file_path, arcname, root_id, barcode, report_type))
+
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
-            for entry in entries:
-                # entries are (file_path, arcname, scan_root_id)
-                if len(entry) == 3:
-                    file_path, arcname, root_id = entry
-                else:
-                    file_path, arcname = entry[0], entry[1]
-                    root_id = None
+            for file_path, arcname, root_id, barcode, report_type in typed_entries:
                 if os.path.exists(file_path) and _allowed_for_root(file_path, root_id):
                     zf.write(file_path, arcname)
                     written += 1
+                    if barcode:
+                        actual_counts.setdefault(barcode, {'main': 0, 'detail': 0})
+                        if report_type in ('main', 'detail'):
+                            actual_counts[barcode][report_type] += 1
                 elif os.path.exists(file_path):
                     _log.warning(
                         "_build_zip: skip path not under own enabled root "
@@ -299,7 +340,6 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
 
         # Always finalize progress to planned total so UI never sticks < 100%
         task.progress = total
-        # Keep total_images as planned entry count; surface written/skipped in message
         skipped = total - written
         if written == 0:
             _log.warning("_build_zip task %s: all %d files missing/skipped", task_id, total)
@@ -311,18 +351,32 @@ def _build_zip(task_id, img_data, flat, export_type='all'):
             _log.info("_build_zip task %s: partial_failed wrote %d/%d", task_id, written, total)
         else:
             task.status = 'done'
-        # Persist written count for UI (barcode_data remains planned report)
+
+        # Persist structured payload: barcodes = actual written counts; stats separate
+        # Preserve unmatched barcodes from original payload (zeros) for report completeness
         try:
-            meta = json.loads(task.barcode_data) if task.barcode_data else {}
+            prev = json.loads(task.barcode_data) if task.barcode_data else {}
         except (json.JSONDecodeError, TypeError):
-            meta = {}
-        if isinstance(meta, dict):
-            meta['__export_stats'] = {
+            prev = {}
+        prev_barcodes, _ = _parse_export_payload(task.barcode_data) if task.barcode_data else ({}, {})
+        if prev_barcodes is None:
+            prev_barcodes = {}
+        # Start from planned zeros, overlay actual written
+        final_barcodes = {
+            bc: {'main': 0, 'detail': 0} for bc in prev_barcodes
+        }
+        for bc, c in actual_counts.items():
+            final_barcodes.setdefault(bc, {'main': 0, 'detail': 0})
+            final_barcodes[bc]['main'] = c.get('main', 0)
+            final_barcodes[bc]['detail'] = c.get('detail', 0)
+        task.barcode_data = json.dumps({
+            'barcodes': final_barcodes,
+            'stats': {
                 'planned_count': total,
                 'written_count': written,
                 'skipped_count': skipped,
-            }
-            task.barcode_data = json.dumps(meta, ensure_ascii=False)
+            },
+        }, ensure_ascii=False)
         sess.commit()
     except Exception as e:
         _log.error("_build_zip task %s failed:\n%s", task_id, traceback.format_exc())
@@ -360,7 +414,7 @@ def upload_excel():
     upload_path = os.path.join(_xlsx_dir(), f'{upload_id}.xlsx')
     try:
         file.save(upload_path)
-            # Parse workbook — delete source on any failure
+        # Parse only — keep file for ZIP generation; TTL cleanup covers abandon.
         data, error = _parse_excel(upload_path)
         if error:
             _safe_remove(upload_path)
@@ -478,9 +532,9 @@ def generate_zip():
             if val:
                 barcodes_raw.append(val)
     finally:
+        # Close workbook only — keep source xlsx until ExportTask is committed
+        # (or TTL cleanup). Deleting here would break 409/DB-failure retries.
         wb.close()
-        # Source xlsx no longer needed after barcodes are in memory
-        _safe_remove(real_upload)
 
     if selected:
         selected_set = set(selected)
@@ -512,8 +566,12 @@ def generate_zip():
     matched_barcodes = set(img.barcode for img in imgs)
     excluded_barcodes = len(barcodes) - len(matched_barcodes)
 
-    # Compute per-barcode match counts (include all barcodes, even unmatched)
-    barcode_counts = _compute_barcode_counts(imgs, barcodes, export_type=image_type or 'all')
+    # Compute planned per-barcode counts (include all barcodes, even unmatched)
+    planned_counts = _compute_barcode_counts(imgs, barcodes, export_type=image_type or 'all')
+    payload = {
+        'barcodes': planned_counts,
+        'stats': {'planned_count': 0, 'written_count': 0, 'skipped_count': 0},
+    }
 
     # Concurrency guard: check + create + commit must be atomic
     with _export_lock:
@@ -521,9 +579,12 @@ def generate_zip():
         if running:
             return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
 
-        task = ExportTask(status='processing', barcode_data=json.dumps(barcode_counts, ensure_ascii=False))
+        task = ExportTask(status='processing', barcode_data=json.dumps(payload, ensure_ascii=False))
         session.add(task)
         session.commit()
+        # Source xlsx only deleted after task is durable — 409/DB failure keeps
+        # the file for retry; TTL cleanup handles abandon.
+        _safe_remove(real_upload)
 
     img_data = [
         (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
@@ -532,10 +593,49 @@ def generate_zip():
     # Accurate entry count for the sync response — detail exports may rename
     # main images as fallback, so the ZIP entry count can differ from len(imgs)
     planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
+    # Update planned_count now that we know the true entry count
+    with _export_lock:
+        t = session.get(ExportTask, task.id)
+        if t:
+            t.total_images = len(planned_entries)
+            try:
+                data = json.loads(t.barcode_data) if t.barcode_data else payload
+            except (json.JSONDecodeError, TypeError):
+                data = payload
+            if isinstance(data, dict):
+                data.setdefault('stats', {})['planned_count'] = len(planned_entries)
+                t.barcode_data = json.dumps(data, ensure_ascii=False)
+            session.commit()
 
     threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
 
     return jsonify({'task_id': task.id, 'total_images': len(planned_entries), 'total_barcodes': len(matched_barcodes), 'excluded_barcodes': excluded_barcodes})
+
+
+def _parse_export_payload(raw):
+    """Normalize barcode_data JSON into {barcodes, stats}.
+
+    Supports:
+    - new shape: {barcodes: {...}, stats: {...}}
+    - legacy flat: {barcode: {main, detail}, __export_stats?: {...}}
+    """
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    if 'barcodes' in data and isinstance(data.get('barcodes'), dict):
+        barcodes = data['barcodes']
+        stats = data.get('stats') if isinstance(data.get('stats'), dict) else {}
+        return barcodes, stats
+    # Legacy: filter reserved keys
+    barcodes = {
+        k: v for k, v in data.items()
+        if not str(k).startswith('_') and isinstance(v, dict)
+    }
+    stats = data.get('__export_stats') if isinstance(data.get('__export_stats'), dict) else {}
+    return barcodes, stats
 
 
 @export_bp.route('/export/progress/<int:task_id>')
@@ -545,20 +645,19 @@ def export_progress(task_id):
         return jsonify({'error': 'not found'}), 404
     written = None
     planned = task.total_images
-    try:
-        meta = json.loads(task.barcode_data) if task.barcode_data else {}
-        stats = meta.get('__export_stats') if isinstance(meta, dict) else None
-        if isinstance(stats, dict):
-            written = stats.get('written_count')
-            planned = stats.get('planned_count', planned)
-    except (json.JSONDecodeError, TypeError):
-        pass
+    skipped = None
+    barcodes, stats = _parse_export_payload(task.barcode_data)
+    if stats:
+        written = stats.get('written_count')
+        planned = stats.get('planned_count', planned)
+        skipped = stats.get('skipped_count')
     return jsonify({
         'status': task.status,
         'progress': task.progress,
         'total': task.total_images,
         'planned_count': planned,
         'written_count': written,
+        'skipped_count': skipped,
         'error_message': task.error_message,
     })
 
@@ -598,12 +697,24 @@ def delete_task(task_id):
 @export_bp.route('/export/download/<int:task_id>')
 def download_zip(task_id):
     task = session.get(ExportTask, task_id)
-    if not task or task.status != 'done':
+    downloadable = {'done', 'partial_failed'}
+    if not task or task.status not in downloadable:
         return jsonify({'error': 'not ready'}), 404
-    if not os.path.exists(task.zip_path):
+    if not task.zip_path:
+        return jsonify({'error': 'file has been cleaned up'}), 404
+    # Path must stay under the controlled zips directory
+    real_zip = os.path.realpath(task.zip_path)
+    real_zip_dir = os.path.realpath(_zip_dir())
+    try:
+        if os.path.commonpath([real_zip, real_zip_dir]) != real_zip_dir:
+            _log.error("download_zip: path escape blocked for task %s: %s", task_id, task.zip_path)
+            return jsonify({'error': 'invalid zip path'}), 404
+    except ValueError:
+        return jsonify({'error': 'invalid zip path'}), 404
+    if not os.path.isfile(real_zip):
         return jsonify({'error': 'file has been cleaned up'}), 404
     return send_file(
-        task.zip_path,
+        real_zip,
         as_attachment=True,
         download_name=f'export_{task_id}.zip',
         mimetype='application/zip',
@@ -619,9 +730,8 @@ def download_detail(task_id):
     if not task.barcode_data:
         return jsonify({'error': 'no barcode data available'}), 404
 
-    try:
-        barcode_counts = json.loads(task.barcode_data)
-    except (json.JSONDecodeError, TypeError):
+    barcode_counts, _stats = _parse_export_payload(task.barcode_data)
+    if barcode_counts is None:
         return jsonify({'error': 'barcode data is corrupted'}), 500
 
     wb = Workbook()
@@ -639,8 +749,10 @@ def download_detail(task_id):
     ws_detail = wb.create_sheet('详情图匹配')
     ws_detail.append(['条码', '详情图数量'])
 
-    # Write data to all sheets in single pass
+    # Write data to all sheets in single pass — only real barcodes
     for barcode, counts in barcode_counts.items():
+        if not isinstance(counts, dict):
+            continue
         main_count = counts.get('main', 0)
         detail_count = counts.get('detail', 0)
         ws_all.append([barcode, main_count, detail_count])
@@ -688,12 +800,13 @@ def reset_stale_processing():
 
 def cleanup_old_exports():
     """Remove export tasks and their files older than ZIP_CLEANUP_HOURS.
-    Also purge orphaned xlsx under EXPORT_XLSX_DIR older than XLSX_TTL_HOURS
-    and leftover zip files without a task row.
-    Processing tasks are skipped (they should already have been handled by
-    reset_stale_processing)."""
+
+    Also purge orphaned xlsx older than XLSX_TTL_HOURS and leftover zip files
+    without a task row. Path-confined to UPLOAD_DIR tree. Individual delete
+    failures are logged and skipped so one bad file cannot abort the run.
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
     with _export_lock:
-        cutoff = datetime.datetime.now() - datetime.timedelta(hours=ZIP_CLEANUP_HOURS)
         old_tasks = session.query(ExportTask).filter(
             ExportTask.created_at < cutoff.isoformat(),
             ExportTask.status != 'processing',
@@ -701,31 +814,41 @@ def cleanup_old_exports():
         for task in old_tasks:
             if task.zip_path and os.path.exists(task.zip_path):
                 try:
-                    os.remove(task.zip_path)
-                except OSError:
-                    pass
+                    # Confine to zips dir
+                    real_zip = os.path.realpath(task.zip_path)
+                    real_zip_dir = os.path.realpath(_zip_dir())
+                    try:
+                        if os.path.commonpath([real_zip, real_zip_dir]) == real_zip_dir:
+                            os.remove(real_zip)
+                    except ValueError:
+                        pass
+                except OSError as e:
+                    _log.warning("cleanup: failed to remove zip %s: %s", task.zip_path, e)
             session.delete(task)
         if old_tasks:
             session.commit()
             _log.info("Cleaned up %d old export tasks", len(old_tasks))
 
-    # TTL cleanup for source xlsx (success path deletes after barcode read;
-    # this covers abandoned uploads)
+    # TTL cleanup for source xlsx
     xlsx_cutoff = datetime.datetime.now() - datetime.timedelta(hours=XLSX_TTL_HOURS)
     for directory in (_xlsx_dir(), UPLOAD_DIR):
         try:
+            real_dir = os.path.realpath(directory)
             for name in os.listdir(directory):
                 if not name.endswith('.xlsx'):
                     continue
                 path = os.path.join(directory, name)
                 try:
-                    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+                    real_path = os.path.realpath(path)
+                    if os.path.commonpath([real_path, real_dir]) != real_dir:
+                        continue
+                    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(real_path))
                     if mtime < xlsx_cutoff:
-                        os.remove(path)
-                except OSError:
-                    pass
-        except OSError:
-            pass
+                        os.remove(real_path)
+                except (OSError, ValueError) as e:
+                    _log.warning("cleanup: skip xlsx %s: %s", path, e)
+        except OSError as e:
+            _log.warning("cleanup: list dir %s failed: %s", directory, e)
 
     # Orphan zips under zips/ with no matching task
     try:
@@ -735,16 +858,56 @@ def cleanup_old_exports():
             if t.zip_path
         }
         zip_dir = _zip_dir()
+        real_zip_dir = os.path.realpath(zip_dir)
         for name in os.listdir(zip_dir):
             if not name.endswith('.zip'):
                 continue
             path = os.path.realpath(os.path.join(zip_dir, name))
+            try:
+                if os.path.commonpath([path, real_zip_dir]) != real_zip_dir:
+                    continue
+            except ValueError:
+                continue
             if path not in known:
                 try:
                     mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
                     if mtime < cutoff:
                         os.remove(path)
-                except OSError:
-                    pass
-    except OSError:
-        pass
+                except OSError as e:
+                    _log.warning("cleanup: orphan zip %s: %s", path, e)
+    except OSError as e:
+        _log.warning("cleanup: orphan zip scan failed: %s", e)
+
+
+_cleanup_stop = threading.Event()
+_cleanup_thread = None
+_cleanup_lock = threading.Lock()
+
+
+def start_export_cleanup_loop(interval_seconds=900):
+    """Start a daemon loop that runs cleanup_old_exports periodically.
+
+    Single-process: guarded by _cleanup_lock so only one loop starts.
+    Multi-process: each process has its own loop; cleanup is idempotent and
+    path-confined, so concurrent runs are safe (best-effort).
+    """
+    global _cleanup_thread
+    with _cleanup_lock:
+        if _cleanup_thread is not None and _cleanup_thread.is_alive():
+            return
+
+        def _loop():
+            while not _cleanup_stop.wait(interval_seconds):
+                try:
+                    cleanup_old_exports()
+                except Exception:
+                    _log.exception("periodic cleanup_old_exports failed")
+
+        _cleanup_stop.clear()
+        _cleanup_thread = threading.Thread(target=_loop, name='export-cleanup', daemon=True)
+        _cleanup_thread.start()
+        _log.info("Started export cleanup loop (interval=%ss)", interval_seconds)
+
+
+def stop_export_cleanup_loop():
+    _cleanup_stop.set()

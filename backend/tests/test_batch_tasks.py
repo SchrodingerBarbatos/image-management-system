@@ -855,8 +855,9 @@ def test_cleanup_old_exports_deletes_expired_non_processing(client, sess):
         sess.commit()
         tid = task.id
 
-    # Create a fake zip file for the task
-    zip_path = _os.path.join(tempfile.gettempdir(), f'export_{tid}.zip')
+    # Create a fake zip file under the controlled zips dir
+    zip_dir = _export._zip_dir()
+    zip_path = _os.path.join(zip_dir, f'export_{tid}.zip')
     with _export._export_lock:
         t = sess.get(ET, tid)
         t.zip_path = zip_path

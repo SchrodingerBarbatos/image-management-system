@@ -643,10 +643,12 @@ def _configure_cors(app, port):
 
 def _cleanup_exports_on_startup():
     """Shared startup cleanup — reset stale processing first, then remove old
-    export records.  Called by both tray and non-tray startup paths."""
-    from routes.export import cleanup_old_exports, reset_stale_processing
+    export records.  Called by both tray and non-tray startup paths.
+    Also starts the periodic cleanup loop (15 min)."""
+    from routes.export import cleanup_old_exports, reset_stale_processing, start_export_cleanup_loop
     reset_stale_processing()
     cleanup_old_exports()
+    start_export_cleanup_loop(interval_seconds=900)
 
 
 def start_tray(port, open_browser_on_start=True):

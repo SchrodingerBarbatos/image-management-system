@@ -423,13 +423,16 @@ def captured_builds(monkeypatch):
 def client(db, monkeypatch, captured_builds):
     import threading
     import routes.images
+    import routes.export
     from flask import Flask
 
     monkeypatch.setattr(routes.images, "session", db)
+    monkeypatch.setattr(routes.export, "session", db)
     monkeypatch.setattr(threading, "Thread", _SyncThread)
 
     app = Flask(__name__)
     app.register_blueprint(routes.images.images_bp, url_prefix="/api")
+    app.register_blueprint(routes.export.export_bp, url_prefix="/api")
     app.config["TESTING"] = True
     return app.test_client()
 
@@ -475,7 +478,9 @@ def test_batch_export_detail_route_fallback(client, db, images_dir, captured_bui
 
     # Report: real detail for A; B's main-as-detail fallback counted under detail
     task = db.get(ExportTask, body["task_id"])
-    counts = json.loads(task.barcode_data)
+    from routes.export import _parse_export_payload
+    counts, _stats = _parse_export_payload(task.barcode_data)
+    # Before build, planned counts are stored under barcodes
     assert counts["A"] == {"main": 0, "detail": 2}
     assert counts["B"] == {"main": 0, "detail": 2}
 
@@ -494,6 +499,49 @@ def test_batch_export_detail_route_fallback(client, db, images_dir, captured_bui
     done = db.get(ExportTask, task_id)
     assert done.status == "done"
     assert done.total_images == 4
+    actual, stats = _parse_export_payload(done.barcode_data)
+    assert stats.get("written_count") == 4
+    assert actual["A"]["detail"] == 2
+    assert actual["B"]["detail"] == 2
+
+
+def test_download_zip_allows_partial_failed(client, db, images_dir, captured_builds, monkeypatch):
+    """partial_failed export tasks remain downloadable."""
+    import os
+    import routes.export as exp_mod
+    monkeypatch.setattr(exp_mod, "UPLOAD_DIR", images_dir)
+    sr = ScanRoot(path=images_dir, enabled=True)
+    db.add(sr); db.commit()
+    imgs = [
+        _add_image(db, images_dir, "P", "main", 1, sr.id),
+    ]
+    resp = client.post("/api/images/batch-export", json={
+        "ids": [i.id for i in imgs], "image_type": "main", "flat": False,
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    task_id = body["task_id"]
+    # Force partial_failed with a real zip present under controlled UPLOAD_DIR
+    args = captured_builds.replay(0, upload_dir=images_dir)
+    db.expire_all()
+    task = db.get(ExportTask, task_id)
+    zip_path = os.path.join(images_dir, "zips", f"export_{task_id}.zip")
+    assert os.path.isfile(zip_path)
+    task.status = "partial_failed"
+    task.error_message = "实际写入 1 / 计划 2"
+    task.zip_path = zip_path
+    db.commit()
+
+    dl = client.get(f"/api/export/download/{task_id}")
+    assert dl.status_code == 200, dl.get_json() if dl.is_json else dl.data
+    assert dl.mimetype == "application/zip"
+
+
+def test_download_zip_rejects_processing(client, db):
+    task = ExportTask(status="processing", barcode_data="{}")
+    db.add(task); db.commit()
+    dl = client.get(f"/api/export/download/{task.id}")
+    assert dl.status_code == 404
 
 
 def test_batch_export_main_route_no_fallback(client, db, images_dir, captured_builds):

@@ -27,34 +27,53 @@ XLSX_TTL_HOURS = 1
 
 _log = logging.getLogger(__name__)
 
-# Last successfully loaded config; used as fail-closed fallback when re-read fails
-# after a token was previously configured.
+# Last successfully loaded full config (any successful parse).
 _cached_config: dict | None = None
-_config_read_error: str | None = None
+# Independent last-known-good API token state. Survives config file deletion /
+# corruption after a token was once successfully loaded.
+_last_good_token: str | None = None
+_token_was_enabled: bool = False
 
 
 def load_config():
     """Load app config from JSON file.
 
-    Returns (config_dict, error_string). error_string is set when the file
-    exists but cannot be parsed/read (fail-closed for token enforcement).
-    Missing file is not an error — returns defaults.
+    Returns (config_dict, error_string).
+    - Missing file is not an error (first-run open mode).
+    - Parse/read failure returns last good config when available, with err set.
     """
-    global _cached_config, _config_read_error
+    global _cached_config, _last_good_token, _token_was_enabled
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict):
             raise ValueError('config root must be an object')
         _cached_config = dict(cfg)
-        _config_read_error = None
+        # Only update token state on successful parse of a real file.
+        raw = cfg.get('api_token')
+        if raw:
+            _last_good_token = str(raw)
+            _token_was_enabled = True
+        else:
+            # Explicit empty/missing token after successful read = user disabled auth
+            _last_good_token = None
+            _token_was_enabled = False
         return cfg, None
     except FileNotFoundError:
-        _config_read_error = None
+        # File gone: if token was ever enabled, keep last good token / fail-closed.
+        if _token_was_enabled and _last_good_token:
+            base = dict(_cached_config) if _cached_config else {"debug_mode": False}
+            base['api_token'] = _last_good_token
+            return base, 'config file missing; using last good token'
+        if _token_was_enabled:
+            return {"debug_mode": False}, 'config file missing after token was enabled'
         return {"debug_mode": False}, None
     except Exception as e:
-        _config_read_error = str(e)
         _log.error("Failed to load app_config.json: %s", e)
+        if _token_was_enabled and _last_good_token:
+            base = dict(_cached_config) if _cached_config else {"debug_mode": False}
+            base['api_token'] = _last_good_token
+            return base, f'config read failed, using last good token: {e}'
         if _cached_config is not None:
             return dict(_cached_config), f'config read failed, using cache: {e}'
         return {"debug_mode": False}, f'config read failed: {e}'
@@ -62,7 +81,7 @@ def load_config():
 
 def save_config(cfg):
     """Atomically save app config: temp file → flush/fsync → os.replace."""
-    global _cached_config, _config_read_error
+    global _cached_config, _last_good_token, _token_was_enabled
     os.makedirs(DATA_DIR, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix='app_config.', suffix='.json', dir=DATA_DIR)
     try:
@@ -72,7 +91,14 @@ def save_config(cfg):
             os.fsync(f.fileno())
         os.replace(tmp_path, CONFIG_PATH)
         _cached_config = dict(cfg)
-        _config_read_error = None
+        raw = cfg.get('api_token') if isinstance(cfg, dict) else None
+        if raw:
+            _last_good_token = str(raw)
+            _token_was_enabled = True
+        else:
+            # Explicit save of empty token = intentional disable
+            _last_good_token = None
+            _token_was_enabled = False
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -82,25 +108,21 @@ def save_config(cfg):
 
 
 def get_api_token():
-    """Return (token, enforce_fail_closed).
+    """Return (token, fail_closed).
 
-    enforce_fail_closed=True means mutating requests must be rejected even if
-    token is empty (config is corrupted after a token was once configured, or
-    current read failed with no usable cache).
+    fail_closed=True → mutating requests must be rejected even without a
+    usable token (config broken after token was once enabled).
     """
     cfg, err = load_config()
     token = (cfg or {}).get('api_token') or ''
     if token:
         return str(token), False
-    # No token in current/cached config
-    if err and _cached_config is not None and (_cached_config.get('api_token') or ''):
-        # Should not reach: load_config returns cached with token above
-        return str(_cached_config.get('api_token') or ''), False
-    if err:
-        # Config unreadable and no prior token — still open for first-run, but
-        # if a previous successful load had a token, load_config already returned it.
-        # When file exists but is corrupt and never successfully cached: fail closed
-        # only if the file exists (someone tried to configure).
-        if os.path.exists(CONFIG_PATH):
-            return '', True
+    if _token_was_enabled and _last_good_token:
+        return str(_last_good_token), False
+    if _token_was_enabled:
+        # Token was enabled but we no longer have a usable value
+        return '', True
+    if err and os.path.exists(CONFIG_PATH):
+        # File exists but unreadable/corrupt and never had a token → fail closed
+        return '', True
     return '', False

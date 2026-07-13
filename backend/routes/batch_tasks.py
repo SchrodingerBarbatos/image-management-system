@@ -794,9 +794,11 @@ def _run_duplicate_version_scan(task_id):
 
 def _run_batch_delete_duplicate_versions(task_id):
     """Background handler for batch_delete_duplicate_versions tasks.
-    Hard-deletes images from DB (consistent with batch_delete_duplicates and
-    batch_delete_low_versions). Records deleted folders in tracking table
-    to prevent re-adding on next scan."""
+
+    Full revalidation at execution time (not just create-time precheck):
+    requested result_ids must still all be clean rows under scan_task_id.
+    Any drift → whole-batch error (no silent partial done).
+    """
     _log.info("Starting batch_delete_duplicate_versions task %d", task_id)
 
     sess = _get_thread_session()
@@ -818,18 +820,34 @@ def _run_batch_delete_duplicate_versions(task_id):
         finish_task(task_id, error_message='result_ids and scan_task_id required')
         return
 
-    total = len(result_ids)
+    # Dedup requested set
+    requested_ids = []
+    seen = set()
+    for rid in result_ids:
+        if isinstance(rid, int) and rid > 0 and rid not in seen:
+            seen.add(rid)
+            requested_ids.append(rid)
+
+    total = len(requested_ids)
     update_task_progress(task_id, progress=0, total=total)
 
-    # Load the submitted clean results
+    # Execution-time full revalidation in one query
     results = sess.query(DuplicateVersionScanResult).filter(
         DuplicateVersionScanResult.task_id == scan_task_id,
-        DuplicateVersionScanResult.id.in_(result_ids),
+        DuplicateVersionScanResult.id.in_(requested_ids),
         DuplicateVersionScanResult.role == 'clean',
     ).all()
-
-    if not results:
-        finish_task(task_id, error_message='No valid clean results found')
+    found_ids = {r.id for r in results}
+    invalid_ids = sorted(set(requested_ids) - found_ids)
+    if invalid_ids:
+        finish_task(
+            task_id,
+            error_message=f'以下记录不存在或状态已变化，整批拒绝：{invalid_ids}',
+            status='error',
+        )
+        return
+    if len(results) != total:
+        finish_task(task_id, error_message='结果集合不一致，整批拒绝', status='error')
         return
 
     # Check disabled scan roots
@@ -875,6 +893,8 @@ def _run_batch_delete_duplicate_versions(task_id):
 
             update_task_progress(task_id, progress=processed, current_item=r.barcode)
 
+        # Ensure progress accounts for full request set
+        update_task_progress(task_id, progress=total, total=total)
         sess.commit()
         version_failed = _rebuild_versions_safe(affected_barcodes, sess, task_id)
         _finish_delete_task(task_id, deleted_image_count, failed_count, version_failed, skipped_count)
