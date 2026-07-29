@@ -23,6 +23,7 @@ _export_lock = threading.Lock()
 
 # Maximum number of parameters per IN clause — keeps SQLite happy
 _IN_CHUNK_SIZE = 500
+_MAX_EXCEL_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 def _safe_remove(path):
@@ -31,6 +32,13 @@ def _safe_remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _excel_upload_too_large(file):
+    file.seek(0, 2)
+    size = file.tell()
+    file.seek(0)
+    return size > _MAX_EXCEL_UPLOAD_BYTES
 
 
 def _chunked_in_query(column, values, query_base, chunk_size=_IN_CHUNK_SIZE):
@@ -413,11 +421,8 @@ def upload_excel():
     if not file.filename or not file.filename.lower().endswith('.xlsx'):
         return jsonify({'error': '只允许 .xlsx 文件'}), 400
 
-    file.seek(0, 2)
-    size = file.tell()
-    file.seek(0)
-    if size > 10 * 1024 * 1024:
-        return jsonify({'error': '文件大小不能超过 10MB'}), 400
+    if _excel_upload_too_large(file):
+        return jsonify({'error': '文件大小不能超过 50MB'}), 400
 
     upload_id = uuid.uuid4().hex[:12]
     upload_path = os.path.join(_xlsx_dir(), f'{upload_id}.xlsx')
