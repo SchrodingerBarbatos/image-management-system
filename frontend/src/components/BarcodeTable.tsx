@@ -1,5 +1,5 @@
 import React from 'react';
-import { Table, Tag } from 'antd';
+import { Table } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { BarcodeRec } from '../services/api';
 
@@ -17,29 +17,38 @@ interface Props {
   onSortChange: (field: string, order: 'asc' | 'desc') => void;
 }
 
+const chip = (count: number, cls: string, suffix = '') => (
+  <span className={`count-chip ${count > 0 ? cls : 'zero'}`}>
+    {count > 0 ? `${count}${suffix}` : '无'}
+  </span>
+);
+
 // NOTE: dataIndex values must stay in sync with backend _BARCODE_SORT_WHITELIST
 // in routes/images.py. Changing a dataIndex will silently break sorting.
 const columns: ColumnsType<BarcodeRec> = [
-  { title: '条码', dataIndex: 'barcode', width: 160, sorter: true },
   {
-    title: '主图', dataIndex: 'main_count', width: 80, sorter: true,
-    render: (c: number) => c > 0 ? <Tag color="blue">{c} 张</Tag> : <Tag>无</Tag>,
+    title: '条码', dataIndex: 'barcode', width: 170, sorter: true,
+    render: (v: string) => <span className="mono" style={{ fontWeight: 600 }}>{v}</span>,
   },
   {
-    title: '详情图', dataIndex: 'detail_count', width: 90, sorter: true,
-    render: (c: number) => c > 0 ? <Tag color="green">{c} 张</Tag> : <Tag>无</Tag>,
+    title: '主图', dataIndex: 'main_count', width: 76, sorter: true,
+    render: (c: number) => chip(c, 'main'),
   },
   {
-    title: '主图版本', dataIndex: 'main_versions', width: 90, sorter: true,
-    render: (c: number) => c > 0 ? <Tag color="purple">{c}</Tag> : <Tag>无</Tag>,
+    title: '详情图', dataIndex: 'detail_count', width: 76, sorter: true,
+    render: (c: number) => chip(c, 'detail'),
   },
   {
-    title: '详情图版本', dataIndex: 'detail_versions', width: 95, sorter: true,
-    render: (c: number) => c > 0 ? <Tag color="geekblue">{c}</Tag> : <Tag>无</Tag>,
+    title: '主图版本', dataIndex: 'main_versions', width: 86, sorter: true,
+    render: (c: number) => chip(c, 'ver'),
+  },
+  {
+    title: '详情版本', dataIndex: 'detail_versions', width: 86, sorter: true,
+    render: (c: number) => chip(c, 'ver'),
   },
 ];
 
-const ImageTable: React.FC<Props> = ({
+const BarcodeTable: React.FC<Props> = ({
   barcodes, loading, total, page, pageSize,
   selectedBarcode, selectedBarcodes, onSelectionChange,
   onRowClick, onPageChange, onSortChange,
@@ -58,14 +67,11 @@ const ImageTable: React.FC<Props> = ({
       }}
       onRow={(record) => ({
         onClick: () => onRowClick(record.barcode),
-        style: {
-          cursor: 'pointer',
-          background: record.barcode === selectedBarcode ? '#e6f7ff' : undefined,
-        },
+        className: `clickable${record.barcode === selectedBarcode ? ' row-active' : ''}`,
       })}
       pagination={{
         current: page, pageSize, total, showSizeChanger: true,
-        onChange: onPageChange, showTotal: (t) => `共 ${t} 条`,
+        onChange: onPageChange, showTotal: (t) => `共 ${t} 条码`,
       }}
       onChange={(_pagination, _filters, sorter) => {
         if (!Array.isArray(sorter) && sorter.column) {
@@ -74,9 +80,9 @@ const ImageTable: React.FC<Props> = ({
           onSortChange(field, order);
         }
       }}
-      scroll={{ y: 'calc(100vh - 280px)' }}
+      scroll={{ y: 'calc(100vh - 272px)' }}
     />
   );
 };
 
-export default ImageTable;
+export default BarcodeTable;

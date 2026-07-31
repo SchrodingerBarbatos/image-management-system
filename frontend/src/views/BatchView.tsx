@@ -1,14 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Modal, Tabs, Button, Checkbox, Table, Space, InputNumber, Tag, Divider, message, Typography } from 'antd';
-import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults, DuplicateVersionScanResults, DuplicateVersionGroup } from '../services/api';
-import { TaskList, TaskProgress } from './TaskList';
+import { Modal, Button, Checkbox, Table, InputNumber, App, Tag } from 'antd';
+import { CheckCircleOutlined } from '@ant-design/icons';
+import { taskApi, BatchTaskInfo, DuplicateScanResultItem, LowVersionScanResultItem, PaginatedResults, DuplicateVersionScanResults } from '../services/api';
+import { TaskRail, TaskProgress } from '../components/TaskRail';
 import { useTaskPolling } from '../hooks/useTaskPolling';
-
-const { Text } = Typography;
+import { Seg, EmptyBlock } from '../components/ui';
 
 interface Props {
-  visible: boolean;
-  onClose: () => void;
   onCompleted: () => void;
 }
 
@@ -44,8 +42,11 @@ const toDeleteTarget = (r: DuplicateScanResultItem | LowVersionScanResultItem): 
   folder_ctime: r.folder_ctime,
 });
 
-const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => {
-  const [activeTab, setActiveTab] = useState<string>('duplicates');
+type TabKey = 'duplicates' | 'lowVersions' | 'duplicateVersions';
+
+const BatchView: React.FC<Props> = ({ onCompleted }) => {
+  const { message } = App.useApp();
+  const [activeTab, setActiveTab] = useState<TabKey>('duplicates');
 
   // ===== Tab 1: Duplicates =====
   const [dupLoading, setDupLoading] = useState(false);
@@ -102,7 +103,6 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   const deletePolling = useTaskPolling({
     onComplete: () => {
       onCompleted();
-      onClose();
     },
   });
 
@@ -546,8 +546,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
     setDeleting(true);
     try {
       await confirmAction();
-      // For async delete tasks, we don't show success here - it will be shown when the task completes
-      // For sync operations, we still show success
+      // For async delete tasks, success is surfaced when the task completes
     } catch (err: any) {
       message.error(err?.response?.data?.error || '删除失败');
     } finally {
@@ -582,8 +581,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
         .forEach(r => selectedItems.push(toDeleteTarget(r)));
     }
     if (selectedItems.length === 0) return;
-    // Backend loads thresholds from the original scan task's params_json
-    // (scan_task_id) so live form edits cannot desync revalidation.
+    // 后端从原扫描任务 params_json 读取阈值（scan_task_id），表单实时改动不会造成校验偏差
     const task = await taskApi.createBatchDeleteLowVersionsTask(
       selectedItems, deleteFiles, lowTaskId,
     );
@@ -592,21 +590,26 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
 
   // ===== Table columns =====
   const dupResultColumns = [
-    { title: '条码', dataIndex: 'barcode', width: 140 },
+    { title: '条码', dataIndex: 'barcode', width: 140,
+      render: (v: string) => <span className="mono">{v}</span> },
     { title: '类型', dataIndex: 'image_type', width: 70, render: (t: string) => TYPE_LABELS[t] || t },
-    { title: '版本', dataIndex: 'version_label', width: 70 },
-    { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
-    { title: '图片数', dataIndex: 'image_count', width: 60 },
-    { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
+    { title: '版本', dataIndex: 'version_label', width: 70,
+      render: (v: string) => <span className="mono">{v}</span> },
+    { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180,
+      render: (v: string) => <span className="mono">{v.slice(0, 19)}</span> },
+    { title: '图片数', dataIndex: 'image_count', width: 70,
+      render: (v: number) => <span className="mono">{v}</span> },
+    { title: '大小', dataIndex: 'total_file_size', width: 90,
+      render: (v: number) => <span className="mono">{fmtSize(v)}</span> },
     {
-      title: '删除状态', dataIndex: 'delete_status', width: 80,
+      title: '删除状态', dataIndex: 'delete_status', width: 90,
       render: (s: string) => {
         const cfg = DELETE_STATUS_CONFIG[s] || { color: 'default', label: s };
         return <Tag color={cfg.color}>{cfg.label}</Tag>;
       },
     },
     {
-      title: '选择', width: 50,
+      title: '选择', width: 56,
       render: (_: unknown, r: DuplicateScanResultItem) => (
         <Checkbox checked={dupResultSelectedIds.has(r.id)} onChange={() => toggleDupOne(r.id)} />
       ),
@@ -614,12 +617,17 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   ];
 
   const lowResultColumns = [
-    { title: '条码', dataIndex: 'barcode', width: 140 },
+    { title: '条码', dataIndex: 'barcode', width: 140,
+      render: (v: string) => <span className="mono">{v}</span> },
     { title: '类型', dataIndex: 'image_type', width: 70, render: (t: string) => TYPE_LABELS[t] || t },
-    { title: '版本', dataIndex: 'version_label', width: 60 },
-    { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
-    { title: '图片数', dataIndex: 'image_count', width: 60 },
-    { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
+    { title: '版本', dataIndex: 'version_label', width: 60,
+      render: (v: string) => <span className="mono">{v}</span> },
+    { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180,
+      render: (v: string) => <span className="mono">{v.slice(0, 19)}</span> },
+    { title: '图片数', dataIndex: 'image_count', width: 70,
+      render: (v: number) => <span className="mono">{v}</span> },
+    { title: '大小', dataIndex: 'total_file_size', width: 90,
+      render: (v: number) => <span className="mono">{fmtSize(v)}</span> },
     {
       title: '状态', width: 150,
       render: (_: unknown, r: LowVersionScanResultItem) => {
@@ -628,7 +636,7 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       },
     },
     {
-      title: '选择', width: 50,
+      title: '选择', width: 56,
       render: (_: unknown, r: LowVersionScanResultItem) => {
         if (r.status_tag !== 'will_delete') return null;
         return <Checkbox checked={lowResultSelectedIds.has(r.id)} onChange={() => toggleLowOne(r.id)} />;
@@ -653,53 +661,72 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
   ) : 0;
   const dvKeepCount = dvResults?.summary.total_keep ?? 0;
 
-  // ===== Tab items =====
-  const tabItems = [
-    {
-      key: 'duplicates',
-      label: '删除重复文件夹',
-      children: (
-        <div>
-          <Button type="primary" loading={dupLoading} onClick={handleScanDuplicates} style={{ marginBottom: 16 }}>
+  // ===== Sections =====
+
+  const renderDuplicates = () => (
+    <div className="batch-grid">
+      <div>
+        <div className="toolbar">
+          <Button type="primary" loading={dupLoading} onClick={handleScanDuplicates}>
             扫描重复
           </Button>
-
           {dupPolling && dupCurrentTask && (
-            <div style={{ marginBottom: 16 }}>
+            <div style={{ flex: 1, minWidth: 220 }}>
               <TaskProgress task={dupCurrentTask} />
             </div>
           )}
-
           {dupTaskStatus === 'error' && !dupPolling && (
-            <div style={{ color: '#ff4d4f', marginBottom: 16 }}>任务执行失败</div>
+            <span style={{ color: 'var(--red)', fontSize: 12 }}>任务执行失败</span>
           )}
+        </div>
 
-          <Divider>任务历史</Divider>
-          <div style={{ marginBottom: 16 }}>
-            <TaskList
-              tasks={dupTasks}
-              onSelectTask={handleSelectDupTask}
-              onDeleteTask={handleDeleteDupTask}
-              selectedTaskId={dupTaskId}
-              typeLabel="重复扫描"
-              onRefresh={refreshDupTasks}
-            />
+        {dupResults && dupResults.items.length === 0 && (
+          <div className="panel">
+            <EmptyBlock ok icon={<CheckCircleOutlined />} text="未发现重复文件夹" />
           </div>
+        )}
 
-          {dupResults && dupResults.items.length === 0 && (
-            <div style={{ color: '#52c41a', marginBottom: 16 }}>未发现重复文件夹</div>
-          )}
-
-          {dupResults && dupResults.items.length > 0 && (
-            <>
-              <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
-                <Checkbox checked={dupAllChecked} indeterminate={dupIndeterminate} onChange={toggleDupPage}>
-                  全选当前页
-                </Checkbox>
-                <Button size="small" onClick={selectAllDup}>全选全部 ({dupResults.total})</Button>
-                <Text type="secondary">共 {dupResults.total} 条结果</Text>
-              </div>
-
+        {dupResults && dupResults.items.length > 0 && (
+          <>
+            <div className="toolbar">
+              <Checkbox checked={dupAllChecked} indeterminate={dupIndeterminate} onChange={toggleDupPage}>
+                全选当前页
+              </Checkbox>
+              <Button size="small" onClick={selectAllDup} loading={selectAllLoading}>
+                全选全部 ({dupResults.total})
+              </Button>
+              <span className="hint">共 {dupResults.total} 条结果</span>
+              <span className="spacer" />
+              <span className="dock-count">已选 <strong>{dupSelectedCount}</strong> 项</span>
+              <Button
+                danger
+                disabled={dupSelectedCount === 0}
+                loading={deleting}
+                onClick={() => openConfirm(
+                  buildDupDeleteAction(false),
+                  false,
+                  '确认删除重复文件夹',
+                  `将删除 ${dupSelectedCount} 组重复文件夹（仅删除索引，文件保留）。此操作不可撤销。`,
+                )}
+              >
+                仅删索引
+              </Button>
+              <Button
+                danger
+                type="primary"
+                disabled={dupSelectedCount === 0}
+                loading={deleting}
+                onClick={() => openConfirm(
+                  buildDupDeleteAction(true),
+                  true,
+                  '确认删除重复文件夹及文件',
+                  `将删除 ${dupSelectedCount} 组重复文件夹的索引和磁盘文件。此操作不可撤销！`,
+                )}
+              >
+                删索引和文件
+              </Button>
+            </div>
+            <div className="panel">
               <Table
                 rowKey="id"
                 columns={dupResultColumns}
@@ -712,118 +739,115 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                   showSizeChanger: false,
                   onChange: (page) => loadDupResults(dupTaskId!, page),
                 }}
-                style={{ marginBottom: 16 }}
               />
+            </div>
+          </>
+        )}
+      </div>
 
-              <Divider />
-              <Space>
-                <Text strong>已选 {dupSelectedCount} 项</Text>
-                <Button
-                  danger
-                  disabled={dupSelectedCount === 0}
-                  loading={deleting}
-                  onClick={() => openConfirm(
-                    buildDupDeleteAction(false),
-                    false,
-                    '确认删除重复文件夹',
-                    `将删除 ${dupSelectedCount} 组重复文件夹（仅删除索引，文件保留）。此操作不可撤销。`,
-                  )}
-                >
-                  仅删索引
-                </Button>
-                <Button
-                  danger
-                  type="primary"
-                  disabled={dupSelectedCount === 0}
-                  loading={deleting}
-                  onClick={() => openConfirm(
-                    buildDupDeleteAction(true),
-                    true,
-                    '确认删除重复文件夹及文件',
-                    `将删除 ${dupSelectedCount} 组重复文件夹的索引和磁盘文件。此操作不可撤销！`,
-                  )}
-                >
-                  删索引和文件
-                </Button>
-              </Space>
-            </>
-          )}
-        </div>
-      ),
-    },
-    {
-      key: 'lowVersions',
-      label: '删除低版本',
-      children: (
-        <div>
-          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>
+      <div>
+        <TaskRail
+          tasks={dupTasks}
+          onSelectTask={handleSelectDupTask}
+          onDeleteTask={handleDeleteDupTask}
+          selectedTaskId={dupTaskId}
+          typeLabel="重复扫描"
+          onRefresh={refreshDupTasks}
+        />
+      </div>
+    </div>
+  );
+
+  const renderLowVersions = () => (
+    <div className="batch-grid">
+      <div>
+        <div className="panel panel-pad" style={{ marginBottom: 14 }}>
+          <div style={{ marginBottom: 10, color: 'var(--t2)', fontSize: 12.5 }}>
             删除图片数量少于阈值的版本（每个条码至少保留一个版本）
           </div>
-          <Space direction="vertical" style={{ marginBottom: 16 }}>
-            <Space>
+          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 14 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
               <Checkbox checked={mainEnabled} onChange={e => setMainEnabled(e.target.checked)}>
                 主图删除图片数 &lt;
               </Checkbox>
               <InputNumber min={1} value={mainThreshold} onChange={v => setMainThreshold(v || 3)} disabled={!mainEnabled} style={{ width: 70 }} />
-              <span style={{ color: '#666' }}>张的版本</span>
-            </Space>
-            <Space>
+              <span style={{ color: 'var(--t3)' }}>张的版本</span>
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
               <Checkbox checked={detailEnabled} onChange={e => setDetailEnabled(e.target.checked)}>
                 详情图删除图片数 &lt;
               </Checkbox>
               <InputNumber min={1} value={detailThreshold} onChange={v => setDetailThreshold(v || 5)} disabled={!detailEnabled} style={{ width: 70 }} />
-              <span style={{ color: '#666' }}>张的版本</span>
-            </Space>
-          </Space>
-
+              <span style={{ color: 'var(--t3)' }}>张的版本</span>
+            </span>
+          </div>
           <Button
             type="primary"
             loading={lowLoading}
             onClick={handleMatchLow}
             disabled={!mainEnabled && !detailEnabled}
-            style={{ marginBottom: 16 }}
           >
             执行匹配
           </Button>
+        </div>
 
-          {lowPolling && lowCurrentTask && (
-            <div style={{ marginBottom: 16 }}>
-              <TaskProgress task={lowCurrentTask} />
-            </div>
-          )}
-
-          {lowTaskStatus === 'error' && !lowPolling && (
-            <div style={{ color: '#ff4d4f', marginBottom: 16 }}>任务执行失败</div>
-          )}
-
-          <Divider>任务历史</Divider>
-          <div style={{ marginBottom: 16 }}>
-            <TaskList
-              tasks={lowTasks}
-              onSelectTask={handleSelectLowTask}
-              onDeleteTask={handleDeleteLowTask}
-              selectedTaskId={lowTaskId}
-              typeLabel="低版本扫描"
-              onRefresh={refreshLowTasks}
-            />
+        {lowPolling && lowCurrentTask && (
+          <div style={{ marginBottom: 14 }}>
+            <TaskProgress task={lowCurrentTask} />
           </div>
+        )}
 
-          {lowResults && lowResults.items.length === 0 && (
-            <div style={{ color: '#52c41a', marginBottom: 16 }}>所有版本均满足阈值要求</div>
-          )}
+        {lowTaskStatus === 'error' && !lowPolling && (
+          <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 14 }}>任务执行失败</div>
+        )}
 
-          {lowResults && lowResults.items.length > 0 && (
-            <>
-              <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
-                <Checkbox checked={lowAllChecked} indeterminate={lowIndeterminate} onChange={toggleLowPage}>
-                  全选当前页（仅将删除项）
-                </Checkbox>
-                <Button size="small" onClick={selectAllLow}>
-                  全选全部待删除项{lowResults.summary?.will_delete != null ? ` (${lowResults.summary.will_delete})` : ''}
-                </Button>
-                <Text type="secondary">共 {lowResults.total} 条结果</Text>
-              </div>
+        {lowResults && lowResults.items.length === 0 && (
+          <div className="panel">
+            <EmptyBlock ok icon={<CheckCircleOutlined />} text="所有版本均满足阈值要求" />
+          </div>
+        )}
 
+        {lowResults && lowResults.items.length > 0 && (
+          <>
+            <div className="toolbar">
+              <Checkbox checked={lowAllChecked} indeterminate={lowIndeterminate} onChange={toggleLowPage}>
+                全选当前页（仅将删除项）
+              </Checkbox>
+              <Button size="small" onClick={selectAllLow} loading={selectAllLoading}>
+                全选全部待删除项{lowResults.summary?.will_delete != null ? ` (${lowResults.summary.will_delete})` : ''}
+              </Button>
+              <span className="hint">共 {lowResults.total} 条结果</span>
+              <span className="spacer" />
+              <span className="dock-count">已选 <strong>{lowSelectedCount}</strong> 项</span>
+              <Button
+                danger
+                disabled={lowSelectedCount === 0}
+                loading={deleting}
+                onClick={() => openConfirm(
+                  buildLowDeleteAction(false),
+                  false,
+                  '确认删除低版本',
+                  `将删除 ${lowSelectedCount} 个版本（仅删除索引，文件保留）。此操作不可撤销。`,
+                )}
+              >
+                仅删索引
+              </Button>
+              <Button
+                danger
+                type="primary"
+                disabled={lowSelectedCount === 0}
+                loading={deleting}
+                onClick={() => openConfirm(
+                  buildLowDeleteAction(true),
+                  true,
+                  '确认删除低版本及文件',
+                  `将删除 ${lowSelectedCount} 个版本的索引和磁盘文件。此操作不可撤销！`,
+                )}
+              >
+                删索引和文件
+              </Button>
+            </div>
+            <div className="panel">
               <Table
                 rowKey="id"
                 columns={lowResultColumns}
@@ -836,236 +860,213 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
                   showSizeChanger: false,
                   onChange: (page) => loadLowResults(lowTaskId!, page),
                 }}
-                style={{ marginBottom: 16 }}
               />
+            </div>
+          </>
+        )}
+      </div>
 
-              <Divider />
-              <Space>
-                <Text strong>已选 {lowSelectedCount} 项</Text>
-                <Button
-                  danger
-                  disabled={lowSelectedCount === 0}
-                  loading={deleting}
-                  onClick={() => openConfirm(
-                    buildLowDeleteAction(false),
-                    false,
-                    '确认删除低版本',
-                    `将删除 ${lowSelectedCount} 个版本（仅删除索引，文件保留）。此操作不可撤销。`,
-                  )}
-                >
-                  仅删索引
-                </Button>
-                <Button
-                  danger
-                  type="primary"
-                  disabled={lowSelectedCount === 0}
-                  loading={deleting}
-                  onClick={() => openConfirm(
-                    buildLowDeleteAction(true),
-                    true,
-                    '确认删除低版本及文件',
-                    `将删除 ${lowSelectedCount} 个版本的索引和磁盘文件。此操作不可撤销！`,
-                  )}
-                >
-                  删索引和文件
-                </Button>
-              </Space>
-            </>
-          )}
-        </div>
-      ),
-    },
-    {
-      key: 'duplicateVersions',
-      label: '检测重复版本',
-      children: (
-        <div>
-          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>
-            检测图片张数相同、对应位置图片视觉相同的重复版本（支持 MD5 精确匹配和 pHash 感知哈希相似度）
-          </div>
+      <div>
+        <TaskRail
+          tasks={lowTasks}
+          onSelectTask={handleSelectLowTask}
+          onDeleteTask={handleDeleteLowTask}
+          selectedTaskId={lowTaskId}
+          typeLabel="低版本扫描"
+          onRefresh={refreshLowTasks}
+        />
+      </div>
+    </div>
+  );
 
-          <Button type="primary" loading={dvLoading} onClick={handleScanDuplicateVersions} style={{ marginBottom: 16 }}>
+  const renderDuplicateVersions = () => (
+    <div className="batch-grid">
+      <div>
+        <div className="toolbar">
+          <Button type="primary" loading={dvLoading} onClick={handleScanDuplicateVersions}>
             检测重复版本
           </Button>
-
-          {dvPolling && dvCurrentTask && (
-            <div style={{ marginBottom: 16 }}>
-              <TaskProgress task={dvCurrentTask} />
-            </div>
-          )}
-
-          {dvTaskStatus === 'error' && !dvPolling && (
-            <div style={{ color: '#ff4d4f', marginBottom: 16 }}>任务执行失败</div>
-          )}
-
-          <Divider>任务历史</Divider>
-          <div style={{ marginBottom: 16 }}>
-            <TaskList
-              tasks={dvTasks}
-              onSelectTask={handleSelectDvTask}
-              onDeleteTask={handleDeleteDvTask}
-              selectedTaskId={dvTaskId}
-              typeLabel="重复版本检测"
-              onRefresh={refreshDvTasks}
-            />
-          </div>
-
-          {dvResultsLoading && (
-            <div style={{ marginBottom: 16, color: '#1890ff' }}>正在加载结果...</div>
-          )}
-
-          {dvResults && dvResults.groups.length === 0 && !dvResultsLoading && (
-            <div style={{ color: '#52c41a', marginBottom: 16 }}>未发现重复版本</div>
-          )}
-
-          {dvResults && dvResults.groups.length > 0 && (
-            <>
-              <div style={{ marginBottom: 12, display: 'flex', gap: 16, alignItems: 'center' }}>
-                <Text type="secondary">
-                  发现 {dvResults.summary.total_groups} 组重复版本，
-                  保留 {dvResults.summary.total_keep} 个，
-                  建议清理 {dvResults.summary.total_clean} 个
-                  {dvResults.summary.total_deleted > 0 && `，已清理 ${dvResults.summary.total_deleted} 个`}
-                </Text>
-              </div>
-
-              <div style={{ maxHeight: 400, overflowY: 'auto', marginBottom: 16 }}>
-                {dvResults.groups.map(group => {
-                  const isExpanded = dvExpandedGroups.has(group.group_id);
-                  const keepMember = group.members.find(m => m.role === 'keep' || m.role === 'user_selected');
-                  const cleanMembers = group.members.filter(m => m.role === 'clean');
-                  return (
-                    <div key={group.group_id} style={{ border: '1px solid #f0f0f0', borderRadius: 6, marginBottom: 8, padding: 12 }}>
-                      <div
-                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
-                        onClick={() => toggleDvGroup(group.group_id)}
-                      >
-                        <Space>
-                          <Text strong>{group.barcode}</Text>
-                          <Tag>{TYPE_LABELS[group.image_type] || group.image_type}</Tag>
-                          <Text type="secondary">{group.image_count} 张图</Text>
-                          <Text type="secondary">{group.members.length} 个版本</Text>
-                        </Space>
-                        <Space>
-                          {keepMember && (
-                            <Tag color="green">保留: {keepMember.version_label} {keepMember.keep_reason && `(${keepMember.keep_reason})`}</Tag>
-                          )}
-                          <Text type="secondary">{isExpanded ? '▲' : '▼'}</Text>
-                        </Space>
-                      </div>
-
-                      {isExpanded && (
-                        <div style={{ marginTop: 12 }}>
-                          <Table
-                            rowKey="id"
-                            size="small"
-                            pagination={false}
-                            dataSource={group.members}
-                            columns={[
-                              {
-                                title: '角色', width: 80,
-                                render: (_: unknown, m: typeof group.members[0]) => {
-                                  if (m.role === 'keep' || m.role === 'user_selected') return <Tag color="green">保留</Tag>;
-                                  return <Tag color="red">清理</Tag>;
-                                },
-                              },
-                              { title: '版本', dataIndex: 'version_label', width: 60 },
-                              { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180, render: (v: string) => v.slice(0, 19) },
-                              { title: '图片数', dataIndex: 'image_count', width: 60 },
-                              { title: '大小', dataIndex: 'total_file_size', width: 80, render: (v: number) => fmtSize(v) },
-                              {
-                                title: '保留原因', dataIndex: 'keep_reason', width: 120,
-                                render: (v: string) => v || '-',
-                              },
-                              {
-                                title: '状态', width: 100,
-                                render: (_: unknown, m: typeof group.members[0]) => {
-                                  if (m.delete_status === 'deleted') return <Tag color="success">已清理</Tag>;
-                                  if (m.delete_status === 'failed') return <Tag color="error">失败</Tag>;
-                                  if (m.delete_status === 'skipped') return <Tag color="warning">跳过</Tag>;
-                                  return <Tag>待处理</Tag>;
-                                },
-                              },
-                              {
-                                title: '操作', width: 180,
-                                render: (_: unknown, m: typeof group.members[0]) => (
-                                  <Space size="small">
-                                    {m.role === 'clean' && m.delete_status === 'pending' && (
-                                      <Button size="small" type="link" onClick={() => handleChangeKeep(group.group_id, m.folder_ctime)}>
-                                        设为保留
-                                      </Button>
-                                    )}
-                                  </Space>
-                                ),
-                              },
-                            ]}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              <Divider />
-              <Space>
-                <Button
-                  danger
-                  loading={deleting}
-                  onClick={() => {
-                    if (!dvResults) return;
-                    openConfirm(
-                      async () => { await handleExecuteCleanup(false); },
-                      false,
-                      '确认清理重复版本',
-                      `将保留 ${dvKeepCount} 个版本，清理 ${dvCleanCount} 个重复版本（仅删除索引，文件保留）。此操作不可撤销。`,
-                    );
-                  }}
-                >
-                  仅删索引
-                </Button>
-                <Button
-                  danger
-                  type="primary"
-                  loading={deleting}
-                  onClick={() => {
-                    if (!dvResults) return;
-                    openConfirm(
-                      async () => { await handleExecuteCleanup(true); },
-                      true,
-                      '确认清理重复版本及文件',
-                      `将保留 ${dvKeepCount} 个版本，清理 ${dvCleanCount} 个重复版本的索引和磁盘文件。此操作不可撤销！`,
-                    );
-                  }}
-                >
-                  删索引和文件
-                </Button>
-              </Space>
-            </>
-          )}
+          <span className="view-sub">检测张数相同、对应位置视觉相同的重复版本（MD5 精确 + pHash 感知哈希）</span>
         </div>
-      ),
-    },
-  ];
+
+        {dvPolling && dvCurrentTask && (
+          <div style={{ marginBottom: 14 }}>
+            <TaskProgress task={dvCurrentTask} />
+          </div>
+        )}
+
+        {dvTaskStatus === 'error' && !dvPolling && (
+          <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 14 }}>任务执行失败</div>
+        )}
+
+        {dvResultsLoading && (
+          <div style={{ marginBottom: 14, color: 'var(--acc-2)', fontSize: 12 }}>正在加载结果…</div>
+        )}
+
+        {dvResults && dvResults.groups.length === 0 && !dvResultsLoading && (
+          <div className="panel">
+            <EmptyBlock ok icon={<CheckCircleOutlined />} text="未发现重复版本" />
+          </div>
+        )}
+
+        {dvResults && dvResults.groups.length > 0 && (
+          <>
+            <div className="toolbar">
+              <span className="hint">
+                发现 {dvResults.summary.total_groups} 组重复版本，保留 {dvResults.summary.total_keep} 个，
+                建议清理 {dvResults.summary.total_clean} 个
+                {dvResults.summary.total_deleted > 0 && `，已清理 ${dvResults.summary.total_deleted} 个`}
+              </span>
+              <span className="spacer" />
+              <Button
+                danger
+                loading={deleting}
+                onClick={() => {
+                  if (!dvResults) return;
+                  openConfirm(
+                    async () => { await handleExecuteCleanup(false); },
+                    false,
+                    '确认清理重复版本',
+                    `将保留 ${dvKeepCount} 个版本，清理 ${dvCleanCount} 个重复版本（仅删除索引，文件保留）。此操作不可撤销。`,
+                  );
+                }}
+              >
+                仅删索引
+              </Button>
+              <Button
+                danger
+                type="primary"
+                loading={deleting}
+                onClick={() => {
+                  if (!dvResults) return;
+                  openConfirm(
+                    async () => { await handleExecuteCleanup(true); },
+                    true,
+                    '确认清理重复版本及文件',
+                    `将保留 ${dvKeepCount} 个版本，清理 ${dvCleanCount} 个重复版本的索引和磁盘文件。此操作不可撤销！`,
+                  );
+                }}
+              >
+                删索引和文件
+              </Button>
+            </div>
+
+            <div>
+              {dvResults.groups.map(group => {
+                const isExpanded = dvExpandedGroups.has(group.group_id);
+                const keepMember = group.members.find(m => m.role === 'keep' || m.role === 'user_selected');
+                return (
+                  <div key={group.group_id} className="dv-group">
+                    <div className="dv-group-head" onClick={() => toggleDvGroup(group.group_id)}>
+                      <span className={`dv-arrow${isExpanded ? ' open' : ''}`}>▶</span>
+                      <span className="mono" style={{ fontWeight: 600 }}>{group.barcode}</span>
+                      <Tag>{TYPE_LABELS[group.image_type] || group.image_type}</Tag>
+                      <span className="hint">{group.image_count} 张图 · {group.members.length} 个版本</span>
+                      <span style={{ marginLeft: 'auto' }}>
+                        {keepMember && (
+                          <Tag color="green">保留: {keepMember.version_label} {keepMember.keep_reason && `(${keepMember.keep_reason})`}</Tag>
+                        )}
+                      </span>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="dv-group-body">
+                        <Table
+                          rowKey="id"
+                          size="small"
+                          pagination={false}
+                          dataSource={group.members}
+                          columns={[
+                            {
+                              title: '角色', width: 80,
+                              render: (_: unknown, m: typeof group.members[0]) => {
+                                if (m.role === 'keep' || m.role === 'user_selected') return <Tag color="green">保留</Tag>;
+                                return <Tag color="red">清理</Tag>;
+                              },
+                            },
+                            { title: '版本', dataIndex: 'version_label', width: 60,
+                              render: (v: string) => <span className="mono">{v}</span> },
+                            { title: '文件夹时间', dataIndex: 'folder_ctime', width: 180,
+                              render: (v: string) => <span className="mono">{v.slice(0, 19)}</span> },
+                            { title: '图片数', dataIndex: 'image_count', width: 70,
+                              render: (v: number) => <span className="mono">{v}</span> },
+                            { title: '大小', dataIndex: 'total_file_size', width: 90,
+                              render: (v: number) => <span className="mono">{fmtSize(v)}</span> },
+                            {
+                              title: '保留原因', dataIndex: 'keep_reason', width: 120,
+                              render: (v: string) => v || '-',
+                            },
+                            {
+                              title: '状态', width: 100,
+                              render: (_: unknown, m: typeof group.members[0]) => {
+                                if (m.delete_status === 'deleted') return <Tag color="success">已清理</Tag>;
+                                if (m.delete_status === 'failed') return <Tag color="error">失败</Tag>;
+                                if (m.delete_status === 'skipped') return <Tag color="warning">跳过</Tag>;
+                                return <Tag>待处理</Tag>;
+                              },
+                            },
+                            {
+                              title: '操作', width: 100,
+                              render: (_: unknown, m: typeof group.members[0]) => (
+                                m.role === 'clean' && m.delete_status === 'pending' ? (
+                                  <Button size="small" type="link" onClick={() => handleChangeKeep(group.group_id, m.folder_ctime)}>
+                                    设为保留
+                                  </Button>
+                                ) : null
+                              ),
+                            },
+                          ]}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div>
+        <TaskRail
+          tasks={dvTasks}
+          onSelectTask={handleSelectDvTask}
+          onDeleteTask={handleDeleteDvTask}
+          selectedTaskId={dvTaskId}
+          typeLabel="重复版本检测"
+          onRefresh={refreshDvTasks}
+        />
+      </div>
+    </div>
+  );
 
   return (
     <>
-      <Modal
-        title="批量操作"
-        open={visible}
-        onCancel={onClose}
-        width={960}
-        footer={null}
-        destroyOnClose
-      >
-        {deletePolling.polling && deletePolling.currentTask && (
-          <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 6 }}>
-            <div style={{ marginBottom: 8, fontWeight: 500 }}>正在删除...</div>
-            <TaskProgress task={deletePolling.currentTask} />
-          </div>
-        )}
-        <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} />
-      </Modal>
+      <div className="view-head">
+        <div className="view-sub">扫描并清理重复文件夹、低版本与重复版本</div>
+        <div className="view-head-right">
+          <Seg
+            value={activeTab}
+            onChange={setActiveTab}
+            options={[
+              { value: 'duplicates', label: '重复文件夹' },
+              { value: 'lowVersions', label: '低版本' },
+              { value: 'duplicateVersions', label: '重复版本' },
+            ]}
+          />
+        </div>
+      </div>
+
+      {deletePolling.polling && deletePolling.currentTask && (
+        <div className="scan-progress-card">
+          <div className="scan-phase">正在删除…</div>
+          <TaskProgress task={deletePolling.currentTask} />
+        </div>
+      )}
+
+      {activeTab === 'duplicates' && renderDuplicates()}
+      {activeTab === 'lowVersions' && renderLowVersions()}
+      {activeTab === 'duplicateVersions' && renderDuplicateVersions()}
 
       <Modal
         title={confirmTitle}
@@ -1078,11 +1079,11 @@ const BatchOperations: React.FC<Props> = ({ visible, onClose, onCompleted }) => 
       >
         <p>{confirmBody}</p>
         {confirmDeleteFiles && (
-          <p style={{ color: '#ff4d4f', fontWeight: 'bold' }}>⚠ 将同时删除磁盘上的文件！</p>
+          <p style={{ color: 'var(--red)', fontWeight: 'bold' }}>⚠ 将同时删除磁盘上的文件！</p>
         )}
       </Modal>
     </>
   );
 };
 
-export default BatchOperations;
+export default BatchView;
