@@ -1,17 +1,42 @@
 ﻿import axios from 'axios';
 
 const api = axios.create({ baseURL: '/api' });
+const API_TOKEN_STORAGE_KEY = 'api_token';
+
+export const readStoredApiToken = (): string => {
+  try {
+    return typeof localStorage !== 'undefined'
+      ? localStorage.getItem(API_TOKEN_STORAGE_KEY) || ''
+      : '';
+  } catch {
+    return '';
+  }
+};
+
+export const writeStoredApiToken = (token: string): boolean => {
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    if (token) {
+      localStorage.setItem(API_TOKEN_STORAGE_KEY, token);
+    } else {
+      localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+    }
+    return true;
+  } catch {
+    // 无痕模式或存储被禁用时，当前请求仍可使用显式请求头。
+    return false;
+  }
+};
 
 // Optional API token from localStorage / Vite env for mutating requests.
 // Never put the token in URLs; only X-API-Token header.
 api.interceptors.request.use((config) => {
   const token =
-    (typeof localStorage !== 'undefined' && localStorage.getItem('api_token')) ||
+    readStoredApiToken() ||
     (import.meta as { env?: { VITE_API_TOKEN?: string } }).env?.VITE_API_TOKEN ||
     '';
-  if (token) {
-    config.headers = config.headers || {};
-    (config.headers as Record<string, string>)['X-API-Token'] = token;
+  if (token && !config.headers.get('X-API-Token')) {
+    config.headers.set('X-API-Token', token);
   }
   return config;
 });
@@ -512,7 +537,25 @@ export interface LogDirInfo {
   files: LogFileInfo[];
 }
 
+export interface NetworkSettings {
+  lan_mode: boolean;
+  api_token_configured: boolean;
+  restart_required: boolean;
+  message?: string;
+}
+
 export const settingsApi = {
+  getNetworkSettings: () =>
+    api.get<NetworkSettings>('/settings/network').then(r => r.data),
+  setNetworkSettings: (
+    data: { lan_mode: boolean; api_token?: string },
+    authToken?: string,
+  ) =>
+    api.put<NetworkSettings>(
+      '/settings/network',
+      data,
+      authToken ? { headers: { 'X-API-Token': authToken } } : undefined,
+    ).then(r => r.data),
   getDebugMode: () =>
     api.get<{ debug_mode: boolean }>('/settings/debug-mode').then(r => r.data),
   setDebugMode: (debugMode: boolean) =>

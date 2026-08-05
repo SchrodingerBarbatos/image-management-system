@@ -2,14 +2,29 @@ import os
 import subprocess
 import logging
 from flask import Blueprint, request, jsonify
-from config import LOG_DIR, load_config, save_config
+from config import AuthStateError, LOG_DIR, load_config, save_config
 from routes._utils import JSONPayloadError, json_payload_error_response, require_json_object
 
 settings_bp = Blueprint('settings', __name__)
+_log = logging.getLogger(__name__)
 
 # Reference to the duplicate_version_detector module logger
 _dvd_log = logging.getLogger('duplicate_version_detector')
 _debug_handler = None
+_MIN_API_TOKEN_LENGTH = 16
+_MAX_API_TOKEN_LENGTH = 256
+
+
+def _network_settings_payload(cfg, *, restart_required=False, message=None):
+    """Return public network settings without exposing the API token."""
+    payload = {
+        'lan_mode': cfg.get('lan_mode') is True,
+        'api_token_configured': bool(cfg.get('api_token')),
+        'restart_required': bool(restart_required),
+    }
+    if message:
+        payload['message'] = message
+    return payload
 
 
 def _ensure_debug_handler():
@@ -68,6 +83,68 @@ def set_debug_mode():
     else:
         _remove_debug_handler()
         return jsonify({"debug_mode": False, "message": "调试模式已关闭"})
+
+
+@settings_bp.route('/settings/network', methods=['GET'])
+def get_network_settings():
+    cfg, err = load_config()
+    if err:
+        _log.error('读取网络设置失败: %s', err)
+        return jsonify({'error': '配置读取失败，无法加载网络设置'}), 503
+    return jsonify(_network_settings_payload(cfg))
+
+
+@settings_bp.route('/settings/network', methods=['PUT'])
+def set_network_settings():
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
+
+    if 'lan_mode' not in data or not isinstance(data['lan_mode'], bool):
+        return jsonify({'error': 'lan_mode must be a boolean'}), 400
+
+    cfg, err = load_config()
+    if err:
+        _log.error('保存网络设置前读取配置失败: %s', err)
+        return jsonify({'error': '配置读取失败，拒绝覆盖网络设置'}), 503
+
+    old_lan_mode = cfg.get('lan_mode') is True
+    if 'api_token' in data:
+        raw_token = data['api_token']
+        if not isinstance(raw_token, str):
+            return jsonify({'error': 'api_token must be a string'}), 400
+        token = raw_token.strip()
+        if token and len(token) < _MIN_API_TOKEN_LENGTH:
+            return jsonify({
+                'error': f'API Token 至少需要 {_MIN_API_TOKEN_LENGTH} 个字符',
+            }), 400
+        if len(token) > _MAX_API_TOKEN_LENGTH or '\r' in token or '\n' in token:
+            return jsonify({
+                'error': f'API Token 不能超过 {_MAX_API_TOKEN_LENGTH} 个字符且不能包含换行',
+            }), 400
+        cfg['api_token'] = token
+
+    lan_mode = data['lan_mode']
+    cfg['lan_mode'] = lan_mode
+    restart_required = old_lan_mode != lan_mode
+    try:
+        save_config(cfg)
+    except AuthStateError:
+        _log.exception('无法持久化 API Token 鉴权状态')
+        return jsonify({'error': '无法持久化鉴权状态，请检查 data 目录写权限'}), 500
+    except Exception:
+        _log.exception('保存网络设置失败')
+        return jsonify({'error': '保存网络设置失败'}), 500
+
+    message = '网络设置已保存'
+    if restart_required:
+        message += '，请重启应用后生效'
+    return jsonify(_network_settings_payload(
+        cfg,
+        restart_required=restart_required,
+        message=message,
+    ))
 
 
 @settings_bp.route('/settings/log-dir', methods=['GET'])
