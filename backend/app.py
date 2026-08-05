@@ -3,7 +3,6 @@ import ctypes
 import threading
 import socket
 import logging
-import re
 try:
     import tkinter.messagebox
 except ImportError:
@@ -124,6 +123,63 @@ Base.metadata.create_all(bind=engine)
 from sqlalchemy import text
 with engine.connect() as conn:
     _migrate_export_task_schema(conn)
+
+
+def _migrate_scan_root_path_keys(conn):
+    """Backfill normalized scan-root keys and install the duplicate guard."""
+    from routes._utils import normalize_scan_root_path
+
+    columns = {
+        row[1] for row in conn.execute(text("PRAGMA table_info('scan_root')"))
+    }
+    if 'path_key' not in columns:
+        conn.execute(text('ALTER TABLE scan_root ADD COLUMN path_key TEXT'))
+        conn.commit()
+
+    rows = conn.execute(text(
+        "SELECT id, path, path_key FROM scan_root ORDER BY id"
+    )).fetchall()
+    for root_id, path, current_key in rows:
+        try:
+            path_key = normalize_scan_root_path(path)
+        except (TypeError, ValueError, OSError) as exc:
+            logging.getLogger(__name__).error(
+                '扫描目录路径无法规范化，请人工处理: id=%s path=%r error=%s',
+                root_id, path, exc,
+            )
+            continue
+        if current_key != path_key:
+            conn.execute(text(
+                'UPDATE scan_root SET path_key = :path_key WHERE id = :id'
+            ), {'path_key': path_key, 'id': root_id})
+    conn.commit()
+
+    conflicts = conn.execute(text(
+        'SELECT path_key, GROUP_CONCAT(id), COUNT(*) '
+        'FROM scan_root WHERE path_key IS NOT NULL '
+        'GROUP BY path_key HAVING COUNT(*) > 1'
+    )).fetchall()
+    if conflicts:
+        logging.getLogger(__name__).error(
+            '扫描目录存在规范化路径冲突，已保留数据但暂不创建唯一索引: %s',
+            [tuple(row) for row in conflicts],
+        )
+    else:
+        conn.execute(text(
+            'CREATE UNIQUE INDEX IF NOT EXISTS uq_scan_root_path_key '
+            'ON scan_root (path_key)'
+        ))
+        conn.commit()
+
+
+with engine.connect() as conn:
+    _migrate_scan_root_path_keys(conn)
+    fk_violations = conn.execute(text('PRAGMA foreign_key_check')).fetchall()
+    if fk_violations:
+        logging.getLogger(__name__).error(
+            '数据库存在外键孤儿记录，已报告但未删除: %s',
+            [tuple(row) for row in fk_violations[:20]],
+        )
 
 @app.teardown_appcontext
 def shutdown_session(exception=None):
@@ -587,13 +643,15 @@ def _resolve_port(host, preferred):
 def _ensure_firewall_rule(port):
     """Add Windows Firewall inbound rule for the given port, if not already present."""
     import subprocess
-    rule_name = '图片管理系统 (Image Manager)'
+    # Include the port in the rule name.  A fallback port must not inherit an
+    # unrelated rule for the preferred port.
+    rule_name = f'图片管理系统 (Image Manager) TCP {port}'
     try:
         check = subprocess.run(
             ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
             capture_output=True, text=True, timeout=10,
         )
-        if re.search(r'Rule Name:\s+' + re.escape(rule_name) + r'\s*$', check.stdout, re.MULTILINE):
+        if check.returncode == 0:
             return
         subprocess.run(
             [
@@ -632,12 +690,30 @@ def _get_lan_ips():
     return ips
 
 
-def _configure_cors(app, port):
-    """Restrict CORS to localhost and LAN IPs on the given port."""
+def _configure_cors(app, port, bind_host='127.0.0.1'):
+    """Restrict CORS to the actual bind surface."""
     origins = [f'http://localhost:{port}', f'http://127.0.0.1:{port}']
-    for ip in _get_lan_ips():
-        origins.append(f'http://{ip}:{port}')
+    if bind_host == '0.0.0.0':
+        for ip in _get_lan_ips():
+            origins.append(f'http://{ip}:{port}')
     CORS(app, origins=origins)
+
+
+def _select_bind_host(lan_requested=False, debug=False, cfg=None):
+    """Select a safe bind address; LAN mode requires a usable API token."""
+    if debug:
+        return '127.0.0.1'
+    if cfg is None:
+        from config import load_config
+        cfg, _ = load_config()
+    lan_mode = lan_requested or cfg.get('lan_mode') is True
+    if not lan_mode:
+        return '127.0.0.1'
+    from config import get_api_token
+    token, fail_closed = get_api_token()
+    if fail_closed or not token:
+        raise RuntimeError('LAN 模式必须配置 API Token，服务拒绝启动')
+    return '0.0.0.0'
 
 
 def _cleanup_exports_on_startup():
@@ -697,8 +773,19 @@ def start_tray(port, open_browser_on_start=True):
 
     _bootstrap_runtime()
 
+    cfg, _ = load_config()
+    try:
+        bind_host = _select_bind_host(cfg=cfg)
+    except RuntimeError as exc:
+        logger.critical('%s', exc)
+        try:
+            tkinter.messagebox.showerror('启动失败', str(exc))
+        except Exception:
+            pass
+        return
+
     # Check port availability with fallback
-    resolved = _resolve_port('127.0.0.1', port)
+    resolved = _resolve_port(bind_host, port)
     if resolved is None:
         logger.critical("No available port in range %s-%s", port, port + 9)
         try:
@@ -710,13 +797,14 @@ def start_tray(port, open_browser_on_start=True):
         logger.warning("Port %s is in use, using fallback port %s", port, resolved)
     port = resolved
 
-    _ensure_firewall_rule(port)
-    _configure_cors(app, port)
+    if bind_host == '0.0.0.0':
+        _ensure_firewall_rule(port)
+    _configure_cors(app, port, bind_host)
 
     stop_event = threading.Event()
 
     flask_thread = threading.Thread(
-        target=lambda: __import__('waitress').serve(app, host='0.0.0.0', port=port, threads=8),
+        target=lambda: __import__('waitress').serve(app, host=bind_host, port=port, threads=8),
         daemon=True,
     )
     flask_thread.start()
@@ -758,9 +846,12 @@ def start_tray(port, open_browser_on_start=True):
 
 
 if __name__ == '__main__':
-    if IS_PACKAGED and not _is_admin():
-        _request_admin()
-        sys.exit(0)
+    if IS_PACKAGED:
+        from config import load_config
+        packaged_cfg, _ = load_config()
+        if packaged_cfg.get('lan_mode') is True and not _is_admin():
+            _request_admin()
+            sys.exit(0)
 
     if IS_PACKAGED:
         start_tray(port=5000, open_browser_on_start=True)
@@ -771,22 +862,34 @@ if __name__ == '__main__':
         parser.add_argument('--debug', action='store_true', default=False)
         parser.add_argument('--open-browser', action='store_true', default=False)
         parser.add_argument('--tray', action='store_true', default=False)
+        parser.add_argument('--lan', action='store_true', default=False,
+                            help='允许局域网访问；必须配置 API Token')
         args = parser.parse_args()
 
         if args.tray:
             start_tray(port=args.port, open_browser_on_start=args.open_browser)
         else:
+            _bootstrap_runtime()
+            from config import load_config
+            cfg, _ = load_config()
+            try:
+                bind_host = _select_bind_host(
+                    lan_requested=args.lan, debug=args.debug, cfg=cfg,
+                )
+            except RuntimeError as exc:
+                print(f'Error: {exc}', file=sys.stderr)
+                sys.exit(1)
             port = args.port
-            resolved = _resolve_port('127.0.0.1', port)
+            resolved = _resolve_port(bind_host, port)
             if resolved is None:
                 print(f"Error: ports {port}-{port+9} are all in use", file=sys.stderr)
                 sys.exit(1)
             if resolved != port:
                 print(f"Port {port} in use, using {resolved} instead")
             port = resolved
-            _bootstrap_runtime()
-            _ensure_firewall_rule(port)
-            _configure_cors(app, port)
+            if bind_host == '0.0.0.0':
+                _ensure_firewall_rule(port)
+            _configure_cors(app, port, bind_host)
             # Restore debug mode handler if it was enabled
             from config import load_config
             cfg, _ = load_config()
@@ -798,7 +901,7 @@ if __name__ == '__main__':
                 threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()
             if args.debug:
                 # Flask dev server for debug mode (reloader + debugger)
-                app.run(host='0.0.0.0', debug=True, port=port)
+                app.run(host='127.0.0.1', debug=True, port=port)
             else:
                 import waitress
-                waitress.serve(app, host='0.0.0.0', port=port, threads=8)
+                waitress.serve(app, host=bind_host, port=port, threads=8)

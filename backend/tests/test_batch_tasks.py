@@ -174,7 +174,7 @@ def test_task_results_pagination(client, sess):
 
     resp = client.post('/api/batch/duplicate-scan/tasks')
     task_id = resp.get_json()['id']
-    task = _wait_for_task(client, task_id)
+    _wait_for_task(client, task_id)
 
     # Get results
     resp = client.get(f'/api/batch/duplicate-scan/tasks/{task_id}/results?page=1&page_size=10')

@@ -599,7 +599,6 @@ def _find_groups_in_pool(pool):
 
     # Find candidate pairs via multi-index hashing (per-position)
     per_position_candidates = _mi_hash_candidates(sample_sigs)
-    num_positions = len(per_position_candidates)
 
     # Multi-position filter: count how many positions each pair is a candidate in
     # image_count <= 3: require >= 1 position hit

@@ -3,6 +3,7 @@ import subprocess
 import logging
 from flask import Blueprint, request, jsonify
 from config import LOG_DIR, load_config, save_config
+from routes._utils import JSONPayloadError, json_payload_error_response, require_json_object
 
 settings_bp = Blueprint('settings', __name__)
 
@@ -49,8 +50,13 @@ def get_debug_mode():
 
 @settings_bp.route('/settings/debug-mode', methods=['PUT'])
 def set_debug_mode():
-    data = request.get_json(force=True)
-    debug_mode = bool(data.get('debug_mode', False))
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
+    debug_mode = data.get('debug_mode', False)
+    if not isinstance(debug_mode, bool):
+        return jsonify({'error': 'debug_mode must be a boolean'}), 400
 
     cfg, _ = load_config()
     cfg['debug_mode'] = debug_mode
@@ -95,7 +101,7 @@ def clear_logs():
             path = os.path.join(LOG_DIR, name)
             try:
                 # Truncate rather than delete to avoid issues with open file handles
-                with open(path, 'w', encoding='utf-8') as f:
+                with open(path, 'w', encoding='utf-8'):
                     pass
                 cleared += 1
             except OSError:

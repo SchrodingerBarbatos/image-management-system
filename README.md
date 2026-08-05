@@ -28,6 +28,13 @@ npm install
 npm run dev            # 启动在 http://localhost:3000
 ```
 
+### 运行模式与鉴权
+
+- 默认只绑定 `127.0.0.1`，不会创建 Windows 防火墙入站规则。
+- 如需局域网访问，在 `backend/data/app_config.json` 配置 `{"lan_mode": true, "api_token": "your-token"}`，或开发启动时使用 `python app.py --lan`。LAN 模式没有 API Token 时会拒绝启动。
+- `--debug` 始终只绑定 localhost，不开放网络调试器。
+- 配置了 API Token 后，所有修改类 `/api/*` 请求使用 `X-API-Token` 或 `Authorization: Bearer ...`；GET 图片下载仍按当前媒体访问策略开放。
+
 ## 功能概览
 
 ### 扫描系统
@@ -38,6 +45,8 @@ npm run dev            # 启动在 http://localhost:3000
 - **扫描取消** — 任意阶段可安全取消，已提交的扫描结果保留，仅丢弃当前未提交的变更
 - **扫描历史** — 最近 10 条扫描记录，含新增/跳过/拒绝/耗时统计
 - **GTIN 校验** — 自动校验条码有效性，拒绝非标品条码并归档
+- **目录冲突保护** — 拒绝相同路径和递归父子目录重复建立索引
+- **故障恢复** — 可读文件恢复后扫描会把 `broken` 索引恢复为 `active`
 
 ### 版本管理
 
@@ -75,17 +84,20 @@ npm run dev            # 启动在 http://localhost:3000
 │       ├── batch.py        # 批量操作（同步）
 │       ├── batch_tasks.py  # 批量操作（异步任务）
 │       ├── images.py       # 图片 CRUD
-│       ├── barcodes.py     # 条码查询
+│       ├── rejected.py     # 被拒绝条码管理
+│       ├── settings.py     # 调试与日志设置
+│       ├── _utils.py       # JSON、路径与导出共享校验
 │       ├── export.py       # Excel 导出
 │       └── pending.py      # 待确认列表
 └── frontend/
     └── src/
         ├── components/
-        │   ├── ScanManager.tsx       # 扫描管理
-        │   ├── BatchOperations.tsx   # 批量操作
-        │   ├── TaskList.tsx          # 任务列表
-        │   ├── ImageList.tsx         # 图片列表
+        │   ├── BarcodeTable.tsx      # 条码表格
+        │   ├── DetailPanel.tsx       # 图片详情
+        │   ├── RejectedPanel.tsx     # 被拒绝条码
+        │   ├── TaskRail.tsx          # 任务状态
         │   └── ...
+        ├── views/                    # 图片库、扫描、待确认、批量、导出和日志页面
         ├── services/api.ts           # API 层
         └── hooks/
             └── useTaskPolling.ts     # 任务轮询 Hook
@@ -103,6 +115,19 @@ SQLite，启动时自动建表和迁移。主要表：
 | `batch_task` | 异步任务（扫描、删除、导出） |
 | `scan_log` | 扫描日志 |
 | `rejected_barcode` | 非标品条码归档 |
+
+扫描根会保存规范化路径键，启动时回填旧数据库并检查外键孤儿记录。删除扫描根只删除索引/拒绝元数据，不删除磁盘上的拒绝文件；删除期间若该根正在扫描会返回 409。
+
+## 验证
+
+在仓库根目录执行：
+
+```bash
+python -m compileall -q backend
+python -m pytest -q -W error::pytest.PytestUnhandledThreadExceptionWarning -W error::sqlalchemy.exc.SAWarning
+python -m ruff check backend --select F821,F811,F841,E902
+cd frontend && npm run build && npm audit --omit=dev --audit-level=high
+```
 
 ## API 端点
 

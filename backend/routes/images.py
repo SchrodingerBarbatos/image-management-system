@@ -5,7 +5,15 @@ from config import UPLOAD_DIR
 from thumbnail import thumbnail_exists, generate_thumbnail, get_thumbnail_path
 from versioning import update_versions_for_barcode
 from db_retry import with_sqlite_lock_retry
-from routes._utils import parse_pagination, safe_remove_image_file
+from routes._utils import (
+    JSONPayloadError,
+    exportable_image_query,
+    json_payload_error_response,
+    parse_pagination,
+    require_json_object,
+    require_positive_int_list,
+    safe_remove_image_file,
+)
 from datetime import datetime
 
 images_bp = Blueprint('images', __name__)
@@ -15,7 +23,15 @@ _ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$')
 # Per-image locks to prevent concurrent thumbnail generation for the same image.
 # Concurrent generates cause PermissionError on Windows (writes to the same file)
 # and unnecessary duplicate work.
-_thumb_gen_locks: dict[int, threading.Lock] = {}
+class _ThumbLockEntry:
+    """A per-image lock plus the number of request leases using it."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.refcount = 0
+
+
+_thumb_gen_locks: dict[int, _ThumbLockEntry] = {}
 _thumb_gen_locks_guard = threading.Lock()
 
 # TTL cache for ScanRoot.enabled — these rarely change, but every thumbnail/file
@@ -49,14 +65,26 @@ def _invalidate_root_cache(root_id: int | None = None):
         _sr_enabled_cache.clear()
 
 
-def _get_thumb_lock(img_id: int) -> threading.Lock:
-    """Return a per-image lock, creating one if this image_id hasn't been seen."""
+def _get_thumb_lock(img_id: int) -> _ThumbLockEntry:
+    """Acquire a reference-counted per-image thumbnail lock lease."""
     with _thumb_gen_locks_guard:
-        lock = _thumb_gen_locks.get(img_id)
-        if lock is None:
-            lock = threading.Lock()
-            _thumb_gen_locks[img_id] = lock
-        return lock
+        entry = _thumb_gen_locks.get(img_id)
+        if entry is None:
+            entry = _ThumbLockEntry()
+            _thumb_gen_locks[img_id] = entry
+        entry.refcount += 1
+        return entry
+
+
+def _release_thumb_lock(img_id: int, entry: _ThumbLockEntry):
+    """Release a thumbnail lock lease and remove only the same idle entry."""
+    with _thumb_gen_locks_guard:
+        current = _thumb_gen_locks.get(img_id)
+        if current is not entry:
+            return
+        entry.refcount -= 1
+        if entry.refcount <= 0:
+            _thumb_gen_locks.pop(img_id, None)
 
 _SORT_WHITELIST = {'barcode', 'image_type', 'sequence', 'filename', 'ext',
                    'file_size', 'folder_path', 'folder_ctime', 'created_at', 'updated_at'}
@@ -135,8 +163,13 @@ def list_barcodes():
 def batch_barcode_image_ids():
     """Return all image IDs for a list of barcodes in a single request.
     Replaces N paginated /images calls for batch operations."""
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
     barcodes = data.get('barcodes', [])
+    if not isinstance(barcodes, list) or any(not isinstance(b, str) or not b for b in barcodes):
+        return jsonify({'error': 'barcodes 必须为非空字符串数组'}), 400
     if not barcodes:
         return jsonify({'image_ids': [], 'barcode_counts': {}})
 
@@ -241,7 +274,10 @@ def update_image(img_id):
         return jsonify({'error': 'not found'}), 404
     if not root.enabled:
         return jsonify({'error': 'scan root is disabled'}), 403
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
 
     # Track whether version-relevant fields changed
     version_dirty = False
@@ -255,6 +291,8 @@ def update_image(img_id):
             img.image_type = data['image_type']
             version_dirty = True
     if 'confirmed' in data:
+        if not isinstance(data['confirmed'], bool):
+            return jsonify({'error': 'confirmed must be a boolean'}), 400
         if data['confirmed'] != old_confirmed:
             img.confirmed = data['confirmed']
             version_dirty = True
@@ -336,26 +374,27 @@ def serve_thumbnail(img_id):
     if not thumbnail_exists(img_id):
         # Serialize concurrent requests for the same image's thumbnail.
         # First waiter generates; subsequent waiters find the file already exists.
-        lock = _get_thumb_lock(img_id)
-        with lock:
-            # Re-check inside lock: another thread may have generated it
-            if not thumbnail_exists(img_id):
-                ok, md5, phash = generate_thumbnail(img_id, img.file_path)
-                if not ok:
-                    return jsonify({'error': 'thumbnail generation failed'}), 500
-                changed = False
-                if md5 and not img.content_md5:
-                    img.content_md5 = md5
-                    changed = True
-                if phash and not img.phash:
-                    img.phash = phash
-                    changed = True
-                if changed:
-                    session.commit()
-        # Evict lock entry: thumbnail now exists on disk, so future requests
-        # skip this entire block. Prevents unbounded growth of _thumb_gen_locks.
-        with _thumb_gen_locks_guard:
-            _thumb_gen_locks.pop(img_id, None)
+        lock_entry = _get_thumb_lock(img_id)
+        try:
+            with lock_entry.lock:
+                # Re-check inside lock: another thread may have generated it
+                if not thumbnail_exists(img_id):
+                    ok, md5, phash = generate_thumbnail(img_id, img.file_path)
+                    if not ok:
+                        return jsonify({'error': 'thumbnail generation failed'}), 500
+                    changed = False
+                    if md5 and not img.content_md5:
+                        img.content_md5 = md5
+                        changed = True
+                    if phash and not img.phash:
+                        img.phash = phash
+                        changed = True
+                    if changed:
+                        session.commit()
+        finally:
+            # Keep the shared entry alive while waiters still hold a lease.
+            # It is removed only when the last waiter exits, including failure.
+            _release_thumb_lock(img_id, lock_entry)
 
     # HTTP caching: use thumbnail file's mtime as ETag / Last-Modified
     try:
@@ -385,11 +424,16 @@ def serve_thumbnail(img_id):
 
 @images_bp.route('/images/batch-delete', methods=['POST'])
 def batch_delete():
-    data = request.json
-    ids = data.get('ids', [])
-    if not ids:
-        return jsonify({'error': 'ids required'}), 400
+    try:
+        data = require_json_object()
+        ids = require_positive_int_list(data.get('ids'), 'ids')
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     delete_file = data.get('delete_file', False)
+    if not isinstance(delete_file, bool):
+        return jsonify({'error': 'delete_file must be a boolean'}), 400
 
     # Reject if any IDs belong to disabled scan roots
     disabled = session.query(Image.id).join(
@@ -455,15 +499,28 @@ def batch_delete():
 
 @images_bp.route('/images/batch-export', methods=['POST'])
 def batch_export():
-    data = request.json
-    ids = data.get('ids', [])
+    try:
+        data = require_json_object()
+        ids = require_positive_int_list(data.get('ids'), 'ids')
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     image_type = data.get('image_type', '')
     flat = data.get('flat', False)
-    if not ids:
-        return jsonify({'error': 'ids required'}), 400
-    q = session.query(Image).filter(Image.id.in_(ids)).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id
-    ).filter(ScanRoot.enabled == True)
+    if image_type not in ('', 'all', 'main', 'detail'):
+        return jsonify({'error': 'image_type must be all, main, or detail'}), 400
+    if not isinstance(flat, bool):
+        return jsonify({'error': 'flat must be a boolean'}), 400
+    from routes.export import _build_zip, _plan_zip_entries, _export_lock
+    with _export_lock:
+        running = session.query(ExportTask).filter(
+            ExportTask.status == 'processing'
+        ).first()
+        if running:
+            return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
+
+    q = exportable_image_query(session).filter(Image.id.in_(ids))
     # No type filter for 'all' or 'detail' — detail exports need main images
     # available as the fallback source (see _plan_zip_entries in routes.export)
     if image_type and image_type not in ('all', 'detail'):
@@ -478,11 +535,32 @@ def batch_export():
         imgs = filter_to_single_version(imgs, barcodes_in, session)
     version_filtered = len(ids) - scanroot_excluded - len(imgs)
 
-    from routes.export import _compute_barcode_counts, _export_lock
+    if not imgs:
+        return jsonify({
+            'error': '没有符合导出条件的图片',
+            'excluded_ids': ids,
+        }), 400
+
+    import threading
+    img_data = [
+        (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
+        for img in imgs
+    ]
+    # Plan before creating the task, so planning failures cannot leave a
+    # durable task stuck in processing.
+    planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
+    if not planned_entries:
+        return jsonify({'error': '没有可写入 ZIP 的图片'}), 400
+
+    from routes.export import _compute_barcode_counts
     planned_counts = _compute_barcode_counts(imgs, export_type=image_type or 'all')
     payload = {
         'barcodes': planned_counts,
-        'stats': {'planned_count': 0, 'written_count': 0, 'skipped_count': 0},
+        'stats': {
+            'planned_count': len(planned_entries),
+            'written_count': 0,
+            'skipped_count': 0,
+        },
     }
 
     # Concurrency guard: same lock + running check as /export/zip
@@ -491,33 +569,29 @@ def batch_export():
         if running:
             return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
 
-        task = ExportTask(status='processing', barcode_data=json.dumps(payload, ensure_ascii=False))
+        task = ExportTask(
+            status='processing',
+            total_images=len(planned_entries),
+            barcode_data=json.dumps(payload, ensure_ascii=False),
+        )
         session.add(task)
-        session.commit()
-
-    from routes.export import _build_zip, _plan_zip_entries
-    import threading
-    img_data = [
-        (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
-        for img in imgs
-    ]
-    # Accurate entry count for the sync response — detail exports may rename
-    # main images as fallback, so the ZIP entry count can differ from len(imgs)
-    planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
-    with _export_lock:
-        t = session.get(ExportTask, task.id)
-        if t:
-            t.total_images = len(planned_entries)
-            try:
-                data = json.loads(t.barcode_data) if t.barcode_data else payload
-            except (json.JSONDecodeError, TypeError):
-                data = payload
-            if isinstance(data, dict):
-                data.setdefault('stats', {})['planned_count'] = len(planned_entries)
-                t.barcode_data = json.dumps(data, ensure_ascii=False)
+        try:
             session.commit()
+        except Exception:
+            session.rollback()
+            raise
 
-    threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
+        try:
+            threading.Thread(
+                target=_build_zip,
+                args=(task.id, img_data, flat, image_type or 'all'),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            task.status = 'failed'
+            task.error_message = f'导出线程启动失败: {e}'
+            session.commit()
+            return jsonify({'error': '导出任务启动失败', 'task_id': task.id}), 500
 
     return jsonify({'task_id': task.id, 'total': len(planned_entries), 'scanroot_excluded': scanroot_excluded, 'version_filtered': version_filtered})
 
@@ -613,7 +687,10 @@ def get_barcode_setting(barcode):
 
 @images_bp.route('/barcode-settings/<barcode>', methods=['PUT'])
 def update_barcode_setting(barcode):
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
     s = session.query(BarcodeSetting).filter(BarcodeSetting.barcode == barcode).first()
     if not s:
         s = BarcodeSetting(barcode=barcode)

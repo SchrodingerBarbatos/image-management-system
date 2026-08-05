@@ -7,6 +7,93 @@ from flask import request, jsonify
 _log = logging.getLogger(__name__)
 
 
+class JSONPayloadError(ValueError):
+    """A client-side JSON payload error with an HTTP status code."""
+
+    def __init__(self, message, status_code=400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _require_json(expected_type, expected_name):
+    """Parse a JSON request body and require the requested top-level type."""
+    if not request.is_json:
+        raise JSONPayloadError('请求必须使用 application/json Content-Type', 415)
+    data = request.get_json(silent=True)
+    if data is None:
+        raise JSONPayloadError('请求体必须是有效 JSON', 400)
+    if not isinstance(data, expected_type):
+        raise JSONPayloadError(f'请求体必须是 JSON {expected_name}', 400)
+    return data
+
+
+def require_json_object():
+    """Return a JSON object or raise JSONPayloadError for a malformed body."""
+    return _require_json(dict, '对象')
+
+
+def require_json_array():
+    """Return a JSON array or raise JSONPayloadError for a malformed body."""
+    return _require_json(list, '数组')
+
+
+def json_payload_error_response(error):
+    """Convert JSONPayloadError to the standard API error response."""
+    return jsonify({'error': str(error)}), error.status_code
+
+
+def require_positive_int_list(value, field='ids', max_items=10000):
+    """Validate and deduplicate a non-empty list of positive integer IDs."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(f'{field} 必须为非空整数数组')
+    if len(value) > max_items:
+        raise ValueError(f'{field} 数量不能超过 {max_items}')
+    result = []
+    seen = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
+            raise ValueError(f'{field} 必须只包含正整数')
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def normalize_scan_root_path(path):
+    """Return a stable absolute real-path key for a scan root.
+
+    ``normcase`` handles Windows drive-letter/case aliases, while
+    ``realpath`` makes symlink aliases compare consistently.  ``normpath``
+    preserves filesystem roots without stripping their required separator.
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError('path 必须为非空字符串')
+    expanded = os.path.expanduser(path.strip())
+    resolved = os.path.realpath(os.path.abspath(expanded))
+    return os.path.normcase(os.path.normpath(resolved))
+
+
+def path_contains(parent_key, child_key):
+    """Return whether child_key is equal to or below parent_key."""
+    try:
+        return os.path.commonpath([parent_key, child_key]) == parent_key
+    except ValueError:
+        return False
+
+
+def exportable_image_query(sess):
+    """Return the shared active+confirmed+enabled export query."""
+    from models import Image, ScanRoot
+
+    return sess.query(Image).join(
+        ScanRoot, Image.scan_root_id == ScanRoot.id
+    ).filter(
+        Image.status == 'active',
+        Image.confirmed.is_(True),
+        ScanRoot.enabled.is_(True),
+    )
+
+
 def is_path_under_root(file_path, root_path):
     """Return (True, None) if realpath(file_path) is under realpath(root_path).
 
