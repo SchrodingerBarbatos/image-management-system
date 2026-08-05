@@ -1,4 +1,4 @@
-import json, os, re, logging, datetime
+import json, re, logging, datetime
 from collections import defaultdict
 from flask import Blueprint, request, jsonify
 from sqlalchemy import func, or_, select
@@ -84,8 +84,9 @@ def _maybe_record_deleted_folder(sess, barcode, image_type, folder_ctime, scan_r
 
 
 def _delete_folder_images(barcode, image_type, folder_ctime, delete_files, sess=None):
-    """删除指定条码+类型+文件夹下 active+confirmed+enabled 的图片，返回删除数量。
-    过滤条件与扫描端点一致，确保预览和实际操作匹配。
+    """删除指定条码+类型+文件夹下 active/broken+confirmed+enabled 的图片，返回删除数量。
+    同时清理已确认的 broken 索引：文件已经不存在时仍需完成索引删除。
+    active 条件与扫描端点一致，broken 用于执行期幂等恢复。
     sess: optional; defaults to thread-local session for background tasks.
     仅当该 folder key + scan_root 下已无任何 Image 行时才写入 deleted_folders。"""
     if sess is None:
@@ -95,7 +96,7 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files, sess=
         Image.barcode == barcode,
         Image.image_type == image_type,
         Image.folder_ctime == folder_ctime,
-        Image.status == 'active',
+        Image.status.in_(('active', 'broken')),
         Image.confirmed == True,
     ).join(ScanRoot, Image.scan_root_id == ScanRoot.id).where(
         ScanRoot.enabled == True,
