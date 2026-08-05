@@ -31,7 +31,7 @@ npm run dev            # 启动在 http://localhost:3000
 ### 运行模式与鉴权
 
 - 默认只绑定 `127.0.0.1`，不会创建 Windows 防火墙入站规则。
-- 如需局域网访问，在 `backend/data/app_config.json` 配置 `{"lan_mode": true, "api_token": "your-token"}`，或开发启动时使用 `python app.py --lan`。LAN 模式没有 API Token 时会拒绝启动。
+- 如需局域网访问，可在前端左侧进入“设置”，开启“局域网访问”后重启应用；API Token 可留空，也可生成后保存。留空时局域网内设备可直接执行修改操作，设置 Token 后修改类 `/api/*` 请求才会要求鉴权。也可在 `backend/data/app_config.json` 配置 `{"lan_mode": true, "api_token": "your-token"}`，或开发启动时使用 `python app.py --lan`。
 - `--debug` 始终只绑定 localhost，不开放网络调试器。
 - 配置了 API Token 后，所有修改类 `/api/*` 请求使用 `X-API-Token` 或 `Authorization: Bearer ...`；GET 图片下载仍按当前媒体访问策略开放。
 

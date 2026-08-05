@@ -1162,7 +1162,7 @@ body {
 }
 
 /* ============================================================
-   日志视图
+   设置与日志视图
    ============================================================ */
 
 .logs-grid {
@@ -1170,6 +1170,54 @@ body {
   flex-direction: column;
   gap: 14px;
   max-width: 860px;
+}
+
+.network-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.network-token-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(280px, 1.15fr);
+  align-items: center;
+  gap: 18px;
+}
+
+.network-token-copy {
+  min-width: 0;
+}
+
+.setting-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setting-description {
+  margin-top: 5px;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.network-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .network-token-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
 }
 
 /* ============================================================

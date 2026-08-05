@@ -299,14 +299,9 @@ def test_thumbnail_lock_lease_waiters_share_entry():
     assert images_mod._thumb_gen_locks == {}
 
 
-def test_bind_host_defaults_local_and_requires_token_for_lan(monkeypatch):
+def test_bind_host_defaults_local_and_allows_optional_token_for_lan():
     import app as app_mod
-    import config
 
     assert app_mod._select_bind_host(cfg={}) == '127.0.0.1'
     assert app_mod._select_bind_host(debug=True, cfg={'lan_mode': True}) == '127.0.0.1'
-    monkeypatch.setattr(config, 'get_api_token', lambda: ('', False))
-    with pytest.raises(RuntimeError):
-        app_mod._select_bind_host(lan_requested=True, cfg={})
-    monkeypatch.setattr(config, 'get_api_token', lambda: ('secret', False))
     assert app_mod._select_bind_host(lan_requested=True, cfg={}) == '0.0.0.0'

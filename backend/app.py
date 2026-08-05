@@ -700,7 +700,7 @@ def _configure_cors(app, port, bind_host='127.0.0.1'):
 
 
 def _select_bind_host(lan_requested=False, debug=False, cfg=None):
-    """Select a safe bind address; LAN mode requires a usable API token."""
+    """Select the bind address; API Token auth is optional in LAN mode."""
     if debug:
         return '127.0.0.1'
     if cfg is None:
@@ -709,10 +709,6 @@ def _select_bind_host(lan_requested=False, debug=False, cfg=None):
     lan_mode = lan_requested or cfg.get('lan_mode') is True
     if not lan_mode:
         return '127.0.0.1'
-    from config import get_api_token
-    token, fail_closed = get_api_token()
-    if fail_closed or not token:
-        raise RuntimeError('LAN 模式必须配置 API Token，服务拒绝启动')
     return '0.0.0.0'
 
 
@@ -863,7 +859,7 @@ if __name__ == '__main__':
         parser.add_argument('--open-browser', action='store_true', default=False)
         parser.add_argument('--tray', action='store_true', default=False)
         parser.add_argument('--lan', action='store_true', default=False,
-                            help='允许局域网访问；必须配置 API Token')
+                            help='允许局域网访问；API Token 可选')
         args = parser.parse_args()
 
         if args.tray:

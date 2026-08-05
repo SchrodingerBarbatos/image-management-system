@@ -5,7 +5,7 @@ import {
   ExclamationCircleOutlined,
   ToolOutlined,
   FileExcelOutlined,
-  FileTextOutlined,
+  SettingOutlined,
   MoonOutlined,
   SunOutlined,
 } from '@ant-design/icons';
@@ -20,7 +20,7 @@ const NAV_ITEMS: { key: ViewKey; label: string; icon: React.ReactNode }[] = [
   { key: 'pending', label: '待确认', icon: <ExclamationCircleOutlined /> },
   { key: 'batch', label: '批量', icon: <ToolOutlined /> },
   { key: 'export', label: '导出', icon: <FileExcelOutlined /> },
-  { key: 'logs', label: '日志', icon: <FileTextOutlined /> },
+  { key: 'logs', label: '设置', icon: <SettingOutlined /> },
 ];
 
 const VIEW_META: Record<ViewKey, { eyebrow: string; title: string }> = {
@@ -29,7 +29,7 @@ const VIEW_META: Record<ViewKey, { eyebrow: string; title: string }> = {
   pending: { eyebrow: 'REVIEW QUEUE', title: '待确认图片' },
   batch: { eyebrow: 'BATCH OPS', title: '批量清理' },
   export: { eyebrow: 'EXCEL EXPORT', title: 'Excel 批量导出' },
-  logs: { eyebrow: 'SYSTEM LOGS', title: '日志管理' },
+  logs: { eyebrow: 'SYSTEM SETTINGS', title: '系统设置' },
 };
 
 /** 图片库系统 logo：图片轮廓 + 山形 */
