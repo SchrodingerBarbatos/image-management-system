@@ -43,10 +43,16 @@ def sess(engine):
 
 @pytest.fixture(scope="function")
 def client(sess, monkeypatch):
+    import routes.batch
     import routes.images
     import versioning
     monkeypatch.setattr(routes.images, "session", sess)
     monkeypatch.setattr(versioning, "session", sess)
+    monkeypatch.setattr(
+        routes.batch,
+        "_get_thread_session",
+        lambda: pytest.fail("image routes must reuse their injected request session"),
+    )
 
     app = Flask(__name__)
     app.register_blueprint(routes.images.images_bp, url_prefix='/api')

@@ -611,7 +611,7 @@ def delete_duplicate_images(barcode):
     # Match folder-delete filters via shared helper when deleting a full folder key
     from routes.batch import _check_disabled_scan_roots, _delete_folder_images
     items = [{'barcode': barcode, 'image_type': image_type, 'folder_ctime': folder_ctime}]
-    if _check_disabled_scan_roots(items) > 0:
+    if _check_disabled_scan_roots(items, sess=session) > 0:
         return jsonify({'error': 'scan root is disabled'}), 403
 
     deleted, failed_items = _delete_folder_images(
@@ -656,7 +656,7 @@ def delete_version(version_id):
     # Disabled-root guard (same as folder delete)
     from routes.batch import _check_disabled_scan_roots, _delete_folder_images
     items = [{'barcode': barcode, 'image_type': v.image_type, 'folder_ctime': folder_ctime}]
-    if _check_disabled_scan_roots(items) > 0:
+    if _check_disabled_scan_roots(items, sess=session) > 0:
         return jsonify({'error': 'scan root is disabled'}), 403
 
     # Unified folder-delete semantics (active+confirmed+enabled, partial ok, maybe-record)

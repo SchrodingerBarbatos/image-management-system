@@ -133,12 +133,13 @@ def _delete_folder_images(barcode, image_type, folder_ctime, delete_files, sess=
         return count, []
 
 
-def _check_disabled_scan_roots(items):
+def _check_disabled_scan_roots(items, sess=None):
     """检查是否有图片属于禁用的扫描目录，返回禁用目录中的图片数量。
-    使用 thread-safe session 以支持后台任务调用。"""
+    调用方可复用当前 session；后台任务未传入时创建 thread-safe session。"""
     if not items:
         return 0
-    sess = _get_thread_session()
+    if sess is None:
+        sess = _get_thread_session()
     # Build OR conditions for (barcode, image_type, folder_ctime)
     # Chunked to stay under SQLite expression depth limit of ~1000
     disabled_count = 0
@@ -365,7 +366,7 @@ def delete_duplicates():
             return jsonify({'error': f'item {i}: folder_ctime must be ISO8601 format'}), 400
 
     # Reject if any images belong to disabled scan roots
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=session)
     if disabled_count > 0:
         return jsonify({
             'error': '部分图片属于已禁用的扫描目录，无法删除',
@@ -530,7 +531,7 @@ def delete_low_versions():
             return jsonify({'error': f'item {i}: folder_ctime must be ISO8601 format'}), 400
 
     # Reject if any images belong to disabled scan roots
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=session)
     if disabled_count > 0:
         return jsonify({
             'error': '部分图片属于已禁用的扫描目录，无法删除',

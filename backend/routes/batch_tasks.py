@@ -441,7 +441,7 @@ def _run_batch_delete_duplicates(task_id):
     update_task_progress(task_id, progress=0, total=total)
 
     # Check disabled scan roots
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=sess)
     if disabled_count > 0:
         finish_task(task_id, error_message=f'部分图片属于已禁用的扫描目录（{disabled_count}个）')
         return
@@ -530,7 +530,7 @@ def _run_batch_delete_low_versions(task_id):
     update_task_progress(task_id, progress=0, total=total)
 
     # Check disabled scan roots
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=sess)
     if disabled_count > 0:
         finish_task(task_id, error_message=f'部分图片属于已禁用的扫描目录（{disabled_count}个）')
         return
@@ -619,7 +619,7 @@ def _run_delete_version(task_id):
 
     # 检查是否属于禁用的扫描目录
     items = [{'barcode': barcode, 'image_type': image_type, 'folder_ctime': folder_ctime}]
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=sess)
     if disabled_count > 0:
         finish_task(task_id, error_message='该版本属于已禁用的扫描目录，无法删除')
         return
@@ -865,7 +865,7 @@ def _run_batch_delete_duplicate_versions(task_id):
 
     # Check disabled scan roots
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=sess)
     if disabled_count > 0:
         finish_task(task_id, error_message=f'部分图片属于已禁用的扫描目录（{disabled_count}个）')
         return
@@ -1243,7 +1243,7 @@ def delete_duplicate_scan_results(task_id):
 
     # Check disabled scan roots using shared helper
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=session)
     if disabled_count > 0:
         return jsonify({'error': '部分图片属于已禁用的扫描目录，无法删除', 'disabled_count': disabled_count}), 403
 
@@ -1469,7 +1469,7 @@ def delete_low_version_scan_results(task_id):
 
     # Check disabled scan roots using shared helper
     items = [{'barcode': r.barcode, 'image_type': r.image_type, 'folder_ctime': r.folder_ctime} for r in results]
-    disabled_count = _check_disabled_scan_roots(items)
+    disabled_count = _check_disabled_scan_roots(items, sess=session)
     if disabled_count > 0:
         return jsonify({'error': '部分图片属于已禁用的扫描目录，无法删除', 'disabled_count': disabled_count}), 403
 
