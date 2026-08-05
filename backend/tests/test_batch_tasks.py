@@ -1,12 +1,20 @@
 """Tests for batch task framework — task engine, duplicate scan tasks, low version scan tasks."""
 
-import json, os, tempfile, time, threading
+import json, os, sqlite3, tempfile, time, threading
 import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import scoped_session, sessionmaker
 from flask import Flask
 
-from models import Base, Image, ImageVersion, ScanRoot, BatchTask, DuplicateScanResult, LowVersionScanResult, DeletedFolder
+from models import (
+    Base,
+    Image,
+    ImageVersion,
+    ScanRoot,
+    BatchTask,
+    DuplicateVersionScanResult,
+    DeletedFolder,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +332,309 @@ def test_batch_delete_images_task_records_deleted_folders(client, sess):
     assert ("BC_TASK_DEL", "detail", ctime2) in keys
 
 
+def test_batch_delete_duplicate_versions_commits_indexes_and_continues(
+    client, sess, tmp_path,
+):
+    """文件删除和索引清理必须共同提交，并继续处理后续版本。"""
+    _make_root(sess, path=str(tmp_path))
+
+    scan_task = BatchTask(
+        task_type="duplicate_version_scan",
+        status="done",
+        params_json="{}",
+    )
+    sess.add(scan_task)
+    sess.commit()
+
+    specs = [
+        ("BC_DV_FIRST", "2024-01-01T00:00:00", 2),
+        ("BC_DV_SECOND", "2024-02-01T00:00:00", 1),
+    ]
+    result_ids = []
+    image_ids = []
+    file_paths = []
+    for group_id, (barcode, folder_ctime, image_count) in enumerate(specs, 1):
+        _make_version(sess, barcode, "main", folder_ctime)
+        result = DuplicateVersionScanResult(
+            task_id=scan_task.id,
+            group_id=group_id,
+            barcode=barcode,
+            image_type="main",
+            folder_ctime=folder_ctime,
+            image_count=image_count,
+            role="clean",
+            delete_status="pending",
+        )
+        sess.add(result)
+        sess.commit()
+        result_ids.append(result.id)
+
+        for sequence in range(1, image_count + 1):
+            path = tmp_path / barcode / f"{sequence}.jpg"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"{barcode}-{sequence}".encode())
+            image = _make_image(
+                sess,
+                barcode,
+                "main",
+                folder_ctime,
+                filename=path.name,
+                file_path=str(path),
+                status=("broken" if group_id == 1 and sequence == 1 else "active"),
+            )
+            image_ids.append(image.id)
+            file_paths.append(path)
+
+    # 已经不存在的文件也应视为物理删除完成，并继续清理对应索引。
+    file_paths[0].unlink()
+
+    response = client.post(
+        "/api/batch/delete-duplicate-versions/tasks",
+        json={
+            "scan_task_id": scan_task.id,
+            "result_ids": result_ids,
+            "delete_files": True,
+        },
+    )
+    assert response.status_code == 201
+    task = _wait_for_task(client, response.get_json()["id"], timeout=15)
+
+    assert task["status"] == "done", task.get("error_message", "")
+    assert task["progress"] == len(specs)
+    assert task["result_count"] == len(image_ids)
+
+    sess.expire_all()
+    assert sess.query(Image).filter(Image.id.in_(image_ids)).count() == 0
+    results = sess.query(DuplicateVersionScanResult).filter(
+        DuplicateVersionScanResult.id.in_(result_ids)
+    ).all()
+    assert {result.delete_status for result in results} == {"deleted"}
+    assert all(not path.exists() for path in file_paths)
+
+
+def test_batch_delete_duplicates_commits_indexes_and_continues(
+    client, sess, tmp_path,
+):
+    """重复文件夹任务不能在首组物理删除后因进度写入而中断。"""
+    _make_root(sess, path=str(tmp_path))
+    items = []
+    image_ids = []
+    paths = []
+    for index, barcode in enumerate(("BC_DUP_FIRST", "BC_DUP_SECOND"), 1):
+        duplicate_ctime = f"2024-0{index}-01T00:00:00"
+        keep_ctime = f"2024-0{index}-02T00:00:00"
+        _make_version(
+            sess,
+            barcode,
+            "main",
+            keep_ctime,
+            duplicate_mtimes=json.dumps([duplicate_ctime]),
+        )
+        path = tmp_path / barcode / "1.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(barcode.encode())
+        image = _make_image(
+            sess,
+            barcode,
+            "main",
+            duplicate_ctime,
+            filename=path.name,
+            file_path=str(path),
+        )
+        image_ids.append(image.id)
+        paths.append(path)
+        items.append({
+            "barcode": barcode,
+            "image_type": "main",
+            "folder_ctime": duplicate_ctime,
+        })
+
+    paths[0].unlink()
+    response = client.post(
+        "/api/batch/delete-duplicates/tasks",
+        json={"items": items, "delete_files": True},
+    )
+    assert response.status_code == 201
+    task = _wait_for_task(client, response.get_json()["id"], timeout=15)
+
+    assert task["status"] == "done", task.get("error_message", "")
+    assert task["progress"] == len(items)
+    assert task["result_count"] == len(image_ids)
+    sess.expire_all()
+    assert sess.query(Image).filter(Image.id.in_(image_ids)).count() == 0
+    assert all(not path.exists() for path in paths)
+
+
+def test_batch_delete_low_versions_commits_indexes_and_continues(
+    client, sess, tmp_path,
+):
+    """低版本任务按批提交索引，并把已缺失文件作为成功清理。"""
+    _make_root(sess, path=str(tmp_path))
+    items = []
+    image_ids = []
+    paths = []
+    for index, barcode in enumerate(("BC_LOW_FIRST", "BC_LOW_SECOND"), 1):
+        old_ctime = f"2024-0{index}-01T00:00:00"
+        new_ctime = f"2024-0{index}-02T00:00:00"
+        _make_version(sess, barcode, "main", old_ctime, version_label="v1")
+        _make_version(
+            sess,
+            barcode,
+            "main",
+            new_ctime,
+            version_label="v2",
+            is_latest=True,
+        )
+        path = tmp_path / barcode / "1.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(barcode.encode())
+        image = _make_image(
+            sess,
+            barcode,
+            "main",
+            old_ctime,
+            filename=path.name,
+            file_path=str(path),
+        )
+        image_ids.append(image.id)
+        paths.append(path)
+        items.append({
+            "barcode": barcode,
+            "image_type": "main",
+            "folder_ctime": old_ctime,
+        })
+
+    paths[0].unlink()
+    response = client.post(
+        "/api/batch/delete-low-versions/tasks",
+        json={
+            "items": items,
+            "delete_files": True,
+            "main_threshold": 2,
+            "detail_threshold": 0,
+        },
+    )
+    assert response.status_code == 201
+    task = _wait_for_task(client, response.get_json()["id"], timeout=15)
+
+    assert task["status"] == "done", task.get("error_message", "")
+    assert task["progress"] == len(items)
+    assert task["result_count"] == len(image_ids)
+    sess.expire_all()
+    assert sess.query(Image).filter(Image.id.in_(image_ids)).count() == 0
+    assert all(not path.exists() for path in paths)
+
+
+def test_delete_version_task_removes_missing_file_index(client, sess, tmp_path):
+    """单版本任务遇到文件已不存在时仍应提交索引删除。"""
+    _make_root(sess, path=str(tmp_path))
+    barcode = "BC_VERSION_MISSING"
+    folder_ctime = "2024-03-01T00:00:00"
+    version = _make_version(sess, barcode, "main", folder_ctime)
+    path = tmp_path / barcode / "1.jpg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(barcode.encode())
+    image = _make_image(
+        sess,
+        barcode,
+        "main",
+        folder_ctime,
+        filename=path.name,
+        file_path=str(path),
+        status="broken",
+    )
+    image_id = image.id
+    path.unlink()
+
+    response = client.post(
+        f"/api/versions/{version.id}/delete-task",
+        json={"delete_files": True},
+    )
+    assert response.status_code == 201
+    task = _wait_for_task(client, response.get_json()["id"], timeout=15)
+
+    assert task["status"] == "done", task.get("error_message", "")
+    assert task["progress"] == 1
+    assert task["result_count"] == 1
+    sess.expire_all()
+    assert sess.get(Image, image_id) is None
+
+
+def test_duplicate_version_delete_retries_locked_checkpoint_in_chunks(
+    client, sess, monkeypatch,
+):
+    """锁冲突只重试未提交分块，且不会退化为逐项提交。"""
+    import routes.batch_tasks as batch_tasks
+
+    _make_root(sess)
+    scan_task = BatchTask(
+        task_type="duplicate_version_scan",
+        status="done",
+        params_json="{}",
+    )
+    sess.add(scan_task)
+    sess.commit()
+
+    result_ids = []
+    image_ids = []
+    for index in range(26):
+        barcode = f"BC_CHUNK_{index:02d}"
+        folder_ctime = f"2024-01-{index + 1:02d}T00:00:00"
+        image = _make_image(sess, barcode, "main", folder_ctime)
+        result = DuplicateVersionScanResult(
+            task_id=scan_task.id,
+            group_id=index + 1,
+            barcode=barcode,
+            image_type="main",
+            folder_ctime=folder_ctime,
+            image_count=1,
+            role="clean",
+            delete_status="pending",
+        )
+        sess.add(result)
+        sess.commit()
+        image_ids.append(image.id)
+        result_ids.append(result.id)
+
+    original_checkpoint = batch_tasks._commit_delete_checkpoint
+    checkpoint_progress = []
+    locked_once = threading.Event()
+
+    def checkpoint_with_one_lock(*args, **kwargs):
+        progress = kwargs["progress"]
+        checkpoint_progress.append(progress)
+        if progress == 26 and not locked_once.is_set():
+            locked_once.set()
+            raise sqlite3.OperationalError("database is locked")
+        return original_checkpoint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        batch_tasks,
+        "_commit_delete_checkpoint",
+        checkpoint_with_one_lock,
+    )
+    monkeypatch.setattr(batch_tasks, "_rebuild_versions_safe", lambda *args: [])
+
+    response = client.post(
+        "/api/batch/delete-duplicate-versions/tasks",
+        json={
+            "scan_task_id": scan_task.id,
+            "result_ids": result_ids,
+            "delete_files": False,
+        },
+    )
+    assert response.status_code == 201
+    task = _wait_for_task(client, response.get_json()["id"], timeout=15)
+
+    assert task["status"] == "done", task.get("error_message", "")
+    assert task["progress"] == len(result_ids)
+    assert task["result_count"] == len(image_ids)
+    assert locked_once.is_set()
+    assert checkpoint_progress == [0, 25, 26, 25, 26]
+    sess.expire_all()
+    assert sess.query(Image).filter(Image.id.in_(image_ids)).count() == 0
+
+
 # ===================================================================
 # Delete running task test
 # ===================================================================
@@ -358,7 +669,7 @@ def test_delete_running_task_rejected(client, sess):
 
 def test_cancel_queued_task(client, sess):
     """Cancelling a queued task should succeed."""
-    from task_engine import create_task, cancel_task, get_task
+    from task_engine import create_task
 
     # 404 for non-existent task
     resp = client.post('/api/tasks/9999/cancel')
@@ -612,8 +923,6 @@ def test_queued_tasks_marked_interrupted_on_startup(engine):
 def test_export_concurrent_processing_returns_409(client, sess):
     """When a processing ExportTask exists, creating a new one must return 409."""
     from routes.export import _export_lock, ExportTask as ET
-    import json as _json
-
     # Create a processing export task directly
     with _export_lock:
         existing = sess.query(ET).filter(ET.status == 'processing').first()
@@ -845,7 +1154,7 @@ def test_cleanup_old_exports_deletes_expired_non_processing(client, sess):
     import routes.export as _export
     from routes.export import ExportTask as ET, ZIP_CLEANUP_HOURS
     import datetime as _dt
-    import os as _os, tempfile
+    import os as _os
 
     # Create an old done task with a fake zip file
     old_time = (_dt.datetime.now() - _dt.timedelta(hours=ZIP_CLEANUP_HOURS + 1)).isoformat()
