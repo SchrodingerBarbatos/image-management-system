@@ -105,6 +105,43 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
       onCompleted();
     },
   });
+  const deleteCompletionHandledRef = useRef<number | null>(null);
+
+  // 异步删除任务完成后，刷新当前批量页的结果和任务历史，避免只更新图库计数而留下旧状态。
+  useEffect(() => {
+    const task = deletePolling.currentTask;
+    if (
+      deletePolling.polling ||
+      !task ||
+      (task.status !== 'done' && task.status !== 'partial_failed') ||
+      deleteCompletionHandledRef.current === task.id
+    ) {
+      return;
+    }
+    deleteCompletionHandledRef.current = task.id;
+
+    refreshDupTasks();
+    refreshLowTasks();
+    refreshDvTasks();
+
+    if (task.task_type === 'batch_delete_duplicates' && dupTaskId) {
+      setDupResultSelectedIds(new Set());
+      loadDupResults(dupTaskId, dupResultsPage);
+    } else if (task.task_type === 'batch_delete_low_versions' && lowTaskId) {
+      setLowResultSelectedIds(new Set());
+      loadLowResults(lowTaskId, lowResultsPage);
+    } else if (task.task_type === 'batch_delete_duplicate_versions' && dvTaskId) {
+      loadDvResults(dvTaskId);
+    }
+  }, [
+    deletePolling.currentTask,
+    deletePolling.polling,
+    dupTaskId,
+    dupResultsPage,
+    lowTaskId,
+    lowResultsPage,
+    dvTaskId,
+  ]);
 
   // Poll timer refs for cleanup on unmount
   const dupPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -156,7 +193,7 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
         dupPollTimerRef.current = setTimeout(() => pollDupTask(taskId), 2000);
       } else {
         setDupPolling(false);
-        if (task.status === 'done') {
+        if (task.status === 'done' || task.status === 'partial_failed') {
           loadDupResults(taskId, 1);
         }
         refreshDupTasks();
@@ -200,7 +237,7 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
         lowPollTimerRef.current = setTimeout(() => pollLowTask(taskId), 2000);
       } else {
         setLowPolling(false);
-        if (task.status === 'done') {
+        if (task.status === 'done' || task.status === 'partial_failed') {
           loadLowResults(taskId, 1);
         }
         refreshLowTasks();
@@ -240,7 +277,7 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
         dvPollTimerRef.current = setTimeout(() => pollDvTask(taskId), 2000);
       } else {
         setDvPolling(false);
-        if (task.status === 'done') {
+        if (task.status === 'done' || task.status === 'partial_failed') {
           loadDvResults(taskId);
         }
         refreshDvTasks();
@@ -262,7 +299,7 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
       setDvExpandedGroups(new Set());
       if (task.status === 'running' || task.status === 'queued') {
         pollDvTask(task.id);
-      } else if (task.status === 'done') {
+      } else if (task.status === 'done' || task.status === 'partial_failed') {
         loadDvResults(task.id);
         refreshDvTasks();
       }
@@ -350,7 +387,7 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
       setDupResultSelectedIds(new Set());
       if (task.status === 'running' || task.status === 'queued') {
         pollDupTask(task.id);
-      } else if (task.status === 'done') {
+      } else if (task.status === 'done' || task.status === 'partial_failed') {
         loadDupResults(task.id, 1);
         refreshDupTasks();
       }
@@ -383,7 +420,7 @@ const BatchView: React.FC<Props> = ({ onCompleted }) => {
       setLowResultSelectedIds(new Set());
       if (task.status === 'running' || task.status === 'queued') {
         pollLowTask(task.id);
-      } else if (task.status === 'done') {
+      } else if (task.status === 'done' || task.status === 'partial_failed') {
         loadLowResults(task.id, 1);
         refreshLowTasks();
       }

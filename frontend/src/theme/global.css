@@ -1331,3 +1331,18 @@ html[data-theme="light"] .seg-btn.on {
 html[data-theme="light"] .thumb:hover {
   box-shadow: 0 8px 20px rgba(34, 48, 64, 0.2);
 }
+
+/* 亮色模式下，缩略图右上角的详情/删除按钮改用浅底深字，避免暗色底配暗色图标。 */
+html[data-theme="light"] .thumb-tool-btn {
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--t1);
+  border: 1px solid rgba(24, 32, 42, 0.14);
+  box-shadow: 0 1px 4px rgba(34, 48, 64, 0.22);
+}
+
+html[data-theme="light"] .thumb-tool-btn:hover {
+  background: #ffffff;
+  color: var(--t1);
+  border-color: rgba(24, 32, 42, 0.24);
+  box-shadow: 0 2px 7px rgba(34, 48, 64, 0.28);
+}
