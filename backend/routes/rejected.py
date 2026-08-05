@@ -5,6 +5,11 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import func
 from models import session, RejectedBarcode, ScanRoot
 from sqlalchemy.orm import aliased
+from routes._utils import (
+    JSONPayloadError,
+    json_payload_error_response,
+    require_json_object,
+)
 
 rejected_bp = Blueprint('rejected', __name__)
 
@@ -97,7 +102,10 @@ def delete_rejected(id):
 @rejected_bp.route('/delete-batch', methods=['POST'])
 def delete_batch():
     """批量删除被拒绝的条码记录。"""
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
     if not data or 'ids' not in data:
         return jsonify({'error': '请提供要删除的记录ID列表'}), 400
 
@@ -132,7 +140,10 @@ def delete_batch():
 @rejected_bp.route('/delete-all', methods=['POST'])
 def delete_all():
     """全选删除被拒绝的条码记录。"""
-    data = request.json or {}
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
 
     query = session.query(RejectedBarcode)
 

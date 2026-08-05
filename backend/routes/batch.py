@@ -7,6 +7,11 @@ from models import session, Image, ImageVersion, ScanRoot, DeletedFolder
 from versioning import update_versions_for_barcode
 from task_engine import _get_thread_session
 from db_retry import with_sqlite_lock_retry
+from routes._utils import (
+    JSONPayloadError,
+    json_payload_error_response,
+    require_json_object,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -337,12 +342,17 @@ def list_duplicates():
 @with_sqlite_lock_retry()
 def delete_duplicates():
     """删除指定的重复文件夹"""
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
     items = data.get('items', [])
     delete_files = data.get('delete_files', False)
 
     if not items:
         return jsonify({'error': 'items required'}), 400
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     for i, item in enumerate(items):
         if not isinstance(item, dict):
@@ -489,7 +499,10 @@ def list_low_versions():
 @with_sqlite_lock_retry()
 def delete_low_versions():
     """删除指定的低版本。必须传入与预览时相同的阈值以重新验证。"""
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
     items = data.get('items', [])
     delete_files = data.get('delete_files', False)
     main_threshold = data.get('main_threshold', 0)
@@ -497,6 +510,8 @@ def delete_low_versions():
 
     if not items:
         return jsonify({'error': 'items required'}), 400
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
     if not isinstance(main_threshold, int) or not isinstance(detail_threshold, int):
         return jsonify({'error': 'main_threshold and detail_threshold must be integers'}), 400
     if main_threshold < 0 or detail_threshold < 0:

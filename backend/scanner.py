@@ -88,7 +88,6 @@ def validate_gtin(barcode: str):
     digits = [int(x) for x in barcode]
 
     check_digit = digits[-1]
-    payload = digits[:-1]
 
     # 3. GTIN Modulo-10 校验
     expected_check = calculate_gtin_check_digit(barcode[:-1])
@@ -430,6 +429,13 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                     # 检查是否需要补算 content_md5 / phash / thumbnail
                     img = session.get(Image, img_id)
                     if img:
+                        # A file can disappear and later return with the same
+                        # size/mtime fingerprint.  Keep the index usable once
+                        # the file is readable again, and rebuild versions only
+                        # when the status actually changes.
+                        if img.status == 'broken':
+                            img.status = 'active'
+                            affected_barcodes.add(img.barcode)
                         img.last_scan_token = scan_token
                         needs_hash = not img.content_md5 or not img.phash
                         needs_thumb = not thumbnail_exists(img_id)

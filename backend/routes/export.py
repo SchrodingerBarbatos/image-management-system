@@ -3,6 +3,12 @@ from flask import Blueprint, request, jsonify, send_file
 from openpyxl import load_workbook, Workbook
 from models import session, Image, ExportTask, ScanRoot, BarcodeSetting, ImageVersion
 from config import UPLOAD_DIR, ZIP_CLEANUP_HOURS, XLSX_TTL_HOURS
+from routes._utils import (
+    JSONPayloadError,
+    exportable_image_query,
+    json_payload_error_response,
+    require_json_object,
+)
 
 
 def _xlsx_dir():
@@ -485,7 +491,10 @@ def _parse_excel(upload_path):
 
 @export_bp.route('/export/zip', methods=['POST'])
 def generate_zip():
-    data = request.json
+    try:
+        data = require_json_object()
+    except JSONPayloadError as e:
+        return json_payload_error_response(e)
     barcode_col = data.get('barcode_column', '')
     image_type = data.get('image_type', '')
     upload_id = data.get('upload_id', '')
@@ -493,7 +502,21 @@ def generate_zip():
     selected = data.get('selected_barcodes')
     flat = data.get('flat', False)
 
-    if not upload_id:
+    if not isinstance(barcode_col, str):
+        return jsonify({'error': 'barcode_column must be a string'}), 400
+    if image_type not in ('', 'all', 'main', 'detail'):
+        return jsonify({'error': 'image_type must be all, main, or detail'}), 400
+    if not isinstance(flat, bool):
+        return jsonify({'error': 'flat must be a boolean'}), 400
+    if not isinstance(sheet_name, str):
+        return jsonify({'error': 'sheet_name must be a string'}), 400
+    if selected is not None:
+        if not isinstance(selected, list) or any(
+            not isinstance(item, str) or not item.strip() for item in selected
+        ):
+            return jsonify({'error': 'selected_barcodes must be a string array'}), 400
+
+    if not isinstance(upload_id, str) or not upload_id:
         return jsonify({'error': 'upload_id is required'}), 400
 
     # Validate upload_id format
@@ -561,9 +584,7 @@ def generate_zip():
     barcodes = list(dict.fromkeys(barcodes_raw))
 
     # Find matching images — chunked IN query to avoid oversized SQL
-    q_base = session.query(Image).filter(Image.confirmed == True).join(
-        ScanRoot, Image.scan_root_id == ScanRoot.id
-    ).filter(ScanRoot.enabled == True)
+    q_base = exportable_image_query(session)
     # No type filter for 'all' or 'detail' — detail exports need main images
     # available as the fallback source (see _plan_zip_entries)
     if image_type and image_type not in ('all', 'detail'):
@@ -580,11 +601,35 @@ def generate_zip():
     matched_barcodes = set(img.barcode for img in imgs)
     excluded_barcodes = len(barcodes) - len(matched_barcodes)
 
+    if not imgs:
+        _safe_remove(real_upload)
+        return jsonify({'error': '没有符合导出条件的图片'}), 400
+
+    img_data = [
+        (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
+        for img in imgs
+    ]
+    export_type = image_type or 'all'
+    # Plan all entries before the task is durable.  Planning is pure and can
+    # fail without leaving a processing task that blocks the next export.
+    try:
+        planned_entries, _ = _plan_zip_entries(img_data, flat, export_type)
+    except Exception as exc:
+        _log.exception('导出规划失败: upload_id=%s', upload_id)
+        return jsonify({'error': f'导出规划失败: {exc}'}), 500
+    if not planned_entries:
+        _safe_remove(real_upload)
+        return jsonify({'error': '没有可写入 ZIP 的图片'}), 400
+
     # Compute planned per-barcode counts (include all barcodes, even unmatched)
-    planned_counts = _compute_barcode_counts(imgs, barcodes, export_type=image_type or 'all')
+    planned_counts = _compute_barcode_counts(imgs, barcodes, export_type=export_type)
     payload = {
         'barcodes': planned_counts,
-        'stats': {'planned_count': 0, 'written_count': 0, 'skipped_count': 0},
+        'stats': {
+            'planned_count': len(planned_entries),
+            'written_count': 0,
+            'skipped_count': 0,
+        },
     }
 
     # Concurrency guard: check + create + commit must be atomic
@@ -593,37 +638,43 @@ def generate_zip():
         if running:
             return jsonify({'error': '已有导出任务正在执行中，请等待完成'}), 409
 
-        task = ExportTask(status='processing', barcode_data=json.dumps(payload, ensure_ascii=False))
+        task = ExportTask(
+            status='processing',
+            total_images=len(planned_entries),
+            barcode_data=json.dumps(payload, ensure_ascii=False),
+        )
         session.add(task)
-        session.commit()
-        # Source xlsx only deleted after task is durable — 409/DB failure keeps
-        # the file for retry; TTL cleanup handles abandon.
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+        try:
+            threading.Thread(
+                target=_build_zip,
+                args=(task.id, img_data, flat, export_type),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            task.status = 'failed'
+            task.error_message = f'导出线程启动失败: {exc}'
+            session.commit()
+            # Keep the source workbook for retry/diagnosis; TTL cleanup handles
+            # abandoned uploads.
+            return jsonify({'error': '导出任务启动失败', 'task_id': task.id}), 500
+
+        # The worker receives plain image metadata and no longer needs the
+        # workbook.  Delete only after planning, durable task creation, and
+        # successful thread start have all completed.
         _safe_remove(real_upload)
 
-    img_data = [
-        (img.file_path, img.barcode, img.image_type, img.sequence, img.ext, img.scan_root_id)
-        for img in imgs
-    ]
-    # Accurate entry count for the sync response — detail exports may rename
-    # main images as fallback, so the ZIP entry count can differ from len(imgs)
-    planned_entries, _ = _plan_zip_entries(img_data, flat, image_type or 'all')
-    # Update planned_count now that we know the true entry count
-    with _export_lock:
-        t = session.get(ExportTask, task.id)
-        if t:
-            t.total_images = len(planned_entries)
-            try:
-                data = json.loads(t.barcode_data) if t.barcode_data else payload
-            except (json.JSONDecodeError, TypeError):
-                data = payload
-            if isinstance(data, dict):
-                data.setdefault('stats', {})['planned_count'] = len(planned_entries)
-                t.barcode_data = json.dumps(data, ensure_ascii=False)
-            session.commit()
-
-    threading.Thread(target=_build_zip, args=(task.id, img_data, flat, image_type or 'all'), daemon=True).start()
-
-    return jsonify({'task_id': task.id, 'total_images': len(planned_entries), 'total_barcodes': len(matched_barcodes), 'excluded_barcodes': excluded_barcodes})
+    return jsonify({
+        'task_id': task.id,
+        'total_images': len(planned_entries),
+        'total_barcodes': len(matched_barcodes),
+        'excluded_barcodes': excluded_barcodes,
+    })
 
 
 def _parse_export_payload(raw):

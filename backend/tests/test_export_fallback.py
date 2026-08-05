@@ -522,7 +522,7 @@ def test_download_zip_allows_partial_failed(client, db, images_dir, captured_bui
     body = resp.get_json()
     task_id = body["task_id"]
     # Force partial_failed with a real zip present under controlled UPLOAD_DIR
-    args = captured_builds.replay(0, upload_dir=images_dir)
+    captured_builds.replay(0, upload_dir=images_dir)
     db.expire_all()
     task = db.get(ExportTask, task_id)
     zip_path = os.path.join(images_dir, "zips", f"export_{task_id}.zip")

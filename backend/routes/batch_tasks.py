@@ -14,7 +14,20 @@ from versioning import update_versions_for_barcode
 from task_engine import finish_task, update_task_progress, _get_thread_session
 from routes.batch import _check_disabled_scan_roots, delete_images_with_validation, _delete_folder_images, _compute_folder_stats, validate_image_paths, _classify_delete_error, _record_deleted_folder, _maybe_record_deleted_folder
 from db_retry import with_sqlite_lock_retry
-from routes._utils import parse_pagination
+from routes._utils import (
+    JSONPayloadError,
+    json_payload_error_response,
+    parse_pagination,
+    require_json_object,
+)
+
+
+def _require_route_object():
+    """Parse mutating task payloads without allowing null/non-object bodies."""
+    try:
+        return require_json_object(), None
+    except JSONPayloadError as exc:
+        return None, json_payload_error_response(exc)
 
 
 def _cleanup_orphaned_images():
@@ -1193,10 +1206,15 @@ def delete_duplicate_scan_results(task_id):
     if not task:
         return jsonify({'error': 'not found'}), 404
 
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     mode = data.get('mode', 'selected')
     result_ids = data.get('result_ids', [])
     delete_files = data.get('delete_files', False)
+
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     if mode != 'selected':
         return jsonify({'error': 'mode must be "selected"'}), 400
@@ -1272,11 +1290,16 @@ def delete_duplicate_scan_results(task_id):
 
 @batch_tasks_bp.route('/batch/low-version-scan/tasks', methods=['POST'])
 def create_low_version_scan():
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     main_enabled = data.get('main_enabled', True)
     main_threshold = data.get('main_threshold', 3)
     detail_enabled = data.get('detail_enabled', True)
     detail_threshold = data.get('detail_threshold', 5)
+
+    if not isinstance(main_enabled, bool) or not isinstance(detail_enabled, bool):
+        return jsonify({'error': 'main_enabled and detail_enabled must be booleans'}), 400
 
     if not main_enabled and not detail_enabled:
         return jsonify({'error': '至少启用一项阈值'}), 400
@@ -1397,10 +1420,15 @@ def delete_low_version_scan_results(task_id):
     if task.task_type != 'low_version_scan':
         return jsonify({'error': 'task is not a low_version_scan'}), 400
 
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     mode = data.get('mode', 'selected')
     result_ids = data.get('result_ids', [])
     delete_files = data.get('delete_files', False)
+
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     if mode != 'selected':
         return jsonify({'error': 'mode must be "selected"'}), 400
@@ -1498,9 +1526,14 @@ def delete_low_version_scan_results(task_id):
 @batch_tasks_bp.route('/batch/delete-duplicates/tasks', methods=['POST'])
 def create_batch_delete_duplicates_task():
     """Create an async task to delete duplicate folders."""
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     items = data.get('items', [])
     delete_files = data.get('delete_files', False)
+
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     if not items:
         return jsonify({'error': 'items required'}), 400
@@ -1533,12 +1566,17 @@ def create_batch_delete_low_versions_task():
     params_json (not live form values). Explicit main/detail_threshold still
     accepted as fallback for legacy callers.
     """
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     items = data.get('items', [])
     delete_files = data.get('delete_files', False)
     main_threshold = data.get('main_threshold', 0)
     detail_threshold = data.get('detail_threshold', 0)
     scan_task_id = data.get('scan_task_id')
+
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     if not items:
         return jsonify({'error': 'items required'}), 400
@@ -1595,8 +1633,12 @@ def create_batch_delete_low_versions_task():
 @batch_tasks_bp.route('/versions/<int:version_id>/delete-task', methods=['POST'])
 def create_delete_version_task(version_id):
     """Create an async task to delete a version and its images."""
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     delete_files = data.get('delete_files', False)
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     # Verify version exists
     v = session.get(ImageVersion, version_id)
@@ -1616,9 +1658,14 @@ def create_delete_version_task(version_id):
 @batch_tasks_bp.route('/images/batch-delete-task', methods=['POST'])
 def create_batch_delete_images_task():
     """Create an async task to delete multiple images by ID."""
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     ids = data.get('ids', [])
     delete_files = data.get('delete_files', False)
+
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     if not ids:
         return jsonify({'error': 'ids required'}), 400
@@ -1736,7 +1783,9 @@ def change_keep_version(task_id):
     if not task:
         return jsonify({'error': 'not found'}), 404
 
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     group_id = data.get('group_id')
     new_keep_ctime = data.get('folder_ctime')
 
@@ -1778,10 +1827,14 @@ def create_batch_delete_duplicate_versions_task():
     Full precheck: all result_ids must belong to scan_task_id, be unique positive
     ints, and currently have role=='clean'. Any mismatch aborts the whole batch.
     """
-    data = request.json or {}
+    data, payload_error = _require_route_object()
+    if payload_error:
+        return payload_error
     scan_task_id = data.get('scan_task_id')
     result_ids = data.get('result_ids', [])
-    delete_files = bool(data.get('delete_files', False))
+    delete_files = data.get('delete_files', False)
+    if not isinstance(delete_files, bool):
+        return jsonify({'error': 'delete_files must be a boolean'}), 400
 
     if not scan_task_id or not isinstance(scan_task_id, int) or scan_task_id < 1:
         return jsonify({'error': 'scan_task_id required'}), 400

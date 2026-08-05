@@ -11,6 +11,10 @@ def _set_sqlite_pragma(dbapi_conn, _):
     try:
         # WAL: 允许读写并发，单写者模型下显著降低 'database is locked'
         cur.execute("PRAGMA journal_mode=WAL")
+        # Enforce declared foreign keys for every SQLite connection.  Startup
+        # migration reports legacy violations before destructive operations are
+        # allowed to rely on this safeguard.
+        cur.execute("PRAGMA foreign_keys=ON")
         # 写锁竞争时最长等待 15s 再报 locked（原 5s，给后台任务+请求线程更多缓冲）
         cur.execute("PRAGMA busy_timeout=15000")
         # WAL 模式下 NORMAL 是官方推荐：断电最多丢失最后几个事务，绝不损坏库，写入显著加速
@@ -33,6 +37,10 @@ class ScanRoot(Base):
     __tablename__ = 'scan_root'
     id = Column(Integer, primary_key=True)
     path = Column(Text, nullable=False)
+    # Real-path, case-normalized key used to reject duplicate/overlapping roots.
+    # Nullable keeps direct legacy/test inserts compatible; API-created roots
+    # always populate it and the migration backfills existing rows.
+    path_key = Column(Text, nullable=True)
     recursive = Column(Boolean, default=True)
     enabled = Column(Boolean, default=True)
     allow_fuzzy = Column(Boolean, default=False)
