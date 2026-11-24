@@ -271,14 +271,14 @@ def test_update_versions_retry_on_locked(sess, monkeypatch):
     call_count = [0]
     original = versioning._do_update_versions_for_barcode
 
-    def flaky(barcode, work_sess=None):
+    def flaky(barcode, work_sess=None, **kwargs):
         call_count[0] += 1
         if call_count[0] < 3:
             exc = RuntimeError("database is locked")
             exc.orig = MagicMock()
             exc.orig.sqlite_errorcode = 5
             raise exc
-        return original(barcode, work_sess)
+        return original(barcode, work_sess, **kwargs)
 
     monkeypatch.setattr(versioning, "_do_update_versions_for_barcode", flaky)
     monkeypatch.setattr(versioning, "session", sess)
@@ -303,7 +303,7 @@ def test_update_versions_non_locked_raises_immediately(sess, monkeypatch):
 
     call_count = [0]
 
-    def always_fail(barcode, work_sess=None):
+    def always_fail(barcode, work_sess=None, **_kwargs):
         call_count[0] += 1
         raise ValueError("something else")
 
@@ -316,3 +316,18 @@ def test_update_versions_non_locked_raises_immediately(sess, monkeypatch):
 
     assert call_count[0] == 1  # no retries for non-lock errors
 
+
+
+def test_scan_version_rebuild_clears_only_matching_intent(sess):
+    from models import PendingScanVersion
+    from versioning import update_versions_for_barcode
+
+    barcode = '5901234123457'
+    sess.add(PendingScanVersion(barcode=barcode, revision='newer'))
+    sess.commit()
+
+    # Even with no images left, a pending barcode must process and clear.
+    update_versions_for_barcode(barcode, sess=sess, pending_scan_revision='older')
+    assert sess.get(PendingScanVersion, barcode).revision == 'newer'
+    update_versions_for_barcode(barcode, sess=sess, pending_scan_revision='newer')
+    assert sess.get(PendingScanVersion, barcode) is None

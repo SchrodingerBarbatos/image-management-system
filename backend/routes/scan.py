@@ -1,7 +1,8 @@
 import os, json, uuid, threading, datetime, traceback, logging
 from flask import Blueprint, request, jsonify
 from sqlalchemy.exc import IntegrityError
-from models import session, ScanRoot, Image, ScanLog, ImageVersion, RejectedBarcode
+from models import (session, ScanRoot, Image, ScanLog, ImageVersion,
+                    RejectedBarcode, PendingScanVersion)
 from scanner import scan_root, count_image_files, ScanCancelled
 from versioning import update_versions_for_barcode, update_all_versions
 from routes._utils import (
@@ -154,13 +155,17 @@ def _run_scan(root_ids, scan_mode, job_id=None):
                 if job:
                     processed_offset = job.get('processed_files', processed_offset)
 
-        # 阶段3: 更新版本
+        # 阶段3: 更新版本，包括上次扫描已提交但尚未重建的条码。
+        pending_revisions = dict(session.query(
+            PendingScanVersion.barcode, PendingScanVersion.revision).all())
+        all_affected.update(pending_revisions)
         versioning_total = len(all_affected)
         progress('versioning', versioning_total=versioning_total)
         for idx, bc in enumerate(sorted(all_affected)):
             if is_cancelled():
                 raise ScanCancelled()
-            update_versions_for_barcode(bc)
+            update_versions_for_barcode(
+                bc, sess=session, pending_scan_revision=pending_revisions.get(bc))
             # 每 10 个或最后一个更新进度（提高小集合的粒度）
             if (idx + 1) % 10 == 0 or idx + 1 == versioning_total:
                 progress('versioning', versioning_total=versioning_total, versioning_current=idx + 1)
@@ -201,6 +206,10 @@ def _run_scan(root_ids, scan_mode, job_id=None):
                 job['elapsed_seconds'] = elapsed
         _safe_add_log('scan', 'info', f'扫描已取消（耗时 {elapsed}秒）', json.dumps({'elapsed_seconds': elapsed}))
     except Exception as e:
+        try:
+            session.rollback()
+        except Exception:
+            _log.exception('扫描失败时事务回滚失败: job_id=%s', job_id)
         try:
             elapsed = round((datetime.datetime.now() - started_at).total_seconds())
             tb = traceback.format_exc()

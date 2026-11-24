@@ -415,3 +415,86 @@ def test_legacy_rewrite_cancel_resumes_thumbnail_hash_and_version(
         red, _, blue = thumbnail.getpixel((100, 100))
         assert blue > 200 and red < 30
     assert scanner.scan_root(root_id)['skipped'] == 1
+
+
+@pytest.mark.parametrize('interruption', ['after_segment', 'version_error'])
+def test_scan_worker_recovers_committed_changes_after_interruption(
+    sess, monkeypatch, tmp_path, interruption,
+):
+    from PIL import Image as PillowImage
+    import models
+    import routes.scan as scan_route
+    import scanner
+    import versioning
+    from models import ImageVersion, PendingScanVersion
+
+    monkeypatch.setattr(scanner, 'session', sess)
+    monkeypatch.setattr(scan_route, 'session', sess)
+    monkeypatch.setattr(models, 'session', sess)
+    monkeypatch.setattr(scanner, '_THUMB_BATCH_SIZE', 1)
+    monkeypatch.setattr('thumbnail.THUMBNAIL_DIR', str(tmp_path / 'thumbnails'))
+    monkeypatch.setattr(scan_route, 'count_image_files', lambda *args, **kwargs: 1)
+
+    src = tmp_path / 'source'
+    src.mkdir()
+    second_dir = src / 'second'
+    second_dir.mkdir()
+    barcode = '5901234123457'
+    path = src / f'{barcode}_主图_1.png'
+    PillowImage.new('RGB', (32, 32), 'red').save(path, compress_level=0)
+    fixed_second = 1_700_000_000 * 10**9
+    os.utime(path, ns=(fixed_second, fixed_second + 100_000_000))
+    root = ScanRoot(path=str(src), enabled=True, recursive=True)
+    sess.add(root)
+    sess.commit()
+    root_id = root.id
+    scanner.scan_root(root_id)
+    initial = sess.get(PendingScanVersion, barcode)
+    versioning.update_versions_for_barcode(
+        barcode, sess=sess, pending_scan_revision=initial.revision)
+    old_version_hash = sess.query(ImageVersion.content_hash).scalar()
+    old_fingerprint = sess.query(Image.md5_hash).scalar()
+    assert sess.get(PendingScanVersion, barcode) is None
+
+    PillowImage.new('RGB', (32, 32), 'blue').save(path, compress_level=0)
+    os.utime(path, ns=(fixed_second, fixed_second + 600_000_000))
+    interrupted_id = f'test-{interruption}'
+    retry_id = f'test-retry-{interruption}'
+
+    def run_job(job_id):
+        job = scan_route._make_scan_job([root_id])
+        scan_route._scan_jobs[job_id] = job
+        scan_route._run_scan([root_id], 'incremental', job_id=job_id)
+        return job
+
+    try:
+        with monkeypatch.context() as interrupt:
+            if interruption == 'after_segment':
+                def cancel_after_first_directory(*args, **kwargs):
+                    yield str(src), [second_dir.name], [path.name]
+                    scan_route._scan_cancel_flags[interrupted_id] = True
+                    yield str(second_dir), [], []
+                interrupt.setattr(scanner.os, 'walk', cancel_after_first_directory)
+            else:
+                def fail_mid_rebuild(_images):
+                    raise RuntimeError('simulated version rebuild failure')
+                interrupt.setattr(versioning, 'compute_content_hash', fail_mid_rebuild)
+
+            result = run_job(interrupted_id)
+            assert result['status'] == (
+                'cancelled' if interruption == 'after_segment' else 'error')
+        assert sess.query(Image.md5_hash).scalar() != old_fingerprint
+        assert sess.get(PendingScanVersion, barcode) is not None
+        assert sess.query(ImageVersion.content_hash).scalar() == old_version_hash
+
+        result = run_job(retry_id)
+        assert result['status'] == 'done'
+        assert result['skipped'] == 1 and result['added'] == 0
+        assert sess.get(PendingScanVersion, barcode) is None
+        assert sess.query(ImageVersion.content_hash).scalar() == (
+            versioning.compute_content_hash(sess.query(Image).all()))
+        assert sess.query(ImageVersion.content_hash).scalar() != old_version_hash
+    finally:
+        for job_id in (interrupted_id, retry_id):
+            scan_route._scan_jobs.pop(job_id, None)
+            scan_route._scan_cancel_flags.pop(job_id, None)
