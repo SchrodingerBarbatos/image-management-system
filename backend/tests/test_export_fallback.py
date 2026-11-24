@@ -579,3 +579,79 @@ def test_batch_export_default_all(client, db, images_dir, captured_builds):
 
     (args, _kw) = captured_builds.calls[0]
     assert args[3] == "all"
+
+
+@pytest.mark.parametrize('flat', [False, True])
+@pytest.mark.parametrize('export_type,source_type,expected_dir,expected_stem', [
+    ('main', 'main', '主图', '5901234123457_1'),
+    ('all', 'main', '主图', '5901234123457_1'),
+    ('all', 'detail', '详情图', '5901234123457_详情图_1'),
+    ('detail', 'detail', '详情图', '5901234123457_详情图_1'),
+    ('detail', 'main', '详情图', '5901234123457_详情图_1'),
+])
+def test_duplicate_archive_names_keep_both_files(
+    db, images_dir, flat, export_type, source_type, expected_dir, expected_stem,
+):
+    from routes.export import _plan_zip_entries
+
+    sr = ScanRoot(path=images_dir, enabled=True)
+    db.add(sr)
+    db.commit()
+    candidates = []
+    for name, data in [('a.png', b'first picture'), ('z.png', b'second picture')]:
+        path = os.path.join(images_dir, name)
+        with open(path, 'wb') as file:
+            file.write(data)
+        candidates.append((path, '5901234123457', source_type, 1, 'png', sr.id))
+
+    entries, _ = _plan_zip_entries(candidates, flat, export_type)
+    reversed_entries, _ = _plan_zip_entries(candidates[::-1], flat, export_type)
+    assert entries == reversed_entries[::-1]
+
+    task_id = _make_task(db).id
+    _run_build_zip(task_id, candidates[::-1], flat, export_type, upload_dir=images_dir)
+    task = db.get(ExportTask, task_id)
+    assert task.status == 'done'
+    stats = json.loads(task.barcode_data)['stats']
+    assert stats == {'planned_count': 2, 'written_count': 2, 'skipped_count': 0}
+    prefix = '' if flat else f'{expected_dir}/'
+    new_stem = expected_stem.rsplit('_', 1)[0] + '_2'
+    first, second = f'{prefix}{expected_stem}.png', f'{prefix}{new_stem}.png'
+    with zipfile.ZipFile(task.zip_path) as zf:
+        from scanner import parse_filename
+
+        assert all(parse_filename(os.path.basename(name)) for name in zf.namelist())
+        assert set(zf.namelist()) == {first, second}
+        assert zf.read(first) == b'first picture'
+        assert zf.read(second) == b'second picture'
+
+
+def test_archive_names_reserve_natural_sequences_and_ignore_case():
+    from routes.export import _unique_zip_entries
+
+    entries = [
+        ('/input/c', '主图/5901234123457_1.png', 1),
+        ('/input/d', '主图/5901234123457_1.PNG', 1),
+        ('/input/a', '主图/5901234123457_1.png', 1),
+        ('/input/b', '主图/5901234123457_2.JPEG', 1),
+        ('/input/e', '详情图/5901234123457_详情图_1.png', 1),
+    ]
+    result = dict((path, name) for path, name, _ in _unique_zip_entries(entries))
+    assert result == {
+        '/input/a': '主图/5901234123457_1.png',
+        '/input/b': '主图/5901234123457_2.JPEG',
+        '/input/c': '主图/5901234123457_3.png',
+        '/input/d': '主图/5901234123457_4.PNG',
+        '/input/e': '详情图/5901234123457_详情图_1.png',
+    }
+
+
+def test_duplicate_archive_sequence_stays_in_sqlite_integer_range():
+    from routes.export import _unique_zip_entries
+
+    max_name = '5901234123457_9223372036854775807.png'
+    entries = [('/input/a', max_name, 1), ('/input/c', max_name, 1),
+               ('/input/b', '5901234123457_1.png', 1)]
+    assert _unique_zip_entries(entries) == [
+        entries[0], ('/input/c', '5901234123457_2.png', 1), entries[2],
+    ]

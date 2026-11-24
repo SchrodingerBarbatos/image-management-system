@@ -1,6 +1,6 @@
 import hashlib, json, time, logging
 from collections import defaultdict
-from models import session, Image, ImageVersion, ScanRoot
+from models import session, Image, ImageVersion, ScanRoot, PendingScanVersion
 from scanner import compute_md5
 
 _log = logging.getLogger(__name__)
@@ -11,17 +11,19 @@ _SQLITE_RETRY_ATTEMPTS = 5
 _SQLITE_RETRY_DELAY = 0.5  # seconds
 
 
-def update_versions_for_barcode(barcode, sess=None):
+def update_versions_for_barcode(barcode, sess=None, *, pending_scan_revision=None):
     """Rebuild version records for a single barcode, per image_type.
 
     sess: optional SQLAlchemy Session. When called from a background task
     thread, pass the task's thread-local session so deletes and version
     rebuild share one identity map / connection. Defaults to models.session.
+    A pending scan revision is cleared only by the successful rebuild commit.
     """
     work_sess = sess if sess is not None else session
     for attempt in range(1, _SQLITE_RETRY_ATTEMPTS + 1):
         try:
-            _do_update_versions_for_barcode(barcode, work_sess)
+            _do_update_versions_for_barcode(
+                barcode, work_sess, pending_scan_revision=pending_scan_revision)
             return
         except Exception as e:
             if not _is_sqlite_locked(e):
@@ -107,16 +109,25 @@ def _expunge_image_version_objects(work_sess):
 
 
 
-def _do_update_versions_for_barcode(barcode, work_sess=None):
+def _do_update_versions_for_barcode(barcode, work_sess=None, *, pending_scan_revision=None):
     if work_sess is None:
         work_sess = session
+
+    def commit_rebuild():
+        if pending_scan_revision is not None:
+            work_sess.query(PendingScanVersion).filter(
+                PendingScanVersion.barcode == barcode,
+                PendingScanVersion.revision == pending_scan_revision,
+            ).delete(synchronize_session=False)
+        work_sess.commit()
+
     # RCN 条码不应有版本记录：删除残留版本后跳过
     from scanner import validate_business_gtin
     is_valid, _ = validate_business_gtin(barcode)
     if not is_valid:
         deleted = work_sess.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
-        if deleted:
-            work_sess.commit()
+        if deleted or pending_scan_revision is not None:
+            commit_rebuild()
         return
 
     images = work_sess.query(Image).filter(
@@ -128,7 +139,7 @@ def _do_update_versions_for_barcode(barcode, work_sess=None):
     if not images:
         # Clean up orphaned version records when all images are gone
         work_sess.query(ImageVersion).filter(ImageVersion.barcode == barcode).delete()
-        work_sess.commit()
+        commit_rebuild()
         return
 
     # Group by (folder_ctime, image_type)
@@ -196,7 +207,7 @@ def _do_update_versions_for_barcode(barcode, work_sess=None):
                 duplicate_mtimes=dup_ctimes,
             )
             work_sess.add(v)
-    work_sess.commit()
+    commit_rebuild()
 
 
 def _expunge_versions_and_images(work_sess=None):

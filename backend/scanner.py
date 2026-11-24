@@ -1,7 +1,8 @@
 import re, os, hashlib, datetime, uuid, logging
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from models import session, Image, ImageVersion, ScanRoot, RejectedBarcode, DeletedFolder
+from models import (session, Image, ImageVersion, ScanRoot, RejectedBarcode,
+                    DeletedFolder, PendingScanVersion)
 from thumbnail import generate_thumbnail, thumbnail_exists
 
 _log = logging.getLogger(__name__)
@@ -152,11 +153,14 @@ def get_folder_ctime(folder_path):
         return ''
 
 def file_fingerprint(filepath):
-    """Return a fast fingerprint for change detection: size_mtime.
-    Does NOT read file content — only stat()."""
+    """Return a versioned size / finest available filesystem mtime fingerprint.
+
+    Older size_seconds values mismatch once and are refreshed during the
+    next scan, without a database schema migration. Still only calls stat().
+    """
     try:
         st = os.stat(filepath)
-        return f"{st.st_size}_{int(st.st_mtime)}"
+        return f"v2:{st.st_size}:{st.st_mtime_ns}"
     except OSError:
         return ''
 
@@ -257,6 +261,7 @@ def _insert_rejected_ignore(root_id, barcode, file_path, filename, reason):
 
 def _process_thumbnail_batch(thumb_jobs, progress_callback=None, is_cancelled=None):
     """Process a batch of thumbnail jobs and write back content_md5 and phash via Core update.
+    Jobs are (image_id, path, new_fingerprint_or_none, barcode).
     Returns dict of {image_id: md5} for successful MD5 computations.
     Reports progress every 5 thumbnails when progress_callback is provided.
     Checks is_cancelled between each thumbnail when provided."""
@@ -264,25 +269,38 @@ def _process_thumbnail_batch(thumb_jobs, progress_callback=None, is_cancelled=No
         return {}
     md5_updates = {}
     phash_updates = {}
+    fingerprint_updates = {}
     total = len(thumb_jobs)
-    for i, (img_id, full_path) in enumerate(thumb_jobs):
+    for i, (img_id, full_path, new_fingerprint, _barcode) in enumerate(thumb_jobs):
         if is_cancelled and is_cancelled():
             raise ScanCancelled()
-        _, md5, phash = generate_thumbnail(img_id, full_path)
-        if md5:
+        thumb_ok, md5, phash = generate_thumbnail(img_id, full_path)
+        if new_fingerprint is None:
+            if md5:
+                md5_updates[img_id] = md5
+            if phash:
+                phash_updates[img_id] = phash
+        elif thumb_ok and md5:
+            # Advance a changed file's fingerprint only alongside its new
+            # derived data. A cancelled/failed batch leaves it discoverable
+            # as changed by the next scan, including the version rebuild.
+            fingerprint_updates[img_id] = new_fingerprint
             md5_updates[img_id] = md5
-        if phash:
-            phash_updates[img_id] = phash
+            phash_updates[img_id] = phash or ''
         # Report progress every 5 thumbnails or on the last one
         if progress_callback and (i == 0 or (i + 1) % 5 == 0 or i + 1 == total):
             progress_callback('thumbnails', thumbnail_total=total, thumbnail_current=i + 1)
+    # Do not make a partially completed batch look current after cancellation.
+    if is_cancelled and is_cancelled():
+        raise ScanCancelled()
     # Write back content_md5 and phash via Core update (lightweight, no ORM objects)
     if md5_updates or phash_updates:
-        _flush_hash_updates_core(md5_updates, phash_updates)
+        _flush_hash_updates_core(md5_updates, phash_updates,
+                                 fingerprint_updates=fingerprint_updates)
     return md5_updates
 
 
-def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
+def _flush_hash_updates_core(md5_updates, phash_updates, sess=None, *, fingerprint_updates=None):
     """Batch-write content_md5 and phash updates using Core UPDATE (no ORM objects loaded).
     If sess is provided, use it instead of the module-level session."""
     if sess is None:
@@ -299,6 +317,8 @@ def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
                 values['content_md5'] = md5_updates[img_id]
             if img_id in phash_updates:
                 values['phash'] = phash_updates[img_id]
+            if fingerprint_updates and img_id in fingerprint_updates:
+                values['md5_hash'] = fingerprint_updates[img_id]
             if values:
                 sess.execute(
                     update(Image)
@@ -376,6 +396,38 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
     local_processed = 0  # counter local to this root
     thumb_jobs = []  # accumulated between batch processing
     affected_barcodes = set()
+    unqueued_barcodes = set()
+
+    def mark_affected(barcode):
+        affected_barcodes.add(barcode)
+        unqueued_barcodes.add(barcode)
+
+    def commit_segment():
+        if unqueued_barcodes:
+            # One intent per barcode, in the same transaction as the changes.
+            # Chunk to stay under SQLite's parameter limit (two per row).
+            revision = uuid.uuid4().hex
+            barcodes = sorted(unqueued_barcodes)
+            for start in range(0, len(barcodes), 400):
+                stmt = sqlite_insert(PendingScanVersion).values([
+                    {'barcode': bc, 'revision': revision}
+                    for bc in barcodes[start:start + 400]
+                ])
+                session.execute(stmt.on_conflict_do_update(
+                    index_elements=['barcode'],
+                    set_={'revision': stmt.excluded.revision},
+                ))
+        session.commit()
+        unqueued_barcodes.clear()
+
+    def flush_thumbnail_jobs():
+        updates = _process_thumbnail_batch(
+            thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
+        for img_id, _path, _fingerprint, barcode in thumb_jobs:
+            if img_id in updates:
+                # Deferred thumbnails may be committed in a later segment.
+                mark_affected(barcode)
+        thumb_jobs.clear()
 
     _report('scan_start', current_root_path=root_path)
 
@@ -386,7 +438,7 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
             Image.scan_root_id == root_id, Image.status == 'broken'
         ).all()
         for img in broken:
-            affected_barcodes.add(img.barcode)
+            mark_affected(img.barcode)
             session.delete(img)
         broken_cleaned = len(broken)
         session.flush()
@@ -422,7 +474,7 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                     if img:
                         img.status = 'broken'
                         img.last_scan_token = scan_token
-                        affected_barcodes.add(img.barcode)
+                        mark_affected(img.barcode)
                     continue
                 if fp == img_md5:
                     # fingerprint 未变（文件大小 + mtime 均未变）
@@ -435,12 +487,12 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                         # when the status actually changes.
                         if img.status == 'broken':
                             img.status = 'active'
-                            affected_barcodes.add(img.barcode)
+                            mark_affected(img.barcode)
                         img.last_scan_token = scan_token
                         needs_hash = not img.content_md5 or not img.phash
                         needs_thumb = not thumbnail_exists(img_id)
                         if needs_hash or needs_thumb:
-                            thumb_jobs.append((img_id, full_path))
+                            thumb_jobs.append((img_id, full_path, None, img.barcode))
                     skipped += 1
                     continue
                 # fingerprint 已变 → 文件内容已变化，重新解析并更新
@@ -462,6 +514,7 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                         img = session.get(Image, img_id)
                         if img:
                             session.delete(img)
+                        mark_affected(img_barcode)
                         rejected_count += 1
                         continue
                     # Load ORM object for update
@@ -471,25 +524,27 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                     # Track both old and new barcode for version rebuild
                     old_barcode = img_barcode
                     new_barcode = reparsed['barcode']
-                    affected_barcodes.add(old_barcode)
-                    affected_barcodes.add(new_barcode)
+                    mark_affected(old_barcode)
+                    mark_affected(new_barcode)
                     img.barcode = new_barcode
-                    img.image_type = reparsed['image_type']
+                    # A rewrite at the same path is not a new classification.
+                    # Preserve edits/confirmation when it is still the same barcode.
+                    if old_barcode != new_barcode:
+                        img.image_type = reparsed['image_type']
+                        img.confirmed = reparsed['confirmed']
                     img.sequence = reparsed['sequence']
                     img.ext = reparsed['ext']
-                    img.confirmed = reparsed['confirmed']
                 else:
                     img = session.get(Image, img_id)
                     if not img:
                         continue
-                    affected_barcodes.add(img.barcode)
-                img.md5_hash = fp
+                    mark_affected(img.barcode)
                 img.file_size = new_size
                 img.folder_ctime = folder_ctime
                 img.status = 'active'
                 img.last_scan_token = scan_token
                 added += 1
-                thumb_jobs.append((img_id, full_path))
+                thumb_jobs.append((img_id, full_path, fp, img.barcode))
                 continue
 
             parsed = parse_filename(fname, fuzzy_type)
@@ -533,8 +588,8 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
             )
             session.add(img)
             session.flush()  # 获取 img.id for thumbnail
-            thumb_jobs.append((img.id, full_path))
-            affected_barcodes.add(parsed['barcode'])
+            thumb_jobs.append((img.id, full_path, None, img.barcode))
+            mark_affected(parsed['barcode'])
             added += 1
 
         # Release dir_index — memory freed for this directory
@@ -544,23 +599,21 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
         if len(thumb_jobs) >= _THUMB_BATCH_SIZE:
             if is_cancelled and is_cancelled():
                 raise ScanCancelled()
-            _process_thumbnail_batch(thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
-            thumb_jobs.clear()
+            flush_thumbnail_jobs()
 
         # Segment commit: persist this directory's results before moving on.
         # Shortens write-lock hold time, prevents WAL bloat, and preserves
         # progress if the process crashes mid-scan.
-        session.commit()
+        commit_segment()
 
     # Process remaining thumbnail jobs
     if thumb_jobs:
         if is_cancelled and is_cancelled():
             raise ScanCancelled()
-        _process_thumbnail_batch(thumb_jobs, progress_callback=_report, is_cancelled=is_cancelled)
-        thumb_jobs.clear()
+        flush_thumbnail_jobs()
 
     # Commit remaining thumbnails and any last-directory data before leftover handling
-    session.commit()
+    commit_segment()
 
     # Check cancellation before leftover handling
     if is_cancelled and is_cancelled():
@@ -587,7 +640,8 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                 (Image.last_scan_token == '')
             ).all()
         )
-        affected_barcodes.update(leftover_barcodes)
+        for barcode in leftover_barcodes:
+            mark_affected(barcode)
 
         if full_scan:
             # Batch-delete leftover records
@@ -620,7 +674,7 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                 )
 
     # Single commit for all scan results (transaction consistency)
-    session.commit()
+    commit_segment()
 
     _report('root_done', added=added, skipped=skipped,
             broken_cleaned=broken_cleaned, broken_new=leftover_count,

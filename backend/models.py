@@ -115,6 +115,13 @@ class BarcodeSetting(Base):
     default_main_ctime = Column('default_main_mtime', Text, default='')
     default_detail_ctime = Column('default_detail_mtime', Text, default='')
 
+class PendingScanVersion(Base):
+    """Durable work list for scan commits not yet reflected in ImageVersion."""
+    __tablename__ = 'pending_scan_version'
+    barcode = Column(Text, primary_key=True)
+    revision = Column(Text, nullable=False)
+
+
 class ScanLog(Base):
     __tablename__ = 'scan_log'
     id = Column(Integer, primary_key=True)
