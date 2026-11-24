@@ -152,11 +152,14 @@ def get_folder_ctime(folder_path):
         return ''
 
 def file_fingerprint(filepath):
-    """Return a fast fingerprint for change detection: size_mtime.
-    Does NOT read file content — only stat()."""
+    """Return a versioned size / finest available filesystem mtime fingerprint.
+
+    Older size_seconds values mismatch once and are refreshed during the
+    next scan, without a database schema migration. Still only calls stat().
+    """
     try:
         st = os.stat(filepath)
-        return f"{st.st_size}_{int(st.st_mtime)}"
+        return f"v2:{st.st_size}:{st.st_mtime_ns}"
     except OSError:
         return ''
 
@@ -474,10 +477,13 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                     affected_barcodes.add(old_barcode)
                     affected_barcodes.add(new_barcode)
                     img.barcode = new_barcode
-                    img.image_type = reparsed['image_type']
+                    # A rewrite at the same path is not a new classification.
+                    # Preserve edits/confirmation when it is still the same barcode.
+                    if old_barcode != new_barcode:
+                        img.image_type = reparsed['image_type']
+                        img.confirmed = reparsed['confirmed']
                     img.sequence = reparsed['sequence']
                     img.ext = reparsed['ext']
-                    img.confirmed = reparsed['confirmed']
                 else:
                     img = session.get(Image, img_id)
                     if not img:

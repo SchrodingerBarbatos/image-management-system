@@ -270,3 +270,62 @@ def test_delete_scan_root_cleans_orphan_versions(sess, monkeypatch):
     # Versions should also be cleaned up (orphan versions removed)
     remaining_versions = sess.query(ImageVersion).count()
     assert remaining_versions == 0, f"Expected 0 orphan versions, got {remaining_versions}"
+
+
+def test_scan_refreshes_legacy_fingerprint_and_preserves_current_classification(
+    sess, monkeypatch, tmp_path,
+):
+    import hashlib
+    import os
+    from PIL import Image as PillowImage
+    import scanner
+
+    monkeypatch.setattr(scanner, 'session', sess)
+    monkeypatch.setattr('thumbnail.THUMBNAIL_DIR', str(tmp_path / 'thumbnails'))
+    src = tmp_path / 'source'
+    src.mkdir()
+    path = src / '5901234123457_主图_1.png'
+    fixed_second = 1_700_000_000 * 10**9
+
+    def write_image(color, offset):
+        PillowImage.new('RGB', (32, 32), color).save(path, compress_level=0)
+        os.utime(path, ns=(fixed_second, fixed_second + offset))
+
+    write_image('red', 100_000_000)
+    root = ScanRoot(path=str(src), enabled=True, recursive=False)
+    sess.add(root)
+    sess.commit()
+    first = scanner.scan_root(root.id, full_scan=True)
+    assert first['added'] == 1
+    row = sess.query(Image).one()
+    row_id = row.id
+    initial_size = row.file_size
+    row.md5_hash = f'{initial_size}_{fixed_second // 10**9}'
+    row.image_type = 'detail'
+    row.confirmed = False
+    sess.commit()
+
+    migrated = scanner.scan_root(root.id, full_scan=False)
+    row = sess.get(Image, row_id)
+    assert migrated['added'] == 1
+    assert row.md5_hash.startswith('v2:')
+    previous_fingerprint = row.md5_hash
+    previous_md5 = row.content_md5
+    assert row.image_type == 'detail'
+    assert row.confirmed is False
+    assert scanner.scan_root(root.id, full_scan=False)['skipped'] == 1
+
+    write_image('blue', 600_000_000)
+    assert path.stat().st_size == initial_size
+    assert int(path.stat().st_mtime) == fixed_second // 10**9
+    changed = scanner.scan_root(root.id, full_scan=False)
+    row = sess.get(Image, row_id)
+    assert changed['added'] == 1
+    assert row.md5_hash != previous_fingerprint
+    assert row.content_md5 != previous_md5
+    assert row.content_md5 == hashlib.md5(path.read_bytes()).hexdigest()
+    assert row.image_type == 'detail'
+    assert row.confirmed is False
+    with PillowImage.open(tmp_path / 'thumbnails' / f'{row_id}.jpg') as thumbnail:
+        red, _, blue = thumbnail.getpixel((100, 100))
+        assert blue > 200 and red < 30

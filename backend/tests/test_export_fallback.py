@@ -579,3 +579,64 @@ def test_batch_export_default_all(client, db, images_dir, captured_builds):
 
     (args, _kw) = captured_builds.calls[0]
     assert args[3] == "all"
+
+
+@pytest.mark.parametrize('flat', [False, True])
+@pytest.mark.parametrize('export_type,source_type,expected_dir,expected_stem', [
+    ('main', 'main', '主图', '5901234123457_1'),
+    ('all', 'main', '主图', '5901234123457_1'),
+    ('all', 'detail', '详情图', '5901234123457_详情图_1'),
+    ('detail', 'detail', '详情图', '5901234123457_详情图_1'),
+    ('detail', 'main', '详情图', '5901234123457_详情图_1'),
+])
+def test_duplicate_archive_names_keep_both_files(
+    db, images_dir, flat, export_type, source_type, expected_dir, expected_stem,
+):
+    from routes.export import _plan_zip_entries
+
+    sr = ScanRoot(path=images_dir, enabled=True)
+    db.add(sr)
+    db.commit()
+    candidates = []
+    for name, data in [('a.png', b'first picture'), ('z.png', b'second picture')]:
+        path = os.path.join(images_dir, name)
+        with open(path, 'wb') as file:
+            file.write(data)
+        candidates.append((path, '5901234123457', source_type, 1, 'png', sr.id))
+
+    entries, _ = _plan_zip_entries(candidates, flat, export_type)
+    reversed_entries, _ = _plan_zip_entries(candidates[::-1], flat, export_type)
+    assert entries == reversed_entries[::-1]
+
+    task_id = _make_task(db).id
+    _run_build_zip(task_id, candidates[::-1], flat, export_type, upload_dir=images_dir)
+    task = db.get(ExportTask, task_id)
+    assert task.status == 'done'
+    stats = json.loads(task.barcode_data)['stats']
+    assert stats == {'planned_count': 2, 'written_count': 2, 'skipped_count': 0}
+    prefix = '' if flat else f'{expected_dir}/'
+    first, second = f'{prefix}{expected_stem}.png', f'{prefix}{expected_stem}_dup1.png'
+    with zipfile.ZipFile(task.zip_path) as zf:
+        assert set(zf.namelist()) == {first, second}
+        assert zf.read(first) == b'first picture'
+        assert zf.read(second) == b'second picture'
+
+
+def test_archive_names_reserve_natural_suffixes_and_ignore_case():
+    from routes.export import _unique_zip_entries
+
+    entries = [
+        ('/input/c', '主图/ABC.png', 1),
+        ('/input/d', '主图/abc.PNG', 1),
+        ('/input/a', '主图/abc.png', 1),
+        ('/input/b', '主图/ABC_dup1.PNG', 1),
+        ('/input/e', '详情图/abc.png', 1),
+    ]
+    result = dict((path, name) for path, name, _ in _unique_zip_entries(entries))
+    assert result == {
+        '/input/a': '主图/abc.png',
+        '/input/b': '主图/ABC_dup1.PNG',
+        '/input/c': '主图/ABC_dup2.png',
+        '/input/d': '主图/abc_dup3.PNG',
+        '/input/e': '详情图/abc.png',
+    }

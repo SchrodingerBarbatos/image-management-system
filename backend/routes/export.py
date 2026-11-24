@@ -164,6 +164,37 @@ def _col_letter_to_idx(s):
         idx = idx * 26 + (ord(c) - ord('A') + 1)
     return idx - 1
 
+def _unique_zip_entries(entries):
+    """Disambiguate archive names without taking any entry's original name."""
+    reserved = {arcname.casefold() for _, arcname, _ in entries}
+    if len(reserved) == len(entries):
+        return entries
+    seen_originals = set()
+    next_suffix = {}
+    result = list(entries)
+    # Prefer the same source when database row order changes. Keep result order
+    # for the caller, and split at the extension without changing any directory.
+    order = sorted(range(len(entries)), key=lambda i: (entries[i][1].casefold(), entries[i][0]))
+    for i in order:
+        file_path, arcname, root_id = entries[i]
+        key = arcname.casefold()
+        if key not in seen_originals:
+            seen_originals.add(key)
+            continue
+        stem, ext = os.path.splitext(arcname)
+        suffix = next_suffix.get(key, 1)
+        while True:
+            candidate = f'{stem}_dup{suffix}{ext}'
+            candidate_key = candidate.casefold()
+            suffix += 1
+            if candidate_key not in reserved:
+                break
+        next_suffix[key] = suffix
+        reserved.add(candidate_key)
+        result[i] = (file_path, candidate, root_id)
+    return result
+
+
 def _plan_zip_entries(img_data, flat, export_type='all'):
     """Compute the (file_path, arcname, scan_root_id) entries a ZIP export will contain.
 
@@ -228,7 +259,7 @@ def _plan_zip_entries(img_data, flat, export_type='all'):
                 arcname = display_name if flat else f"详情图/{display_name}"
             entries.append((file_path, arcname, root_id))
 
-    return entries, fallback_barcodes
+    return _unique_zip_entries(entries), fallback_barcodes
 
 
 def _index_img_data_by_path(img_data):
