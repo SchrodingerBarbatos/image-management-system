@@ -260,6 +260,7 @@ def _insert_rejected_ignore(root_id, barcode, file_path, filename, reason):
 
 def _process_thumbnail_batch(thumb_jobs, progress_callback=None, is_cancelled=None):
     """Process a batch of thumbnail jobs and write back content_md5 and phash via Core update.
+    Jobs are (image_id, path, new_fingerprint_or_none).
     Returns dict of {image_id: md5} for successful MD5 computations.
     Reports progress every 5 thumbnails when progress_callback is provided.
     Checks is_cancelled between each thumbnail when provided."""
@@ -267,25 +268,38 @@ def _process_thumbnail_batch(thumb_jobs, progress_callback=None, is_cancelled=No
         return {}
     md5_updates = {}
     phash_updates = {}
+    fingerprint_updates = {}
     total = len(thumb_jobs)
-    for i, (img_id, full_path) in enumerate(thumb_jobs):
+    for i, (img_id, full_path, new_fingerprint) in enumerate(thumb_jobs):
         if is_cancelled and is_cancelled():
             raise ScanCancelled()
-        _, md5, phash = generate_thumbnail(img_id, full_path)
-        if md5:
+        thumb_ok, md5, phash = generate_thumbnail(img_id, full_path)
+        if new_fingerprint is None:
+            if md5:
+                md5_updates[img_id] = md5
+            if phash:
+                phash_updates[img_id] = phash
+        elif thumb_ok and md5:
+            # Advance a changed file's fingerprint only alongside its new
+            # derived data. A cancelled/failed batch leaves it discoverable
+            # as changed by the next scan, including the version rebuild.
+            fingerprint_updates[img_id] = new_fingerprint
             md5_updates[img_id] = md5
-        if phash:
-            phash_updates[img_id] = phash
+            phash_updates[img_id] = phash or ''
         # Report progress every 5 thumbnails or on the last one
         if progress_callback and (i == 0 or (i + 1) % 5 == 0 or i + 1 == total):
             progress_callback('thumbnails', thumbnail_total=total, thumbnail_current=i + 1)
+    # Do not make a partially completed batch look current after cancellation.
+    if is_cancelled and is_cancelled():
+        raise ScanCancelled()
     # Write back content_md5 and phash via Core update (lightweight, no ORM objects)
     if md5_updates or phash_updates:
-        _flush_hash_updates_core(md5_updates, phash_updates)
+        _flush_hash_updates_core(md5_updates, phash_updates,
+                                 fingerprint_updates=fingerprint_updates)
     return md5_updates
 
 
-def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
+def _flush_hash_updates_core(md5_updates, phash_updates, sess=None, *, fingerprint_updates=None):
     """Batch-write content_md5 and phash updates using Core UPDATE (no ORM objects loaded).
     If sess is provided, use it instead of the module-level session."""
     if sess is None:
@@ -302,6 +316,8 @@ def _flush_hash_updates_core(md5_updates, phash_updates, sess=None):
                 values['content_md5'] = md5_updates[img_id]
             if img_id in phash_updates:
                 values['phash'] = phash_updates[img_id]
+            if fingerprint_updates and img_id in fingerprint_updates:
+                values['md5_hash'] = fingerprint_updates[img_id]
             if values:
                 sess.execute(
                     update(Image)
@@ -443,7 +459,7 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                         needs_hash = not img.content_md5 or not img.phash
                         needs_thumb = not thumbnail_exists(img_id)
                         if needs_hash or needs_thumb:
-                            thumb_jobs.append((img_id, full_path))
+                            thumb_jobs.append((img_id, full_path, None))
                     skipped += 1
                     continue
                 # fingerprint 已变 → 文件内容已变化，重新解析并更新
@@ -489,13 +505,12 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
                     if not img:
                         continue
                     affected_barcodes.add(img.barcode)
-                img.md5_hash = fp
                 img.file_size = new_size
                 img.folder_ctime = folder_ctime
                 img.status = 'active'
                 img.last_scan_token = scan_token
                 added += 1
-                thumb_jobs.append((img_id, full_path))
+                thumb_jobs.append((img_id, full_path, fp))
                 continue
 
             parsed = parse_filename(fname, fuzzy_type)
@@ -539,7 +554,7 @@ def _do_scan(root, root_id, full_scan, progress_callback, processed_offset=0,
             )
             session.add(img)
             session.flush()  # 获取 img.id for thumbnail
-            thumb_jobs.append((img.id, full_path))
+            thumb_jobs.append((img.id, full_path, None))
             affected_barcodes.add(parsed['barcode'])
             added += 1
 

@@ -164,14 +164,25 @@ def _col_letter_to_idx(s):
         idx = idx * 26 + (ord(c) - ord('A') + 1)
     return idx - 1
 
+_ZIP_SEQUENCE_RE = re.compile(r'(.*_)([0-9]+)(\.[^.]+)')
+_MAX_IMAGE_SEQUENCE = (1 << 63) - 1  # SQLite INTEGER range.
+
+
 def _unique_zip_entries(entries):
-    """Disambiguate archive names without taking any entry's original name."""
+    """Resolve collisions with numeric sequences that future scans can read."""
     reserved = {arcname.casefold() for _, arcname, _ in entries}
     if len(reserved) == len(entries):
         return entries
     seen_originals = set()
     next_suffix = {}
     result = list(entries)
+    sequence_parts = [_ZIP_SEQUENCE_RE.fullmatch(arcname) for _, arcname, _ in entries]
+    used_sequences = {}
+    for parts in sequence_parts:
+        if parts:
+            prefix, number, _ = parts.groups()
+            used_sequences.setdefault(prefix.casefold(), set()).add(int(number))
+    next_sequences = {key: max(numbers) + 1 for key, numbers in used_sequences.items()}
     # Prefer the same source when database row order changes. Keep result order
     # for the caller, and split at the extension without changing any directory.
     order = sorted(range(len(entries)), key=lambda i: (entries[i][1].casefold(), entries[i][0]))
@@ -181,16 +192,31 @@ def _unique_zip_entries(entries):
         if key not in seen_originals:
             seen_originals.add(key)
             continue
-        stem, ext = os.path.splitext(arcname)
-        suffix = next_suffix.get(key, 1)
-        while True:
-            candidate = f'{stem}_dup{suffix}{ext}'
-            candidate_key = candidate.casefold()
-            suffix += 1
-            if candidate_key not in reserved:
-                break
-        next_suffix[key] = suffix
-        reserved.add(candidate_key)
+        parts = sequence_parts[i]
+        if parts:
+            prefix, _, ext = parts.groups()
+            group = prefix.casefold()
+            used = used_sequences[group]
+            sequence = next_sequences[group]
+            if sequence > _MAX_IMAGE_SEQUENCE:
+                sequence = 1
+            while sequence in used:
+                sequence += 1
+            next_sequences[group] = sequence + 1
+            used.add(sequence)
+            candidate = f'{prefix}{sequence}{ext}'
+        else:
+            # Nonconforming legacy names cannot already be re-imported.
+            # Still preserve both original files if such data reaches export.
+            stem, ext = os.path.splitext(arcname)
+            suffix = next_suffix.get(key, 1)
+            while True:
+                candidate = f'{stem}_dup{suffix}{ext}'
+                suffix += 1
+                if candidate.casefold() not in reserved:
+                    break
+            next_suffix[key] = suffix
+        reserved.add(candidate.casefold())
         result[i] = (file_path, candidate, root_id)
     return result
 

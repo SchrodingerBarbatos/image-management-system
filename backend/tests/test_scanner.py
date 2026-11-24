@@ -329,3 +329,89 @@ def test_scan_refreshes_legacy_fingerprint_and_preserves_current_classification(
     with PillowImage.open(tmp_path / 'thumbnails' / f'{row_id}.jpg') as thumbnail:
         red, _, blue = thumbnail.getpixel((100, 100))
         assert blue > 200 and red < 30
+
+
+@pytest.mark.parametrize('stop_phase', ['before_thumbnail', 'after_thumbnail'])
+def test_legacy_rewrite_cancel_resumes_thumbnail_hash_and_version(
+    sess, monkeypatch, tmp_path, stop_phase,
+):
+    import hashlib
+    from PIL import Image as PillowImage
+    import scanner
+    from models import ImageVersion
+    from versioning import compute_content_hash, update_versions_for_barcode
+
+    monkeypatch.setattr(scanner, 'session', sess)
+    thumb_dir = tmp_path / 'thumbnails'
+    monkeypatch.setattr('thumbnail.THUMBNAIL_DIR', str(thumb_dir))
+    source_dir = tmp_path / 'source'
+    source_dir.mkdir()
+    barcode = '5901234123457'
+    source = source_dir / f'{barcode}_主图_1.png'
+    fixed_second = 1_700_000_000 * 10**9
+
+    def write_image(color, offset):
+        PillowImage.new('RGB', (32, 32), color).save(source, compress_level=0)
+        os.utime(source, ns=(fixed_second, fixed_second + offset))
+
+    write_image('red', 100_000_000)
+    root = ScanRoot(path=str(source_dir), enabled=True, recursive=False)
+    sess.add(root)
+    sess.commit()
+    root_id = root.id
+    scanner.scan_root(root_id, full_scan=True)
+    row = sess.query(Image).one()
+    row_id = row.id
+    old_digest = row.content_md5
+    old_size = row.file_size
+    old_fp = f'{old_size}_{fixed_second // 10**9}'
+    row.md5_hash = old_fp
+    row.image_type = 'detail'
+    sess.commit()
+    update_versions_for_barcode(barcode, sess=sess)
+    old_version_hash = sess.query(ImageVersion).one().content_hash
+    thumb_path = thumb_dir / f'{row_id}.jpg'
+    old_thumbnail = thumb_path.read_bytes()
+
+    write_image('blue', 600_000_000)
+    assert source.stat().st_size == old_size
+    assert int(source.stat().st_mtime) == fixed_second // 10**9
+    expected_digest = hashlib.md5(source.read_bytes()).hexdigest()
+    assert expected_digest != old_digest
+
+    cancel_at_batch_start = iter([False, True])
+    stop_requested = False
+
+    def is_cancelled():
+        if stop_phase == 'before_thumbnail':
+            return next(cancel_at_batch_start)
+        return stop_requested
+
+    def progress(phase, **kwargs):
+        nonlocal stop_requested
+        if stop_phase == 'after_thumbnail' and phase == 'thumbnails':
+            stop_requested = True
+
+    with pytest.raises(scanner.ScanCancelled):
+        scanner.scan_root(root_id, progress_callback=progress, is_cancelled=is_cancelled)
+    cancelled = sess.get(Image, row_id)
+    assert cancelled.md5_hash == old_fp and cancelled.content_md5 == old_digest
+    assert sess.query(ImageVersion).one().content_hash == old_version_hash
+    if stop_phase == 'before_thumbnail':
+        assert thumb_path.read_bytes() == old_thumbnail
+
+    resumed = scanner.scan_root(root_id)
+    assert resumed['added'] == 1 and resumed['affected_barcodes'] == [barcode]
+    refreshed = sess.get(Image, row_id)
+    assert refreshed.md5_hash == scanner.file_fingerprint(source)
+    assert refreshed.content_md5 == expected_digest
+    assert refreshed.image_type == 'detail' and refreshed.confirmed
+    for changed_barcode in resumed['affected_barcodes']:
+        update_versions_for_barcode(changed_barcode, sess=sess)
+    version = sess.query(ImageVersion).one()
+    assert version.image_type == 'detail' and version.is_latest
+    assert version.content_hash == compute_content_hash([refreshed]) != old_version_hash
+    with PillowImage.open(thumb_path) as thumbnail:
+        red, _, blue = thumbnail.getpixel((100, 100))
+        assert blue > 200 and red < 30
+    assert scanner.scan_root(root_id)['skipped'] == 1
